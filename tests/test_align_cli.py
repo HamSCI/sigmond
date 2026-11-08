@@ -3890,6 +3890,35 @@ class AlignHostLineTests(unittest.TestCase):
             line = smd._align_host_line("v3.53", path=p, version_path=Path(d) / "none")
         self.assertNotIn("tunnel:", line)
 
+    def test_repo_install_without_a_host_record_names_no_pm_align(self):
+        # A bare-metal repo install (sigma, AC0G-B1/B2) has no Proxmox host;
+        # telling its operator to "run pm-align on the host" sends them after
+        # a machine that does not exist (2026-11-08, two-layer design §1).
+        with tempfile.TemporaryDirectory() as d:
+            line = smd._align_host_line("v3.85", path=Path(d) / "absent",
+                                        version_path=Path(d) / "none", appliance=False)
+        self.assertNotIn("pm-align", line)
+        self.assertIn("host: none", line)
+        self.assertIn("no Proxmox host", line)
+
+    def test_repo_install_with_a_host_record_reports_it_and_the_missing_marker(self):
+        # An appliance VM that lost its marker but still holds pm-align's
+        # record: say both facts, never silently drop the host.
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "host-aligned.json"
+            p.write_text('{"release": "v3.85", "at": "t"}')
+            line = smd._align_host_line("v3.85", path=p, version_path=Path(d) / "none",
+                                        appliance=False)
+        self.assertIn("host: v3.85 (pm-align", line)
+        self.assertIn("no image marker", line)
+
+    def test_cmd_align_passes_the_install_kind_to_the_host_line(self):
+        with mock.patch("sigmond.provenance.is_appliance_install", return_value=False):
+            rc, out = run({"sigmond": "daba1f6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
+                          recorded="v3.53")
+        host = next(l for l in out.splitlines() if l.strip().startswith("host:"))
+        self.assertNotIn("pm-align", host)
+
     def test_cmd_align_dry_run_prints_the_host_line_after_the_summary(self):
         rc, out = run({"sigmond": "daba1f6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
                       recorded="v3.53")

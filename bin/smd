@@ -6317,7 +6317,8 @@ def _align_aligned_live():
 
 
 def _align_host_line(release_tag, path=Path('/etc/sigmond-appliance/host-aligned.json'),
-                     version_path=Path('/etc/sigmond-appliance/version')) -> str:
+                     version_path=Path('/etc/sigmond-appliance/version'),
+                     appliance: bool = True) -> str:
     """The Proxmox host's level as the VM knows it: pm-align's record, pushed
     in by pm-align itself (``push_record``, scripts/proxmox/pm-align.py);
     failing that, the install-time version (the wizard stamps it in). The
@@ -6326,7 +6327,14 @@ def _align_host_line(release_tag, path=Path('/etc/sigmond-appliance/host-aligned
     The record's own ``tunnel`` field (pm-align's write_record/
     _merge_tunnel_result) is appended when it names something worth a
     look -- anything other than the quiet values applied/current/skipped/
-    n/a (and its absence, on an older record)."""
+    n/a (and its absence, on an older record).
+
+    ``appliance`` is `provenance.is_appliance_install()`.  A repo install on
+    the operator's own machine (sigma, AC0G-B1/B2) has no Proxmox host, so
+    without pm-align's record it says so instead of sending the operator to
+    run pm-align on a host that does not exist; with a record (an appliance
+    VM that lost its marker) it reports the record and the missing marker
+    (two-layer design, 2026-11-08 §1, decision 2)."""
     import json
     _QUIET_TUNNEL = ('applied', 'current', 'skipped', 'n/a')
     try:
@@ -6338,9 +6346,13 @@ def _align_host_line(release_tag, path=Path('/etc/sigmond-appliance/host-aligned
             tunnel = doc.get('tunnel')
             if tunnel is not None and tunnel not in _QUIET_TUNNEL:
                 tail += f' — tunnel: {tunnel}'
+            if not appliance:
+                tail += ' — note: no image marker on this machine'
             return f'  host: {rel} (pm-align {at}){tail}'
     except (OSError, ValueError):
         pass
+    if not appliance:
+        return '  host: none — a repo install on this machine; no Proxmox host to align'
     try:
         v = version_path.read_text().strip() or '?'
     except OSError:
@@ -8290,7 +8302,8 @@ def cmd_align(args) -> int:
           f"{counts['stray']} stray, "
           f"{len(stale)} file{'s' if len(stale) != 1 else ''} to refresh, "
           f"{stale_now} service{'s' if stale_now != 1 else ''} to restart")
-    print(_align_host_line(rel.tag))
+    from sigmond.provenance import is_appliance_install
+    print(_align_host_line(rel.tag, appliance=is_appliance_install()))
     if unverified:
         names = ', '.join(f['path'] for f in unverified)
         print(f"  {len(unverified)} file{'s' if len(unverified) != 1 else ''} "
