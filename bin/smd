@@ -1273,7 +1273,7 @@ _JT9_DECODE_SRC = Path('/opt/git/sigmond/psk-recorder/vendor/jt9-decode')
 # into an arithmetic contract we did not write.  Contrast _build_wsjtx_decoders,
 # where the lesson was to KEEP an upstream flag; here it is to add none.
 _UBERSDR_REPO   = 'https://github.com/madpsy/ubersdr_wsprd.git'
-_UBERSDR_COMMIT = '529ec5d2530f5ffc2ad4a73a3be6c10c0a8b4027'   # 2026-10-22; parity-checked on B3 2026-10-24
+_UBERSDR_COMMIT = '8719788abb7718412a77ba85d0d4d6c717d1a58e'   # 2026-11-07 madpsy main (PR #4: MSK144 speed-ups + F32 I/Q); parity-checked on the devbox 2026-11-08, field-tested at UACNJ 11-08
 _UBERSDR_SRC    = Path('/opt/git/sigmond/ubersdr_wsprd')
 
 # Both decoder implementations live here; /usr/local/bin/{wsprd,jt9} are
