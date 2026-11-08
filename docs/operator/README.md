@@ -28,8 +28,9 @@ the contents page; unfamiliar words are in the [glossary](glossary.md).
 - **Your job.** Keep it powered, keep the cable in, glance at one page a week,
   and tell your fleet admin when something goes wrong. No Linux experience
   needed: one USB stick installs it all, and every command you need is here.
-- **If you are *not* installing from the appliance USB image** — building from
-  source, changing code — you are a contributor: see [CONTRIBUTING.md](../../CONTRIBUTING.md).
+- **If you are *not* installing from the appliance USB image** — putting a station on a
+  Linux machine you already run — follow [install-bare-metal.md](../install-bare-metal.md).
+  Changing sigmond's code makes you a contributor: see [CONTRIBUTING.md](../../CONTRIBUTING.md).
 
 ## The path
 

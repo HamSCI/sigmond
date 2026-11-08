@@ -1,5 +1,9 @@
 # Greenfield install runbook — bare host to recording station
 
+> **Superseded as the starting point (2026-11-08).**  For a bare-metal install, start at
+> [install-bare-metal.md](install-bare-metal.md): `smd bringup` now does the phases below in one
+> command.  This runbook stays as the reference for doing them by hand.
+
 The end-to-end **operational** walkthrough: from a freshly-`install.sh`'d host
 to a tuned, validated SDR node recording and uploading. This picks up where the
 install docs stop (they end at "install a component") and documents the *order*
@@ -214,7 +218,12 @@ Manual extras:
   cores too — the thermal win measured at K6FOD (84 → 62 C, zero drops).
   Usually unnecessary on a cool host: radiod cores default to hardware max, and
   capping decoder cores only spends their slack.
-- **`isolcpus` (optional, needs a reboot)** — kernel-level isolation of the
+- **`isolcpus` (optional, needs a reboot)** — bring-up now stages this itself: on an image-built
+  host it writes the line; on a repo install it prints it and writes it only when
+  `[cpu_affinity] write_kernel_isolation = true` sits in `/etc/sigmond/topology.toml`
+  ([install-bare-metal.md](install-bare-metal.md) §3).  The line it writes carries
+  `isolcpus`, `nohz_full` and `rcu_nocbs`, which supersedes the advice below to omit
+  `nohz_full`.  The hand method, for reference: kernel-level isolation of the
   radiod cores. Incremental over the affinity isolation (which already passes
   validate): it stops kernel threads/IRQs/stray tasks from *ever* touching those
   cores. Stage it in GRUB:

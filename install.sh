@@ -30,10 +30,10 @@
 #  10. Builds /opt/git/sigmond/sigmond/venv with sigmond[tui] (Textual + Rich)
 #  11. Symlinks bin/smd into /usr/local/bin/smd (on every user's PATH)
 #
-# After this script completes, run:
-#   smd install               — CLI: install all catalog components
-#   smd install wspr-recorder — CLI: install one component
-#   smd tui                   — TUI: browse and install components
+# After this script completes, bring the station up with one command:
+#   smd bringup dasi2 --callsign <CALL> --grid <GRID> --reporter <ID>
+# (docs/install-bare-metal.md walks every step).  Piece by piece instead:
+#   smd install / smd install <component> / smd tui
 #
 # Note: the sigmond group membership applies to sessions started AFTER
 # install.sh.  Open a new shell (or `newgrp sigmond`) before editing
@@ -1401,30 +1401,18 @@ fi
 # ─── done ─────────────────────────────────────────────────────────────────────
 echo
 echo -e "${BOLD}${GREEN}╔═══════════════════════════════════════════════════════╗${NC}"
-echo -e "${BOLD}${GREEN}║   Sigmond is installed!  Next: open the TUI.          ║${NC}"
+echo -e "${BOLD}${GREEN}║   Sigmond is installed!  Next: bring up the station.  ║${NC}"
 echo -e "${BOLD}${GREEN}╚═══════════════════════════════════════════════════════╝${NC}"
 echo
-echo -e "  ${BOLD}Open the configuration workflow:${NC}"
-echo -e "    smd tui"
+echo -e "  Open a new shell first (or: newgrp sigmond), then, as yourself (never sudo):"
+echo -e "    ${BOLD}smd bringup dasi2 --callsign <CALL> --grid <GRID> --reporter <ID>${NC}"
+echo -e "  Add --dry-run to see every step first.  The first run may take up to an"
+echo -e "  hour while radiod plans its FFTs, and uploads stay held until you run"
+echo -e "  'smd sink upload'."
 echo
-echo -e "  Walk the Installation section top to bottom — that's the"
-echo -e "  greenfield workflow:"
-echo -e "    1. ${BOLD}Topology${NC}        — pick which catalog components to deploy"
-echo -e "                            on this host.  The Detected column"
-echo -e "                            says yes/no/— per row to inform you."
-echo -e "    2. ${BOLD}Software versions${NC} — check what's installed and at which commit."
-echo -e "    3. ${BOLD}Install${NC}         — build + install the enabled components."
-echo -e "    4. ${BOLD}SDR inventory${NC}   — verify hardware enumeration before"
-echo -e "                            radiod runs against it."
-echo -e "    5. ${BOLD}Configuration${NC}   — create per-reporter instances for each"
-echo -e "                            client (reporter ID, source, …)."
-echo -e "    6. ${BOLD}CPU affinity${NC}    — pin radiod to dedicated cores (only if"
-echo -e "                            this host is running radiod)."
-echo -e "    7. ${BOLD}CPU frequency${NC}   — same — cap non-radiod cores to save power."
+echo -e "  Step by step: /opt/git/sigmond/sigmond/docs/install-bare-metal.md"
+echo -e "  Decode-only host (radiods on other machines): smd bringup client --help"
 echo
-echo -e "  ${BOLD}CLI shortcuts${NC} (power users):"
-echo -e "    smd bringup --dry-run        a whole station in one command (see README)"
-echo -e "    smd install                  install everything topology-enabled"
-echo -e "    smd install <component>      install one"
-echo -e "    smd component list --catalog browse the catalog"
+echo -e "  Piece by piece instead: smd tui (Installation section), or"
+echo -e "    smd install [<component>]    smd component list --catalog"
 echo

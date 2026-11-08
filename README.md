@@ -15,6 +15,16 @@ between them: installation, service lifecycle, log aggregation,
 diagnostics, timing-authority distribution, the shared SQLite sink, and
 resource (CPU) arbitration.
 
+## Install a station
+
+Two ways, both current:
+
+- **A dedicated mini-PC, from the USB image.**  The image turns the machine into a Proxmox host
+  with the station in a VM; you answer a few questions and it does the rest.  Follow
+  [sigmond-appliance INSTALL.md](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md).
+- **A Linux machine you already run (bare metal).**  Sigmond installs from these repositories onto
+  your own Debian.  Follow [docs/install-bare-metal.md](docs/install-bare-metal.md).
+
 > **Who are you?** Station host → [Operator guide](docs/operator/README.md) ·
 > Scientist wanting a signal recorded → [Scientist guide](docs/scientist/README.md) ·
 > Developer → [CONTRIBUTING.md](CONTRIBUTING.md). Full map: [docs/README.md](docs/README.md).
@@ -65,6 +75,10 @@ Full list with models, what is optional, and what B4 runs:
 - chrony (for time-standard work)
 
 ## Quick start
+
+These are the bare-metal steps with their details; [docs/install-bare-metal.md](docs/install-bare-metal.md)
+puts them in order with what each does to your machine.  For the USB image, see
+[Install a station](#install-a-station).
 
 ### 1. Install sigmond
 

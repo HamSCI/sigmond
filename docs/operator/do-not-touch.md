@@ -126,7 +126,8 @@ Adding a core in the GUI does not add capacity — it invalidates the map. Note
 that the isolation is done entirely with pinning and systemd CPU affinity: there
 is no `isolcpus` on either fleet station's kernel command line (`/proc/cmdline`,
 live 2026-08-23), and guest-kernel isolation was tried and reverted for making
-things worse.
+things worse.  (Since then bring-up has come to stage an `isolcpus` drop-in on image-built
+hosts, so check `/proc/cmdline` before relying on this sentence.)
 
 **The grid square is the one wrong answer nobody catches.** Every other mistake
 on this page eventually produces a symptom. A station reporting from the grid
