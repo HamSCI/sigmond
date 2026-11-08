@@ -405,3 +405,50 @@ def test_host_payload_with_frpc_and_legacy_ca_stays_ready_without_installer(tmp_
     script = rr.host(tmp_path, tiers="", frpc=True) + 'rac_payload_ready; echo rc=$?\n'
     r = sh(script, tmp_path, {"SIGMOND_RAC_PAYLOAD_DIRS": str(d)})
     assert not ran.exists() and "rc=0" in r.stdout, r.stdout + r.stderr
+
+
+# -- a bare-metal station with more than one radiod ---------------------------
+
+def test_station_extra_page_dials_its_own_service(tmp_path):
+    reg = rr.Registrar(reply=STATION_REPLY)
+    try:
+        r = sh(pre(tmp_path, reg.port, station=True) + "rac_register fresh\n", tmp_path,
+               {"SIGMOND_RAC_KA9Q_WEBS": "AC0G-SIGMA 8081\nAC0G-2 8084\n"})
+    finally:
+        reg.close()
+    assert r.returncode == 0, r.stdout + r.stderr
+    toml = (tmp_path / "frpc-host-gw2.toml").read_text()
+    assert proxies(toml) == [
+        {"name": "AC0G-SIGMA-vm-ssh", "local": 22, "remote": 35817},
+        {"name": "AC0G-SIGMA-vm-web", "local": 8081, "remote": 45817},
+        {"name": "AC0G-SIGMA-vm-web2", "local": 8084, "remote": 46817},
+        {"name": "AC0G-SIGMA-vm-station", "local": 8000, "remote": 48817},
+        {"name": "AC0G-SIGMA-vm-gmag", "local": 8082, "remote": 49817}]
+    import tomllib
+    px = {p["name"]: p for p in tomllib.loads(toml)["proxies"]}
+    assert px["AC0G-SIGMA-vm-web2"]["localIP"] == "127.0.0.1"        # bare metal: its own service
+    assert px["AC0G-SIGMA-vm-web"]["metadatas"]["radiod"] == "AC0G-SIGMA"
+    assert px["AC0G-SIGMA-vm-web2"]["metadatas"]["radiod"] == "AC0G-2"
+
+
+def test_station_reads_its_pages_from_ka9q_web_units(tmp_path):
+    # The real discovery, on this machine: the primary page's radiod and port
+    # come from ka9q-web.service's command line, every other page from the
+    # ka9q-web@<radiod> env files `smd install ka9q-web` writes.
+    envd = tmp_path / "ka9q-web"
+    envd.mkdir()
+    (envd / "KFS-SE.env").write_text("KA9Q_WEB_STATUS=KFS-SE-status.local\nKA9Q_WEB_PORT=8084\n")
+    (envd / "KFS-X.env").write_text("# no port line yet\n")
+    (envd / "KFS-Y.env").write_text("KA9Q_WEB_STATUS=KFS-Y-status.local\nKA9Q_WEB_PORT=8085\n")
+    body = (pre(tmp_path, 1, station=True)
+            + "systemctl(){ case \"$1\" in show) echo '{ path=/usr/local/sbin/ka9q-web ; "
+              "argv[]=/usr/local/sbin/ka9q-web -m KFS-NW-status.local -p 8081 ; ignore_errors=no }' ;; esac; }\n"
+            + "rac_ka9q_webs\n")
+    r = sh(body, tmp_path, {"SIGMOND_KA9Q_WEB_ENV_DIR": str(envd)})
+    assert r.stdout == "KFS-NW 8081\nKFS-SE 8084\nKFS-Y 8085\n", r.stdout + r.stderr
+
+
+def test_station_without_a_ka9q_web_unit_still_names_the_primary_port(tmp_path):
+    body = pre(tmp_path, 1, station=True) + "rac_ka9q_webs\n"
+    r = sh(body, tmp_path, {"SIGMOND_KA9Q_WEB_ENV_DIR": str(tmp_path / "absent")})
+    assert r.stdout == "- 8081\n", r.stdout + r.stderr

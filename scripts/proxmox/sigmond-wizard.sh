@@ -130,6 +130,16 @@ RAC_BASE_HSSH=50800;  RAC_BASE_HUI=55800
 # reusing those would mislabel these as ka9q-web instances.  Both sit inside
 # 35800-59999, which is what makes them shareable rather than mesh-only.
 RAC_BASE_VMSTN=48800; RAC_BASE_VMGMAG=49800
+# A decoder that runs more than one radiod serves one ka9q-web page per radiod
+# (ka9q-web.service on 8081 for the first, ka9q-web@<radiod> for the rest).
+# Each extra page gets a channel of its own on the bands gw2 already keeps for
+# a site's 2nd and 3rd ka9q-web (the registrar's vm_web2/vm_web3), and every
+# web channel names its radiod as per-proxy metadata (`radiod`), which the RAC
+# page shows as the link text -- rob, 2026-11-08, looking at KFS-SE-NW: "now
+# that that one PM can support multiple radiods, I'd like to have both of them
+# listed, a link to both of them ... next to each other".  No band exists for
+# a 4th page.
+RAC_BASE_VMWEB2=46800; RAC_BASE_VMWEB3=47800
 # The login each ssh proxy advertises to the gateway, as per-proxy metadata
 # (`user`).  The RAC dashboard on the gateway builds its ssh command from it,
 # so nobody types the account name into the dashboard per station (Rob,
@@ -648,6 +658,33 @@ $RAC_TIERS
 TIEREOF
 }
 
+rac_ka9q_webs(){
+    # One line per ka9q-web page the decoder serves, "<radiod> <port>": first
+    # the primary (ka9q-web.service; "-" when its command line names no
+    # radiod), then every ka9q-web@<radiod> instance, in name order, from the
+    # env files `smd install ka9q-web` writes.  On a Proxmox host the question
+    # crosses to the VM through the guest agent (nothing but ASCII, see
+    # gexec); on bare metal it is asked of this machine.  Empty when the VM
+    # cannot be asked: the tunnel then carries the six channels it always has.
+    # SIGMOND_RAC_KA9Q_WEBS is a test knob: its lines stand in for the answer.
+    if [ -n "${SIGMOND_RAC_KA9Q_WEBS:-}" ]; then
+        printf '%s\n' "$SIGMOND_RAC_KA9Q_WEBS"
+        return 0
+    fi
+    local _q
+    _q='d=${SIGMOND_KA9Q_WEB_ENV_DIR:-/etc/sigmond/ka9q-web}
+systemctl show -p ExecStart --value ka9q-web.service 2>/dev/null | sed -n "s/.* -m \([^ ]*\)-status\.local.* -p \([0-9][0-9]*\).*/\1 \2/p" | head -1 | grep . || echo "- 8081"
+for f in "$d"/*.env; do [ -f "$f" ] || continue; p=$(sed -n "s/^KA9Q_WEB_PORT=//p" "$f" | head -1); [ -n "$p" ] && echo "$(basename "$f" .env) $p"; done
+true'
+    if [ "${RAC_MODE:-host}" = station ]; then
+        ( eval "$_q" ) 2>/dev/null      # a subshell: the caller's variables stay as they are
+    else
+        [ -n "${VMID:-}" ] && command -v qm >/dev/null 2>&1 || return 0
+        guest_out 20 "$_q"
+    fi
+    return 0
+}
+
 rac_write_config(){
     # Turn one registration ($REG, from rac_ladder) into this host's tunnel
     # configuration and its marks.  It leaves RACN, SRV and the four gateway
@@ -662,6 +699,49 @@ rac_write_config(){
     # construction, so deriving is the same rule, applied here.
     P_VMSTN=$((RAC_BASE_VMSTN+RACN))
     P_VMGMAG=$((RAC_BASE_VMGMAG+RACN))
+    # The decoder's ka9q-web pages, asked ONCE (the guest agent is slow), then
+    # written into every gateway's config: the primary page's radiod as
+    # metadata on vm-web, and one channel per extra page right after it.  A
+    # 2nd page has no relay; it dials the VM on the host-only /30 directly --
+    # the address the relay itself tries first since v3.44 (vm-port-relay.py).
+    # Bare metal dials its own service.  A page on the primary's port is the
+    # primary, not a 2nd page.
+    local _webs _wline _wname _wport _wi=0 _wprimary="" _web_meta="" _web_extra="" _wip _wbase _wentry
+    _webs=$(rac_ka9q_webs)
+    _wip=127.0.0.1
+    [ "${RAC_MODE:-host}" = station ] || _wip=$(mgmt_vm_ip)
+    while IFS= read -r _wline; do
+        _wname=${_wline%% *}; _wport=${_wline#* }
+        [ -n "$_wname" ] && [ "$_wport" != "$_wline" ] || continue
+        case "$_wport" in *[!0-9]*|'') continue ;; esac
+        # the name lands inside a TOML string: anything but a plain radiod id is no name
+        case "$_wname" in *[!A-Za-z0-9_.-]*) _wname="-" ;; esac
+        _wi=$((_wi+1))
+        if [ "$_wi" = 1 ]; then
+            _wprimary=$_wport
+            [ "$_wname" != "-" ] && _web_meta="
+[proxies.metadatas]
+radiod = \"$_wname\""
+            continue
+        fi
+        [ "$_wport" = "$_wprimary" ] && continue
+        case "$_wi" in
+            2) _wbase=$RAC_BASE_VMWEB2 ;;
+            3) _wbase=$RAC_BASE_VMWEB3 ;;
+            *) say "  no gateway band for a 4th ka9q-web page ($_wname on port $_wport); it is not tunnelled"
+               continue ;;
+        esac
+        _wentry=$(printf '[[proxies]]\nname = "%s-vm-web%s"\ntype = "tcp"\nlocalIP = "%s"\nlocalPort = %s\nremotePort = %s' \
+                  "$SITE" "$_wi" "$_wip" "$_wport" "$((_wbase+RACN))")
+        [ "$_wname" != "-" ] && _wentry="$_wentry
+[proxies.metadatas]
+radiod = \"$_wname\""
+        _web_extra="$_web_extra
+
+$_wentry"
+    done <<WEBSEOF
+$_webs
+WEBSEOF
     # transport follows the tier that actually answered: a secure tier pins
     # the fleet CA, opportunistic (opp) encrypts without pinning (server cert
     # is self-signed — vpn.hamsci.org today), and an unsecured one has no TLS.
@@ -734,7 +814,7 @@ name = "${SITE}-vm-web"
 type = "tcp"
 localIP = "127.0.0.1"
 localPort = 8081
-remotePort = $P_VMWEB
+remotePort = $P_VMWEB${_web_meta}${_web_extra}
 
 [[proxies]]
 name = "${SITE}-vm-station"
@@ -799,7 +879,7 @@ name = "$SITE-vm-web"
 type = "tcp"
 localIP = "127.0.0.1"
 localPort = 12223
-remotePort = $P_VMWEB
+remotePort = $P_VMWEB${_web_meta}${_web_extra}
 
 [[proxies]]
 name = "$SITE-vm-station"

@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond d504c56 in sigmond-appliance v3.71 (d243d81, image sha256 3000f44c…) — the image rig's nested install, and a hardware install on AC0G-B4 on 2026-10-13 and 14: off from the station and through the tunnel, a power cycle while off, on from the console, an identity restore, and an eighteen-minute uplink outage (`tasks/plan-remote-access.md`, "v3.71 hardware proof").
+> **Verified against:** sigmond a8b5f31 + the multi-radiod web channels on 2026-11-08 — the channel table against `rac_write_config` (tests/test_wizard_rac_register.py renders the 2nd/3rd page channels; KFS-SE-NW and KFS-OMNI-SW carry vm-web2 by hand on gw2 pending the rollout). Earlier: sigmond d504c56 in sigmond-appliance v3.71 (d243d81, image sha256 3000f44c…) — the image rig's nested install, and a hardware install on AC0G-B4 on 2026-10-13 and 14: off from the station and through the tunnel, a power cycle while off, on from the console, an identity restore, and an eighteen-minute uplink outage (`tasks/plan-remote-access.md`, "v3.71 hardware proof").
 > **Canonical for:** remote access (RAC) — what it is, what it exposes, how the operator switches it, how the admin connects
 
 Every Sigmond station registers for remote access when it installs, and its
@@ -123,6 +123,22 @@ the complete list.
 | **magnetometer** | the magnetometer dashboard (port 8082 on the VM) | 49800 + your RAC number |
 | **host ssh** | a command line on the Proxmox `[host]`, as `root` | 50800 + your RAC number |
 | **host UI** | the Proxmox web GUI (port 8006 on the host) | 55800 + your RAC number |
+
+A decoder that runs **more than one radiod** serves a ka9q-web page per radiod
+(`ka9q-web@<radiod>`, see `smd install ka9q-web`), and the tunnel adds a
+channel for each extra page — two at most, on the bands the wsprdaemon gateway
+keeps for a site's second and third ka9q-web. Every web channel names its
+radiod, and the RAC page shows the pages side by side, labelled by radiod.
+
+| channel | what it reaches | gateway port |
+|---|---|---|
+| **VM web, 2nd radiod** | the second radiod's ka9q-web page (its own port on the VM) | 46800 + your RAC number |
+| **VM web, 3rd radiod** | the third radiod's ka9q-web page | 47800 + your RAC number |
+
+The host asks the VM for its pages when it registers, so a radiod added later
+is not tunnelled until the registration is redone: run
+`sigmond-setup --rac-register` on the host once the new radiod's ka9q-web is
+up. A fourth page has no band and is left out; the wizard says so.
 
 (Source: `sigmond/scripts/proxmox/sigmond-wizard.sh`, the `RAC_BASE_*` values,
 and each station's `/etc/sigmond/frpc-host.toml`. The console panel on the
