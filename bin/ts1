@@ -27,6 +27,10 @@ for p in $GLOB; do
     [ -e "$p" ] && port=$(readlink -f "$p") && break
 done
 [ -n "$port" ] || RC=1 die "no TS-1 TimeSync on the USB bus (no Adafruit Trinket M0 239a:801e serial device)"
+# Write only to a character device.  On UACNJ (11-04) a STAT sent while the TS-1
+# re-enumerated created /dev/ttyACM1 as a regular file; the kernel could not put its
+# node back, and every later command landed in that file instead of the TS-1.
+[ -c "$port" ] || RC=1 die "$port is not a character device (a stray file? remove it, then recreate the node from /sys/class/tty/$(basename "$port")/dev)"
 
 case "${1:-console}" in
     port)  echo "$port"; exit 0 ;;
