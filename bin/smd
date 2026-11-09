@@ -1479,53 +1479,137 @@ def _native_rebuilds_due(base: Path) -> list:
     return due
 
 
+# One marker per builder: /var/lib/sigmond/native-build-failed/<builder>.
+# A marker records a failed build for `smd doctor`; only that builder's own
+# success (or an unscoped run that finds it not due) removes it.  `install`
+# stands for "install.sh's run of this verb died before it could say which".
+#
+# ⛔ /var/lib/sigmond is group-writable by sigmond (the recorders run in that
+# group) and root writes here.  Every write and removal goes through
+# sigmond.safe_write's O_NOFOLLOW directory descriptor: a link planted at the
+# marker is replaced, never followed, and a linked directory is refused.
 _NATIVE_BUILD_FAILED = Path('/var/lib/sigmond/native-build-failed')
+_NATIVE_FAILED_INSTALL = 'install'
+_NATIVE_MARKER_NAME = re.compile(r'^[a-z0-9][a-z0-9-]*$')
+
+
+def _native_failed_dir_fd() -> int:
+    """An O_NOFOLLOW descriptor on the marker directory, creating it (0755)
+    if absent.  As root, a directory someone else owns is refused: its
+    owner could swap names under us."""
+    import errno
+    from sigmond.safe_write import _open_parent
+    try:
+        os.mkdir(_NATIVE_BUILD_FAILED, 0o755)
+    except FileExistsError:
+        pass
+    dfd = _open_parent(_NATIVE_BUILD_FAILED)
+    st = os.fstat(dfd)
+    if os.geteuid() == 0 and st.st_uid != 0:
+        os.close(dfd)
+        raise OSError(errno.EPERM, f'{_NATIVE_BUILD_FAILED} is owned by uid '
+                      f'{st.st_uid}, not root; refusing to write there')
+    return dfd
 
 
 def _mark_native_build_failed(builder: str, reason: str) -> None:
-    """Leave a record that a native build failed, for `smd doctor`.  The
-    install.sh hook cannot fail its install, so on the v3.85 → main path
-    nothing else would say so (2026-11-09 review)."""
+    """Leave a record that `builder`'s native build failed, for `smd
+    doctor`.  The install.sh hook cannot fail its install, so on the v3.85
+    → main path nothing else would say so (2026-11-09 review)."""
     from datetime import datetime, timezone
+    from sigmond.safe_write import write_owned
+    if not _NATIVE_MARKER_NAME.match(builder):
+        _warn(f'native-build: not a builder name: {builder!r}')
+        return
     at = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-    text = (f'component = "{builder}"\nreason = "{reason}"\n'
-            f'at = "{at}"\n')
+    reason = reason.replace('\\', '/').replace('"', "'").replace('\n', ' ')
+    text = f'component = "{builder}"\nreason = "{reason}"\nat = "{at}"\n'
     try:
-        try:
-            _NATIVE_BUILD_FAILED.parent.mkdir(parents=True, exist_ok=True)
-            _NATIVE_BUILD_FAILED.write_text(text)
-        except PermissionError:
-            _run(['install', '-d', str(_NATIVE_BUILD_FAILED.parent)],
-                 sudo=True)
-            _install_root_text(text, _NATIVE_BUILD_FAILED)
-    except OSError as exc:
+        os.close(_native_failed_dir_fd())
+        write_owned(_NATIVE_BUILD_FAILED / builder, text, mode=0o644,
+                    owner_from_dir=False,
+                    owner=(0, 0) if os.geteuid() == 0 else None)
+    except PermissionError:
+        # Not root: the same writer, as root.
+        r = _run(['sudo', '-n', 'env', 'SIGMOND_ALLOW_SUDO=1',
+                  sys.executable, str(Path(__file__).resolve()), 'admin',
+                  'native-build', '--mark-failed', reason, builder])
+        if r.returncode:
+            _warn(f'could not record the failed {builder} build: '
+                  f'{(r.stderr or "").strip()[-200:]}')
+    except (OSError, ValueError) as exc:
         _warn(f'could not record the failed {builder} build: {exc}')
 
 
-def _clear_native_build_failed() -> None:
+def _native_failed_markers() -> list:
+    """The builder names with a failure marker standing."""
+    from sigmond.safe_write import _open_parent
     try:
-        _NATIVE_BUILD_FAILED.unlink(missing_ok=True)
-    except PermissionError:
-        _run(['rm', '-f', str(_NATIVE_BUILD_FAILED)], sudo=True)
+        dfd = _open_parent(_NATIVE_BUILD_FAILED)
     except OSError:
+        return []
+    try:
+        return sorted(n for n in os.listdir(dfd)
+                      if _NATIVE_MARKER_NAME.match(n))
+    finally:
+        os.close(dfd)
+
+
+def _clear_native_build_failed(builder: str) -> None:
+    """Remove `builder`'s marker: unlink the NAME inside the O_NOFOLLOW
+    directory descriptor, never open it, so a planted link goes and its
+    target stays."""
+    from sigmond.safe_write import _open_parent
+    if not _NATIVE_MARKER_NAME.match(builder):
+        return
+    try:
+        dfd = _open_parent(_NATIVE_BUILD_FAILED)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        _warn(f'native-build: not clearing {builder}: {exc}')
+        return
+    try:
+        os.unlink(builder, dir_fd=dfd)
+    except FileNotFoundError:
         pass
+    except PermissionError:
+        _run(['rm', '-f', '--', str(_NATIVE_BUILD_FAILED / builder)],
+             sudo=True)
+    except OSError as exc:
+        _warn(f'native-build: could not clear {builder}: {exc}')
+    finally:
+        os.close(dfd)
 
 
 def _native_build_failed_findings() -> list:
-    """Doctor: one finding while a failed native build's record stands."""
+    """Doctor: one finding per failed native build whose marker stands.
+    Read without following a link; an unsafe marker is reported as such,
+    its target never read."""
     from sigmond.doctor import Finding
-    try:
-        data = tomllib.loads(_NATIVE_BUILD_FAILED.read_text())
-    except OSError:
-        return []
-    except tomllib.TOMLDecodeError:
-        data = {}
-    comp = str(data.get('component') or 'native-build')
-    return [Finding(
-        comp, 'native-build-failed',
-        f"the {comp} build failed at {data.get('at', '?')}: "
-        f"{data.get('reason', '?')} — `smd admin native-build --apply` "
-        f"retries it, and a success clears this")]
+    from sigmond.safe_write import read_nofollow
+    out = []
+    for name in _native_failed_markers():
+        try:
+            text = read_nofollow(_NATIVE_BUILD_FAILED / name) or ''
+            data = tomllib.loads(text)
+        except OSError:
+            out.append(Finding(
+                name, 'native-build-failed',
+                f'{_NATIVE_BUILD_FAILED / name} is not a regular file '
+                f'(a link?) — not read; remove it and rerun '
+                f'`smd admin native-build --apply`'))
+            continue
+        except tomllib.TOMLDecodeError:
+            data = {}
+        what = ('install.sh\'s native-build run' if name == _NATIVE_FAILED_INSTALL
+                else f'the {name} build')
+        out.append(Finding(
+            name, 'native-build-failed',
+            f"{what} failed at {data.get('at', '?')}: "
+            f"{data.get('reason', '?')} — `smd admin native-build --apply` "
+            f"retries it, and a success clears this"))
+    return out
 
 
 def _run_native_builder(builder: str, base: Path) -> bool:
@@ -1568,12 +1652,27 @@ def cmd_admin_native_build(args) -> int:
     base = Path(getattr(args, 'base', None) or '/opt/git/sigmond')
     only = set(getattr(args, 'builders', None) or ())
     apply_ = getattr(args, 'apply', False)
-    due = [d for d in _native_rebuilds_due(base)
-           if not only or d[1] in only]
+    mark = getattr(args, 'mark_failed', None)
+    if mark is not None:
+        # install.sh's fallback, when the --apply run itself died.  Named
+        # builders get their own marker; with none, `install` stands in,
+        # unless a builder's marker already says what failed.
+        targets = sorted(only) or (
+            [] if _native_failed_markers() else [_NATIVE_FAILED_INSTALL])
+        for b in targets:
+            _mark_native_build_failed(b, mark)
+        return 0
+    due_all = _native_rebuilds_due(base)
+    due = [d for d in due_all if not only or d[1] in only]
+    if apply_ and not only:
+        # An unscoped run speaks for every builder: one not due is fine.
+        due_builders = {d[1] for d in due_all}
+        for b in sorted(set(_NATIVE_BUILD_OF.values()) - due_builders):
+            _clear_native_build_failed(b)
     if not due:
         _ok("native-build: every native source sits at sigmond's pin")
         if apply_ and not only:
-            _clear_native_build_failed()
+            _clear_native_build_failed(_NATIVE_FAILED_INSTALL)
         return 0
     failed = 0
     seen = set()
@@ -1586,6 +1685,7 @@ def cmd_admin_native_build(args) -> int:
             continue
         if _run_native_builder(builder, base):
             _record_native_build(builder, head, pin)
+            _clear_native_build_failed(builder)
             _ok(f'{builder}: rebuilt at {pin[:9]}')
             if builder == 'ka9q-web':
                 # Not restarted here: install.sh and `smd update` both run
@@ -1600,8 +1700,8 @@ def cmd_admin_native_build(args) -> int:
             failed += 1
     if not apply_:
         print('(dry run — re-run with --apply)')
-    elif not failed:
-        _clear_native_build_failed()
+    elif not failed and not only:
+        _clear_native_build_failed(_NATIVE_FAILED_INSTALL)
     return 1 if failed else 0
 
 
@@ -29396,6 +29496,10 @@ def _build_parser() -> argparse.ArgumentParser:
                                'ubersdr-decoders); default every one due')
     p_native.add_argument('--apply', action='store_true',
                           help='run the builds (default: name them only)')
+    p_native.add_argument('--mark-failed', metavar='REASON', default=None,
+                          help='record a failed build for smd doctor (the '
+                               'named builders, else "install"); install.sh '
+                               'uses it when the --apply run dies')
     p_native.add_argument('--base', default='/opt/git/sigmond',
                           help='checkout root (default /opt/git/sigmond)')
 

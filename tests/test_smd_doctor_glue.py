@@ -653,7 +653,8 @@ class CollectFindingsTests(unittest.TestCase):
 
     def test_a_failed_native_build_record_is_a_finding(self):
         self._force_manifest_clean()
-        smd._NATIVE_BUILD_FAILED.write_text(
+        smd._NATIVE_BUILD_FAILED.mkdir()
+        (smd._NATIVE_BUILD_FAILED / 'ubersdr-decoders').write_text(
             'component = "ubersdr-decoders"\nreason = "parity"\n'
             'at = "2026-11-09T15:00:00Z"\n')
         _clean, findings = smd.collect_findings(base=str(self.base))

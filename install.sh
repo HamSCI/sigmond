@@ -1406,19 +1406,19 @@ fi
 # v3.86 update test (2026-11-09) found v3.85 → main leaving ubersdr_wsprd and
 # its decoders at 529ec5d.  At the pin, and on a fresh host with no native
 # checkout yet, it does nothing.  Non-fatal, so it must not be silent: a
-# failed build leaves /var/lib/sigmond/native-build-failed, which `smd
-# doctor` reports until a later build succeeds.  The verb writes it; the
-# line below covers a verb that died before it could.
+# failed build leaves a marker under /var/lib/sigmond/native-build-failed/,
+# one per builder, which `smd doctor` reports until that builder succeeds.
+# The verb writes it.  If the verb died before it could, `--mark-failed`
+# records an `install` marker through the same writer; never tee into that
+# directory from bash, since the recorders' group can write /var/lib/sigmond
+# and a planted link would aim root's write anywhere.
 info "Checking native sources against sigmond's pins…"
 if $SUDO env SIGMOND_ALLOW_SUDO=1 "$INSTALL_SMD" admin native-build --apply; then
     ok "native sources at sigmond's pins"
 else
-    _nbf=/var/lib/sigmond/native-build-failed
-    if [[ ! -f "$_nbf" ]]; then
-        $SUDO install -d /var/lib/sigmond
-        printf 'component = "native-build"\nreason = "smd admin native-build --apply exited non-zero during install.sh"\nat = "%s"\n' \
-            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" | $SUDO tee "$_nbf" >/dev/null
-    fi
+    $SUDO env SIGMOND_ALLOW_SUDO=1 "$INSTALL_SMD" admin native-build \
+        --mark-failed "smd admin native-build --apply exited non-zero during install.sh" \
+        || warn "could not record the failed native build for smd doctor"
     warn "a native rebuild failed (non-fatal) — see the lines above; 'smd doctor' reports it, 'smd update' plans it again"
 fi
 

@@ -170,9 +170,17 @@ stays held, because a host that never built UberSDR's decoders should not
 retry the build on every update.
 
 The update runs the command as root, through `sudo -n` when the operator
-runs `smd update` as themselves. A failed build leaves
-`/var/lib/sigmond/native-build-failed`, and `smd doctor` reports it until a
-later build succeeds. After a ka9q-web rebuild, the command prints a
+runs `smd update` as themselves. A failed build leaves a marker named for
+its builder, such as `/var/lib/sigmond/native-build-failed/ubersdr-decoders`.
+`smd doctor` reports each marker. Only that builder's own success removes
+its marker, or a full run (no builder named) that finds the builder not
+due. If `install.sh`'s run of the command dies before it can write a
+marker, `install.sh` records an `install` marker through `smd admin
+native-build --mark-failed`; only a full run that succeeds removes that
+one. The recorders' group can write `/var/lib/sigmond`, so smd writes and
+removes these markers through `sigmond.safe_write`, which never follows a
+link: a link planted at a marker gets replaced, and its target stays as it
+was. After a ka9q-web rebuild, the command prints a
 reminder to restart ka9q-web; it does not restart the viewer itself.
 
 Git in these checkouts runs as the tree's owner, never as root. `smd
