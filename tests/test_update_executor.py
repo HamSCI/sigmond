@@ -439,6 +439,14 @@ class _NativePinRig(_Rig):
         (host / ".pin").write_text(head + "\n")
         return host
 
+    def _mock_native_step(self, rc=0):
+        """The native-build step runs a long build in a child smd; here it
+        only records that it was asked."""
+        p = mock.patch.object(smd, "_run_native_build_step", return_value=rc)
+        m = p.start()
+        self.addCleanup(p.stop)
+        return m
+
     def _run_update(self, apply=False, unpin=False):
         args = types.SimpleNamespace(base=self.base, apply=apply,
                                      no_fetch=False, unpin=unpin)
@@ -523,21 +531,21 @@ class NativeBuildPinOnionTests(_NativePinRig):
                       f"{pin[:8]}", text)
         self.assertNotIn("[pull] onion", text)
 
-    def test_off_its_pin_onion_plans_nothing_and_warns_once(self):
-        """HEAD differs from the pin: the next ka9q-web build returns it,
-        so the planner must not pull it somewhere else."""
+    def test_off_its_pin_onion_plans_its_ka9q_web_build(self):
+        """HEAD differs from the pin: the update plans the ka9q-web build
+        that returns it, and never pulls it somewhere else (2026-11-09)."""
         head = self._head()
         pin = self._origin_head()            # a commit HEAD is not at
         self._pin_constant(self.CONST, pin)
-        rc, text = self._run_update(apply=True)
+        step = self._mock_native_step()
+        rc, text = self._run_update()
         self.assertNotIn("[pull] onion", text)
-        self.assertNotIn("[restart]", text)
-        warning = (f"onion: at {head[:8]}, off sigmond's build pin "
-                   f"{pin[:8]} — the next ka9q-web build returns it")
-        self.assertEqual(sum(warning in l for l in text.splitlines()), 1, text)
+        self.assertIn("[native-build] ka9q-web", text)
+        self.assertIn(f"rebuild ka9q-web: pin {head[:7]} → {pin[:7]}", text)
         self.assertNotIn("cannot compare against upstream", text)
         self.assertEqual(self._head(), head, text)
         self.assertEqual(rc, 0, text)
+        step.assert_not_called()             # a dry run builds nothing
 
     def test_a_pin_file_hold_and_a_behind_library_behave_as_before(self):
         """Native pins must not disturb the other two kinds of neighbour."""
@@ -586,17 +594,93 @@ class NativeBuildPinWsjtxTests(_NativePinRig):
         self.assertNotIn("cannot compare against upstream", text)
         self.assertEqual(rc, 0, text)
 
-    def test_detached_wsjtx_off_its_pin_warns_with_its_own_builder(self):
+    def test_detached_wsjtx_off_its_pin_plans_its_own_builder(self):
         head = self._head()
         _git("checkout", "--detach", head, cwd=self.host)
         pin = self._origin_head()
         self._pin_constant(self.CONST, pin)
+        self._mock_native_step()
         rc, text = self._run_update()
-        self.assertIn(f"wsjtx: at {head[:8]}, off sigmond's build pin "
-                      f"{pin[:8]} — the next wsjtx-decoders build returns it",
+        self.assertIn("[native-build] wsjtx-decoders", text)
+        self.assertIn(f"rebuild wsjtx-decoders: pin {head[:7]} → {pin[:7]}",
                       text)
         self.assertNotIn("cannot compare against upstream", text)
         self.assertEqual(rc, 0, text)
+
+
+class NativeBuildOffPinUbersdrTests(_NativePinRig):
+    """The v3.86 update test (2026-11-09 14:39Z): v3.85 built ubersdr_wsprd
+    at 529ec5d, sigmond moved the pin to 8719788, and `smd update --apply`
+    left the checkout and the decoders at 529ec5d.  The update must plan
+    the ubersdr-decoders build and run it."""
+
+    COMP = "ubersdr_wsprd"
+    CONST = "_UBERSDR_COMMIT"
+
+    def _off_pin(self):
+        head = self._head()
+        pin = self._origin_head()
+        self._pin_constant(self.CONST, pin)
+        return head, pin
+
+    def test_off_its_pin_the_dry_run_names_the_rebuild(self):
+        head, pin = self._off_pin()
+        step = self._mock_native_step()
+        rc, text = self._run_update()
+        self.assertIn("[native-build] ubersdr-decoders", text)
+        self.assertIn(f"rebuild ubersdr-decoders: pin {head[:7]} → "
+                      f"{pin[:7]}", text)
+        self.assertNotIn("[pull] ubersdr_wsprd", text)
+        self.assertNotIn("nothing to do", text)
+        self.assertNotIn("HELD", text)
+        step.assert_not_called()
+        self.assertEqual(rc, 0, text)
+
+    def test_apply_runs_the_build_that_owns_the_source(self):
+        self._off_pin()
+        step = self._mock_native_step(rc=0)
+        rc, text = self._run_update(apply=True)
+        step.assert_called_once()
+        self.assertEqual(step.call_args.args[0], "ubersdr-decoders")
+        self.assertEqual(Path(step.call_args.args[1]), Path(self.base))
+        self.assertIn("ubersdr-decoders: native build exit 0", text)
+        self.assertEqual(rc, 0, text)
+
+    def test_a_failed_build_fails_the_update(self):
+        self._off_pin()
+        self._mock_native_step(rc=1)
+        rc, text = self._run_update(apply=True)
+        self.assertNotEqual(rc, 0, text)
+        self.assertIn("ubersdr-decoders: native build exit 1", text)
+
+    def test_at_its_pin_it_is_held_and_nothing_is_built(self):
+        pin = self._head()
+        self._pin_constant(self.CONST, pin)
+        step = self._mock_native_step()
+        rc, text = self._run_update(apply=True)
+        self.assertIn(f"ubersdr_wsprd: HELD — pinned by sigmond's native "
+                      f"build to {pin[:8]}", text)
+        step.assert_not_called()
+        self.assertEqual(rc, 0, text)
+
+    def test_the_step_runs_the_smd_on_disk_not_this_process(self):
+        """`smd update` pulls sigmond before this step runs; the pin that
+        applies is the one in the pulled bin/smd, so the step must run that
+        file, not call this process's (pre-pull) builder."""
+        self._off_pin()
+        calls = []
+
+        def fake_run(cmd, *a, **kw):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "built\n", "")
+
+        with mock.patch.object(smd.subprocess, "run", side_effect=fake_run):
+            rc = smd._run_native_build_step("ubersdr-decoders", self.base)
+        self.assertEqual(rc, 0)
+        argv = calls[-1]
+        self.assertIn(str(Path(smd.__file__).resolve()), argv)
+        self.assertEqual(argv[-5:], ["native-build", "--apply", "--base",
+                                     str(self.base), "ubersdr-decoders"])
 
 
 class NativeBuildPinTableTests(unittest.TestCase):

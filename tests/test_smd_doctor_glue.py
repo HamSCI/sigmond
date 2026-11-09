@@ -611,6 +611,37 @@ class CollectFindingsTests(unittest.TestCase):
         self.assertEqual(len(found), 1)
         self.assertIn('no .pin records', found[0].detail)
 
+    def test_on_a_branch_off_a_native_build_pin_is_a_finding(self):
+        """ubersdr_wsprd on v3.85 sat ON branch main at 529ec5d after the
+        pin moved to 8719788 (2026-11-09).  Not detached, so the detached
+        check said nothing, and doctor called the host clean."""
+        self._force_manifest_clean()
+        self._make_component('ubersdr_wsprd')
+        self._doctor_mod.git_state = lambda d: {
+            'error': None, 'dirty': [], 'untracked': [], 'ahead': 0,
+            'detached': False, 'pin': '', 'head': '529ec5d2' + '0' * 32,
+            'at_pin': False}
+        with mock.patch.object(smd, '_UBERSDR_COMMIT', self.SHA):
+            _clean, findings = smd.collect_findings(base=str(self.base))
+        found = [f for f in findings if f.kind == 'off-pin']
+        self.assertEqual(len(found), 1, findings)
+        self.assertEqual(found[0].component, 'ubersdr_wsprd')
+        self.assertIn(f"off sigmond's build pin {self.SHA[:12]}",
+                      found[0].detail)
+        self.assertIn('smd update --apply', found[0].detail)
+        self.assertIn('ubersdr-decoders', found[0].detail)
+
+    def test_on_a_branch_at_a_native_build_pin_is_not_a_finding(self):
+        self._force_manifest_clean()
+        self._make_component('ubersdr_wsprd')
+        self._doctor_mod.git_state = lambda d: {
+            'error': None, 'dirty': [], 'untracked': [], 'ahead': 0,
+            'detached': False, 'pin': '', 'head': self.SHA, 'at_pin': False}
+        with mock.patch.object(smd, '_UBERSDR_COMMIT', self.SHA):
+            _clean, findings = smd.collect_findings(base=str(self.base))
+        self.assertEqual([f for f in findings
+                          if f.kind in ('off-pin', 'detached')], [])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -1186,9 +1186,13 @@ def _ensure_native_build_deps(label: str = 'build') -> bool:
     return True
 
 
-def _build_onion(src_dir: Path) -> bool:
+def _build_onion(src_dir: Path, *, force: bool = False) -> bool:
     lib = Path('/usr/local/lib/libonion.so')
-    if lib.exists():
+    if force:
+        # The source moved to a new pin: the installed library is stale
+        # whatever it links against.
+        _run(['rm', '-rf', str(src_dir / 'build')], sudo=True)
+    elif lib.exists():
         # A libonion built without gnutls cannot do websocket handshakes —
         # the first ws upgrade crashes the whole server ("Cant calculate
         # SHA1 if gnutls is not compiled in! Aborting", observed on Shack2
@@ -1327,6 +1331,183 @@ def _native_build_pins() -> dict:
 # warning.  Keyed like _native_build_pins(); a name missing here prints as is.
 _NATIVE_BUILD_OF = {'onion': 'ka9q-web', 'wsjtx': 'wsjtx-decoders',
                     'ubersdr_wsprd': 'ubersdr-decoders'}
+
+
+# ── git inside a native source: as the tree's owner, never root ──────────
+#
+# ⛔ v3.85 shipped onion, wsjtx and ubersdr_wsprd ROOT-OWNED.  The image
+# build runs `smd install`, which elevates itself (_need_root), so each
+# builder's `git clone` ran as root inside the sigmond-owned
+# /opt/git/sigmond.  `smd update` then refused to fetch them (sigmond#43:
+# git as root in a tree it may not own), and the builders' own bare
+# `git -C <src> fetch` would have run as root in whatever tree it found.
+# One tree, several roles: the source belongs to sigmond, and git in it
+# runs as sigmond.  See reference_ownership_recurrence_root_cause.
+_NATIVE_SRC_OWNER = 'sigmond'
+
+
+def _sigmond_user_exists() -> bool:
+    try:
+        pwd.getpwnam(_NATIVE_SRC_OWNER)
+        return True
+    except KeyError:
+        return False
+
+
+def _native_owner_resolve(src: Path):
+    """gitowner.resolve for one native source: (action, user)."""
+    from sigmond.gitowner import resolve
+    return resolve(src)
+
+
+def _native_git_prefix(src: Path) -> 'list | None':
+    """The argv prefix that runs git in native source `src` as its owner.
+
+    As root: a tree some user owns runs git as that user.  A tree that is
+    root-owned, or split between worktree and .git, goes to sigmond:sigmond
+    first (install.sh gives /opt/git/sigmond the same owner), and git then
+    runs as sigmond.  With no sigmond account (a dev box), a consistently
+    root-owned tree runs git as root, and a split one is refused.
+    Not root: the same rule `smd update`'s fetch uses (_git_owner_prefix).
+    """
+    if os.geteuid() != 0:
+        return _git_owner_prefix(src)
+    action, user = _native_owner_resolve(src)
+    if action == 'drop' and user:
+        return ['sudo', '-u', user, '-H', '--']
+    if _sigmond_user_exists():
+        _info(f'{src.name}: {"root-owned" if action == "root-ok" else "split-owned"}'
+              f' checkout → {_NATIVE_SRC_OWNER}:{_NATIVE_SRC_OWNER}')
+        _run(['chown', '-R', f'{_NATIVE_SRC_OWNER}:{_NATIVE_SRC_OWNER}',
+              str(src)])
+        return ['sudo', '-u', _NATIVE_SRC_OWNER, '-H', '--']
+    return [] if action == 'root-ok' else None
+
+
+def _native_git(src: Path, *args: str) -> subprocess.CompletedProcess:
+    """`git -C <src> <args>` as the tree's owner (_native_git_prefix)."""
+    prefix = _native_git_prefix(src)
+    if prefix is None:
+        return _git_refused(src, args[0] if args else 'git')
+    return _run(prefix + ['git', '-c', f'safe.directory={src}',
+                          '-C', str(src), *args])
+
+
+def _native_clone(url: str, src: Path) -> subprocess.CompletedProcess:
+    """Clone a native source UNPRIVILEGED: as root, as sigmond, which owns
+    /opt/git/sigmond; otherwise as ourselves."""
+    cmd = ['git', 'clone', url, str(src)]
+    if os.geteuid() == 0 and _sigmond_user_exists():
+        cmd = ['sudo', '-u', _NATIVE_SRC_OWNER, '-H', '--'] + cmd
+    return _run(cmd)
+
+
+def _native_rebuilds_due(base: Path) -> list:
+    """Native sources under `base` whose checkout is off sigmond's pin:
+    [(source, builder, head, pin)], in _native_build_pins order.
+
+    A source with no checkout here was never built here, so an update has
+    nothing to return (`smd align` builds a missing one).  A checkout whose
+    HEAD cannot be read is left out, rather than rebuilt on a guess."""
+    due = []
+    for name, pin in _native_build_pins().items():
+        src = Path(base) / name
+        if not (src / '.git').exists():
+            continue
+        head = _git_head(src)
+        if not head or head.startswith(pin):
+            continue
+        due.append((name, _NATIVE_BUILD_OF.get(name, name), head, pin))
+    return due
+
+
+def _run_native_builder(builder: str, base: Path) -> bool:
+    """Run the build that returns a native source to its pin.  onion's is
+    ka9q-web's build, forced: its own freshness check compares only the
+    ka9q-web binary, so onion off its pin would pass it untouched."""
+    if builder == 'ubersdr-decoders':
+        return _build_ubersdr_decoders()
+    if builder == 'wsjtx-decoders':
+        return _build_wsjtx_decoders()
+    if builder == 'ka9q-web':
+        return _build_ka9q_web_with_onion(Path(base) / 'ka9q-web', force=True)
+    _err(f'native-build: no builder named {builder!r}')
+    return False
+
+
+def _record_native_build(builder: str, head: str, pin: str) -> None:
+    """One update-history line per native rebuild (see: smd version)."""
+    from datetime import datetime, timezone
+    import sigmond.provenance as _prov
+    try:
+        _prov.record_update(_prov.HISTORY_FILE, {
+            'at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'what': f'native-build {builder}: pin {head[:9]} → {pin[:9]}',
+        })
+    except OSError as exc:
+        _warn(f'could not record the {builder} rebuild: {exc}')
+
+
+def cmd_admin_native_build(args) -> int:
+    """`smd admin native-build [--apply] [BUILDER ...]`: rebuild each native
+    source (onion, wsjtx, ubersdr_wsprd) that sits off sigmond's pin.
+
+    Plan-first: without --apply it names each rebuild and builds nothing.
+    `smd update` runs it as a step, as the smd on disk, so the pin that
+    applies is the one in a sigmond this same update just pulled.  sigmond's
+    install.sh runs it too: an OLDER smd that pulls a newer sigmond runs the
+    newer install.sh, and that is how the newer pin lands in the same run
+    (the v3.86 update test, 2026-11-09).  At the pin it does nothing."""
+    base = Path(getattr(args, 'base', None) or '/opt/git/sigmond')
+    only = set(getattr(args, 'builders', None) or ())
+    apply_ = getattr(args, 'apply', False)
+    due = [d for d in _native_rebuilds_due(base)
+           if not only or d[1] in only]
+    if not due:
+        _ok("native-build: every native source sits at sigmond's pin")
+        return 0
+    failed = 0
+    seen = set()
+    for _src, builder, head, pin in due:
+        if builder in seen:
+            continue
+        seen.add(builder)
+        _info(f'rebuild {builder}: pin {head[:7]} → {pin[:7]}')
+        if not apply_:
+            continue
+        if _run_native_builder(builder, base):
+            _record_native_build(builder, head, pin)
+            _ok(f'{builder}: rebuilt at {pin[:9]}')
+        else:
+            _err(f'{builder}: rebuild FAILED — the source or the binary '
+                 f'may still be off pin {pin[:9]}')
+            failed += 1
+    if not apply_:
+        print('(dry run — re-run with --apply)')
+    return 1 if failed else 0
+
+
+def _run_native_build_step(builder: str, base: Path, *,
+                           tail_lines: int = 15) -> int:
+    """`smd update`'s native-build step: run `smd admin native-build
+    --apply <builder>` as the smd ON DISK.
+
+    This process loaded bin/smd before the update pulled sigmond, so its
+    pin constants may be the old ones; the file on disk carries the pins
+    the pulled sigmond names.  The full output goes to UPDATE_LOG_DIR, as
+    install.sh's does."""
+    smd_path = str(Path(__file__).resolve())
+    r = subprocess.run(
+        [sys.executable, smd_path, 'admin', 'native-build', '--apply',
+         '--base', str(base), builder],
+        capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    logpath = _write_update_log(builder, r, what='native-build')
+    lines = ((r.stdout or '') + (r.stderr or '')).strip().splitlines()
+    for line in lines[-(tail_lines if r.returncode else 3):]:
+        print(f'  | {line}')
+    if r.returncode and logpath:
+        print(f'  full output: {logpath}')
+    return r.returncode
 
 
 def _git_remote_url(repo: Path) -> str:
@@ -1606,7 +1787,11 @@ def _diag_build_manifests() -> int:
     return warns
 
 
-def _build_ka9q_web_with_onion(src_dir: Path) -> bool:
+def _build_ka9q_web_with_onion(src_dir: Path, *, force: bool = False) -> bool:
+    # `force` (smd admin native-build, onion off its pin): rebuild onion and
+    # ka9q-web even when the ka9q-web binary looks current, since that check
+    # never looks at onion.
+    #
     # ⛔ Decide whether anything needs COMPILING before touching apt, git or
     # onion.  This used to install build deps first and ask afterwards, so a
     # box whose binary was already current still had to get through an apt
@@ -1617,7 +1802,7 @@ def _build_ka9q_web_with_onion(src_dir: Path) -> bool:
     binary = _KA9Q_WEB_BIN
     built  = src_dir / 'ka9q-web'
     rebuilt = True
-    if (not _source_advanced_past_build(src_dir, 'ka9q-web')
+    if (not force and not _source_advanced_past_build(src_dir, 'ka9q-web')
             and binary.exists() and built.exists()):
         import hashlib
         def _sha(p): return hashlib.sha256(p.read_bytes()).hexdigest()
@@ -1643,20 +1828,21 @@ def _build_ka9q_web_with_onion(src_dir: Path) -> bool:
 
         if not onion_src.exists():
             _info(f'Cloning onion → {onion_src} ...')
-            r = _run(['git', 'clone', onion_url, str(onion_src)])
+            r = _native_clone(onion_url, onion_src)
             if r.returncode != 0:
                 _err(f'git clone onion failed: {r.stderr.strip()}')
                 return False
         if onion_commit and not _git_head(onion_src).startswith(onion_commit):
             # Pin onion to the known-good commit (idempotent).  Fetch first in
-            # case an existing checkout predates the pin.
-            _run(['git', '-C', str(onion_src), 'fetch', '--quiet', '--tags', 'origin'])
-            r = _run(['git', '-C', str(onion_src), 'checkout', '--quiet', onion_commit])
+            # case an existing checkout predates the pin.  As the tree's
+            # owner, never root (_native_git).
+            _native_git(onion_src, 'fetch', '--quiet', '--tags', 'origin')
+            r = _native_git(onion_src, 'checkout', '--quiet', onion_commit)
             if r.returncode != 0:
                 _err(f'onion: checkout {onion_commit[:12]} failed: {r.stderr.strip()}')
                 return False
 
-        if not _build_onion(onion_src):
+        if not _build_onion(onion_src, force=force):
             return False
 
         nproc = str(os.cpu_count() or 2)
@@ -1757,15 +1943,16 @@ def _build_wsjtx_decoders() -> bool:
         return False
 
     src = _WSJTX_SRC
+    # Clone and check out as the tree's owner, never root (_native_git).
     if not src.exists():
         _info(f'Cloning WSJT-X → {src} ...')
-        r = _run(['git', 'clone', _WSJTX_REPO, str(src)])
+        r = _native_clone(_WSJTX_REPO, src)
         if r.returncode != 0:
             _err(f'git clone wsjtx failed: {r.stderr.strip()}')
             return False
     if not _git_head(src).startswith(_WSJTX_COMMIT):
-        _run(['git', '-C', str(src), 'fetch', '--quiet', '--tags', 'origin'])
-        r = _run(['git', '-C', str(src), 'checkout', '--quiet', _WSJTX_COMMIT])
+        _native_git(src, 'fetch', '--quiet', '--tags', 'origin')
+        r = _native_git(src, 'checkout', '--quiet', _WSJTX_COMMIT)
         if r.returncode != 0:
             _err(f'wsjtx: checkout {_WSJTX_COMMIT[:12]} failed: {r.stderr.strip()}')
             return False
@@ -1946,16 +2133,19 @@ def _build_ubersdr_decoders(*, check: bool = True) -> bool:
     # fallback decoder -- failed with "could not create work tree dir:
     # Permission denied".  One build quietly made the next one impossible.
     # See reference_ownership_recurrence_root_cause: one tree, several roles.
+    #
+    # As root (`smd install` elevates itself), the clone runs AS sigmond, and
+    # a tree an earlier build left root-owned goes back to sigmond before git
+    # touches it (_native_git; v3.85's image shipped this one root-owned).
     if not src.exists():
         _info(f'Cloning ubersdr_wsprd → {src} ...')
-        r = _run(['git', 'clone', _UBERSDR_REPO, str(src)])
+        r = _native_clone(_UBERSDR_REPO, src)
         if r.returncode != 0:
             _err(f'git clone ubersdr_wsprd failed: {r.stderr.strip()}')
             return False
     if not _git_head(src).startswith(_UBERSDR_COMMIT):
-        _run(['git', '-C', str(src), 'fetch', '--quiet', 'origin'])
-        r = _run(['git', '-C', str(src), 'checkout', '--quiet',
-                  _UBERSDR_COMMIT])
+        _native_git(src, 'fetch', '--quiet', 'origin')
+        r = _native_git(src, 'checkout', '--quiet', _UBERSDR_COMMIT)
         if r.returncode != 0:
             _err(f'ubersdr_wsprd: checkout {_UBERSDR_COMMIT[:12]} failed: '
                  f'{r.stderr.strip()}')
@@ -4546,10 +4736,14 @@ def cmd_update(args) -> int:
         # checks the commit out and writes no `.pin`, so the pin checks below
         # cannot see it; the build table can.  At the pin, the planner holds
         # it and `--unpin` does not release it: a pull would move the source
-        # off the commit libonion was built from.  Off the pin, it plans
-        # nothing and warns; the next build restores the pin.  Neither case
-        # compares against upstream.  Upstream onion gained a commit on
-        # 2026-10-07 20:02Z, and the old count turned it into `[pull] onion`.
+        # off the commit libonion was built from.  Off the pin, the plan runs
+        # the source's own build (`native_rebuild`), which checks the pin
+        # out and rebuilds.  Neither case compares against upstream.
+        # Upstream onion gained a commit on 2026-10-07 20:02Z, and the old
+        # count turned it into `[pull] onion`.  Off the pin, the old planner
+        # only warned "the next build returns it", and no step of the update
+        # ran that build: v3.85 → main left ubersdr_wsprd and its decoders
+        # at 529ec5d after sigmond moved the pin to 8719788 (2026-11-09).
         native_pin = _native_build_pins().get(d.name) or ''
         native_hold = (bool(native_pin) and bool(st['head'])
                        and st['head'].startswith(native_pin))
@@ -4569,11 +4763,6 @@ def cmd_update(args) -> int:
             if native_hold and unpin:
                 _info(f"{d.name}: stays held under --unpin — sigmond's "
                       f"native build pins it")
-            elif not native_hold:
-                _warn(f"{d.name}: at {st['head'][:8]}, off sigmond's build "
-                      f"pin {native_pin[:8]} — the next "
-                      f"{_NATIVE_BUILD_OF.get(d.name, d.name)} build "
-                      f"returns it")
         elif held:
             pass
         elif unpin and pin_hold and detached:
@@ -4647,6 +4836,10 @@ def cmd_update(args) -> int:
             repos[d.name]['pinned'] = native_pin
             repos[d.name]['at_pin'] = True
             repos[d.name]['pin_source'] = 'native-build'
+        elif native_pin and st['head']:
+            repos[d.name]['native_rebuild'] = {
+                'builder': _NATIVE_BUILD_OF.get(d.name, d.name),
+                'head': st['head'], 'pin': native_pin}
         elif held:
             repos[d.name]['pinned'] = pin
             repos[d.name]['at_pin'] = True
@@ -4840,6 +5033,18 @@ def cmd_update(args) -> int:
             else:
                 failed += 1
                 _err(f'{step.target}: build exit {rc}')
+        elif step.kind == 'native-build':
+            # As the smd on disk: a sigmond this run pulled may have moved
+            # the pin, and only the pulled bin/smd knows it.  If sigmond's
+            # install.sh already rebuilt it, the child finds the source at
+            # its pin and does nothing.  It records the rebuild itself.
+            rc = _run_native_build_step(step.target, base)
+            if rc == 0:
+                _ok(f'{step.target}: native build exit 0')
+                applied.add(f'native-build {step.target}')
+            else:
+                failed += 1
+                _err(f'{step.target}: native build exit {rc}')
         elif step.kind == 'restart':
             _info('restart not automated here — bounce radiod, wait for it to '
                   'settle, then the recorders')
@@ -9006,6 +9211,15 @@ def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
             if native_pin:
                 pin = native_pin
                 at_pin = (st.get('head') or '').startswith(native_pin)
+            if native_pin and not at_pin and not st['detached'] \
+                    and st.get('head'):
+                # On a branch, off the pin: ubersdr_wsprd after v3.85 → main
+                # (2026-11-09).  The detached check below never saw it.
+                findings.append(Finding(
+                    name, 'off-pin',
+                    f"HEAD {st['head'][:12]} is off sigmond's build pin "
+                    f"{native_pin[:12]} — `smd update --apply` rebuilds "
+                    f"{_NATIVE_BUILD_OF.get(name, name)}"))
             if st['detached'] and not at_pin:
                 if pin:
                     detail = (f'HEAD {st.get("head", "?")[:12]} has drifted off '
@@ -29027,6 +29241,18 @@ def _build_parser() -> argparse.ArgumentParser:
              f'({", ".join(_DECODER_IMPLS)}); both stay installed, '
              'so switching back needs no rebuild')
 
+    p_native = admin_sub.add_parser(
+        'native-build',
+        help="rebuild each native source (onion, wsjtx, ubersdr_wsprd) that "
+             "sits off sigmond's pin; plan-first")
+    p_native.add_argument('builders', nargs='*', metavar='BUILDER',
+                          help='only these builds (ka9q-web, wsjtx-decoders, '
+                               'ubersdr-decoders); default every one due')
+    p_native.add_argument('--apply', action='store_true',
+                          help='run the builds (default: name them only)')
+    p_native.add_argument('--base', default='/opt/git/sigmond',
+                          help='checkout root (default /opt/git/sigmond)')
+
     p_completion = admin_sub.add_parser('completion', help='emit shell tab-completion script')
     completion_sub = p_completion.add_subparsers(dest='completion_command')
     p_bash = completion_sub.add_parser('bash', help='emit bash completion script (source or install)')
@@ -30421,6 +30647,9 @@ def main() -> int:
         if getattr(args, 'select', None) and _need_root('decoders --select'):
             return 1
         return cmd_decoders(args)
+
+    if args.command == 'native-build':
+        return cmd_admin_native_build(args)
 
     if args.command == 'completion':
         return cmd_completion(args)

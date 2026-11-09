@@ -45,6 +45,12 @@ The traps, and how each is encoded:
   them `pin_source: 'native-build'`, the plan holds them like any pin, and
   `--unpin` does not release them.  A pull would move the source off the
   commit the installed library was built from (onion, 2026-10-07).
+* **a natively pinned source off its pin gets its build** — when sigmond
+  moves a pin (ubersdr_wsprd 529ec5d → 8719788, 2026-11-09), the checkout
+  still sits at the old commit and the installed binary was built from it.
+  The caller marks the checkout `native_rebuild: {builder, head, pin}`, and
+  the plan runs that builder once, after the installs (a pulled sigmond
+  may be the one that moved the pin).  It never pulls the source.
 
 * **a locally managed checkout is not ours** — a site may list checkouts
   it looks after by hand in site-profile.toml (`[components]
@@ -93,7 +99,8 @@ class Refusal:
 # Ordering is load-bearing, not cosmetic: sources land before they are
 # installed, radiod is rebuilt before wisdom is planned against it, and
 # everything settles before services are bounced.
-_ORDER = ('pull', 'install', 'build', 'rebuild-radiod', 'wisdom', 'restart')
+_ORDER = ('pull', 'install', 'build', 'native-build', 'rebuild-radiod',
+          'wisdom', 'restart')
 
 #: Said on the pull, so a missing install step reads as a decision
 #: rather than an oversight.
@@ -150,6 +157,7 @@ def plan_update(state: dict) -> list:
              if n not in local}
     skew = set(state.get('venv_skew') or []) - local
     to_install = set()
+    native_builds: dict = {}
 
     for name in sorted(repos):
         info = repos[name] or {}
@@ -170,6 +178,13 @@ def plan_update(state: dict) -> list:
                 f'{len(dirty)} modified file(s) ({", ".join(dirty[:3])}) — '
                 f'diff against origin/main before discarding; the local '
                 f'change may be a fix that never got committed'))
+            continue
+        rebuild = info.get('native_rebuild')
+        if rebuild:
+            # Off sigmond's native build pin: the builder fetches and checks
+            # out the pin, then rebuilds.  A pull would only move the source
+            # somewhere else again.  Two sources of one builder build once.
+            native_builds.setdefault(rebuild['builder'], rebuild)
             continue
         pinned = info.get('pinned') or ''
         if pinned and info.get('at_pin'):
@@ -244,6 +259,21 @@ def plan_update(state: dict) -> list:
                    'print(os.path.dirname(ka9q.__file__))" resolves to the '
                    'shared checkout, not the venv'))
         needs_restart = True
+
+    for builder in sorted(native_builds):
+        rb = native_builds[builder]
+        actions.append(Action(
+            'native-build', builder,
+            detail=(f'rebuild {builder}: pin {(rb.get("head") or "?")[:7]} '
+                    f'→ {(rb.get("pin") or "?")[:7]} — sigmond moved the '
+                    f'pin; the build checks it out and rebuilds'),
+            run_as='root',
+            verify=(f'`smd update` holds the source at its pin, and '
+                    f'/var/lib/sigmond/build-manifest/{builder}.toml '
+                    f'records it')))
+        if builder == 'ka9q-web':
+            # A new libonion reaches the running ka9q-web only on restart.
+            needs_restart = True
 
     # A locally managed ka9q-radio is rebuilt by whoever manages it, and
     # neither its rebuild nor a refusal to guess about one belongs here.

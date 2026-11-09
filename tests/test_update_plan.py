@@ -446,3 +446,68 @@ def test_an_align_pin_keeps_its_unpin_hint():
     assert '--unpin` releases it' in plan[0].reason
     assert '--unpin' not in plan_update(
         _state(repos={'onion': dict(_NATIVE)}))[0].reason
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-09: a native source OFF its pin is rebuilt, not just warned about
+# ---------------------------------------------------------------------------
+#
+# The v3.86 update test installed v3.85 (ubersdr_wsprd built at 529ec5d),
+# rolled sigmond forward to a pin of 8719788, and found the checkout and
+# the decoders still at 529ec5d: the update planned nothing and said "the
+# next build returns it", and no step of `smd update` ran that build.
+# cmd_update marks such a checkout with `native_rebuild`; the planner turns
+# it into one `native-build` step for the builder that owns the source.
+
+_OFF_PIN = {'behind': 4, 'dirty': [], 'owner': 'sigmond', 'installer': False,
+            'native_rebuild': {
+                'builder': 'ubersdr-decoders',
+                'head': '529ec5d2' + '0' * 32,
+                'pin': '8719788abb7718412a77ba85d0d4d6c717d1a58e'}}
+
+
+def test_a_native_source_off_its_pin_plans_its_build():
+    plan = plan_update(_state(repos={'ubersdr_wsprd': dict(_OFF_PIN)}))
+
+    builds = [a for a in plan if isinstance(a, Action)
+              and a.kind == 'native-build']
+    assert [b.target for b in builds] == ['ubersdr-decoders']
+    assert builds[0].detail.startswith(
+        'rebuild ubersdr-decoders: pin 529ec5d → 8719788')
+    assert builds[0].run_as == 'root'
+    assert builds[0].verify
+
+
+def test_a_native_source_off_its_pin_is_neither_pulled_nor_held():
+    plan = plan_update(_state(repos={'ubersdr_wsprd': dict(_OFF_PIN)}))
+
+    assert not [s for s in plan if isinstance(s, Refusal)]
+    assert not [a for a in plan if a.kind in ('pull', 'install')]
+
+
+def test_two_sources_of_one_build_plan_it_once():
+    """onion is ka9q-web's; were a second source to share a builder, one
+    build returns both."""
+    other = dict(_OFF_PIN, native_rebuild=dict(_OFF_PIN['native_rebuild']))
+    plan = plan_update(_state(repos={'ubersdr_wsprd': dict(_OFF_PIN),
+                                     'second_src': other}))
+
+    assert [a.target for a in plan if a.kind == 'native-build'] == [
+        'ubersdr-decoders']
+
+
+def test_a_native_build_runs_after_the_installs():
+    """sigmond's own install comes first: a pulled sigmond may move a pin."""
+    plan = plan_update(_state(repos={
+        'ubersdr_wsprd': dict(_OFF_PIN),
+        'sigmond': {'behind': 2, 'dirty': [], 'owner': 'sigmond'}}))
+    kinds = [a.kind for a in plan if isinstance(a, Action)]
+
+    assert kinds.index('install') < kinds.index('native-build')
+
+
+def test_a_locally_managed_native_source_is_not_rebuilt():
+    plan = plan_update(_state(repos={'ubersdr_wsprd': dict(_OFF_PIN)},
+                              locally_managed=['ubersdr_wsprd']))
+
+    assert not [a for a in plan if a.kind == 'native-build']

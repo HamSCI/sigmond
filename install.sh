@@ -1398,6 +1398,22 @@ else
     info "RAC not cloned (catalog repo unreachable) — skipping; add it later with 'smd install sigmond-rac'"
 fi
 
+# ─── native sources off sigmond's pin ─────────────────────────────────────────
+# A sigmond commit may move the pin of a source sigmond builds itself
+# (onion, wsjtx, ubersdr_wsprd).  `smd update` plans that rebuild, but an
+# OLDER smd that pulls this sigmond plans with its own, older pins; it runs
+# this install.sh, though, so the newer pin lands here in the same run.  The
+# v3.86 update test (2026-11-09) found v3.85 → main leaving ubersdr_wsprd and
+# its decoders at 529ec5d.  At the pin, and on a fresh host with no native
+# checkout yet, it does nothing.  Non-fatal: `smd update` and `smd doctor`
+# go on naming a source still off its pin.
+info "Checking native sources against sigmond's pins…"
+if $SUDO env SIGMOND_ALLOW_SUDO=1 "$INSTALL_SMD" admin native-build --apply; then
+    ok "native sources at sigmond's pins"
+else
+    warn "a native rebuild failed (non-fatal) — see the lines above; 'smd update' plans it again"
+fi
+
 # ─── done ─────────────────────────────────────────────────────────────────────
 echo
 echo -e "${BOLD}${GREEN}╔═══════════════════════════════════════════════════════╗${NC}"

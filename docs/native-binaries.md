@@ -141,8 +141,31 @@ commit out. So
 `HELD — pinned by sigmond's native build`; the plan pulls nothing and
 restarts nothing for it. `smd update --unpin` does not release it, because
 a pull would move the source off the commit the installed library was built
-from. A checkout off its pin draws a warning, and the next build returns it.
-Move a pin by bumping the constant.
+from.
+
+A checkout off its pin gets its build. When a sigmond commit moves a pin,
+the checkout and the installed binary both still hold the old commit.
+`smd update` then plans one step for the build that owns the source, for
+example `[native-build] ubersdr-decoders` with the line
+`rebuild ubersdr-decoders: pin 529ec5d → 8719788`. The build fetches the
+new pin, checks it out, rebuilds, and writes its build manifest. onion's
+build belongs to ka9q-web, so ka9q-web rebuilds too. `smd doctor` reports a
+checkout off its pin as `off-pin` (or `detached`, on a detached HEAD).
+
+The step runs `smd admin native-build --apply` as the `bin/smd` on disk, not
+as the smd process that planned the update. The update may have pulled
+sigmond a moment earlier, and only the pulled file knows the new pin.
+sigmond's `install.sh` runs the same command at its end. An older smd that
+pulls a newer sigmond runs the newer `install.sh`, so the newer pin still
+lands in that one `smd update --apply`. At the pin, the command does
+nothing. Move a pin by bumping the constant.
+
+Git in these checkouts runs as the tree's owner, never as root. `smd
+install` elevates itself, so on v3.85 and earlier images each build's
+`git clone` ran as root and left onion, wsjtx and ubersdr_wsprd root-owned.
+A build running as root now clones as `sigmond`. Before it fetches, it gives
+a root-owned or split-owned tree back to `sigmond:sigmond`, the owner
+`install.sh` gives `/opt/git/sigmond`.
 
 ## The `.provenance` sidecar
 
