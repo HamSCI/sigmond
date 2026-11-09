@@ -30908,6 +30908,10 @@ def main() -> int:
 
     if args.command == 'admin':
         args.command = getattr(args, 'admin_command', None)
+        # `smd admin storage` (trim, migrate-to-sqlite, tune-timestd) shares
+        # the name 'storage' with the ledger's `smd storage`; remember the
+        # route so the ledger branch below leaves the admin verbs alone.
+        args.via_admin = True
         if not args.command:
             p_admin.print_help()
             return 0
@@ -30963,7 +30967,7 @@ def main() -> int:
         from sigmond.commands.archive import cmd_archive
         return cmd_archive(args)
 
-    if args.command == 'storage':
+    if args.command == 'storage' and not getattr(args, 'via_admin', False):
         verb = getattr(args, 'storage_command', None) or 'status'
         if verb != 'status' and _need_root(f'storage {verb}'):
             return 1
