@@ -41,10 +41,13 @@ puts `smd` on your PATH.  Open a new shell afterwards (or `newgrp sigmond`).
 
 ```bash
 smd bringup dasi2 --callsign AC0G --grid EM38ww --reporter AC0G/S \
-                  --psws-station-id <S0000NN>
+                  --psws-station-id S000418 \
+                  --psws-instrument hf-timestd=367 \
+                  --psws-instrument mag-recorder=401
 ```
 
-Use your own callsign, grid, reporter ID and PSWS station ID.  `--dry-run` shows every step first.
+Use your own callsign, grid, reporter ID and PSWS ids (section 4 says where they come from).
+`--dry-run` shows every step first.
 `--non-interactive` accepts radiod's defaults; fine-tune clients afterwards with
 `smd config edit`.  `dasi2` gives a local radiod, hf-timestd, WSPR, FT4/FT8, meteor scatter and
 the magnetometer; `client` decodes from radiods on other machines (section 7).
@@ -68,18 +71,36 @@ What bring-up does to your machine:
 
 ## 4. Tell PSWS who you are
 
-If the station uploads to PSWS, put each instrument's ID in `/etc/sigmond/site-profile.toml` and
-render the client configs:
+The PSWS portal gives your site one **station ID** (`S000418`) and gives each product you send
+its own **instrument ID** under that station: one for the RX888 (GRAPE, from hf-timestd) and one
+for the magnetometer (mag-recorder).  Sigmond expects that arrangement first.
 
-```toml
-[psws.instruments]
-"hf-timestd"   = "<GRAPE instrument id>"
-"mag-recorder" = "<magnetometer instrument id>"
-```
+If you gave the ids to bring-up (section 3), you have nothing more to do here.  Bring-up wrote
+them to `/etc/sigmond/site-profile.toml`, created that file if your machine had none, and copied
+them into each recorder's own config.
+
+To set them later, or to change them:
 
 ```bash
-smd config render
+smd config psws --station S000418 \
+                --instrument hf-timestd=367 --instrument mag-recorder=401
 ```
+
+That command writes the `[psws]` block of `site-profile.toml` and runs `smd config render`, which
+carries the ids into hf-timestd, hamsci-physics and mag-recorder.  It keeps any id you do not
+name, so `--instrument mag-recorder=401` alone adds the magnetometer and leaves the rest.  Add
+`--dry-run` to see the block before it lands.
+
+If the portal enrolled an instrument under a station of its own, name that station for that
+instrument alone:
+
+```bash
+smd config psws --instrument mag-recorder=84 --instrument-station mag-recorder=S000082
+```
+
+Then register the machine's upload key with the portal: `smd psws enroll` prints it, and
+`smd psws verify` proves the portal accepted it
+([registration guide, section 5](operator/registration.md#5-psws--the-one-portal-step)).
 
 ## 5. Release uploads
 

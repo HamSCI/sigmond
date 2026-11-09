@@ -112,11 +112,17 @@ machine.  It works the same on bare metal and inside a VM:
 
 ```bash
 smd bringup dasi2 --callsign AC0G --grid EM38ww --reporter AC0G/S \
-                  --psws-station-id <S0000NN>
+                  --psws-station-id S000418 \
+                  --psws-instrument hf-timestd=367 \
+                  --psws-instrument mag-recorder=401
 ```
 
-Use your own callsign, grid square, reporter ID and PSWS station ID;
-`--psws-station-id` matters only if you upload to PSWS.
+Use your own callsign, grid square, reporter ID and PSWS ids.  The PSWS flags
+matter only if you upload to PSWS: one station ID for the site, and one
+instrument ID per product under it (the RX888 for hf-timestd, the
+magnetometer for mag-recorder).  Bring-up writes them to
+`/etc/sigmond/site-profile.toml` and into each recorder's config;
+`smd config psws` sets them later.
 `dasi2`, the default profile, gives you a local radiod, hf-timestd (GRAPE),
 WSPR, FT4/FT8, meteor scatter and the magnetometer.  `base` stops at radiod
 and timing; `client` decodes from radiods on other machines; see "Decode-only host"

@@ -253,10 +253,17 @@ do not control — so start it early rather than last.
 
 1. Go to **<https://pswsnetwork.eng.ua.edu/>** and create an account.
 2. Create a **Site** — one per physical location. PSWS assigns it a **station
-   ID** that looks like `S000170`.
-3. Add an **Instrument** for each product you will send. Each gets its own
-   **instrument ID**, a plain number. AC0G/B4 has two: `171` for GRAPE and
-   `372` for the magnetometer.
+   ID** that looks like `S000418`.
+3. Add an **Instrument** under that one site for each product you will send:
+   the RX888 (GRAPE, from `hf-timestd`) and, if you have one, the
+   magnetometer (`mag-recorder`). Each gets its own **instrument ID**, a plain
+   number. AC0G's bare-metal station `sigma` has two under `S000418`: `367`
+   for the RX888 and `401` for the magnetometer.
+
+One station ID with an instrument ID per product: sigmond expects this
+arrangement first. The portal used to allow one instrument per station, so an
+older site may hold its magnetometer under a station ID of its own. That still
+works; the last command below shows how.
 
 > **There is one address: `https://pswsnetwork.eng.ua.edu/`.** It is both the
 > portal you register in and the SFTP server your station uploads to, and it is
@@ -272,9 +279,26 @@ do not control — so start it early rather than last.
 > go over SFTP on port 22 and are unaffected. Report it upstream rather than
 > teaching operators to bypass certificate checks.
 
-If you already gave these to the wizard, skip to 5b. If not, put them in from
-the **host** with `sigmond-setup --reconfigure` (§1) — that is easier and safer
-than editing files.
+If you already gave these to the wizard, or to `smd bringup` on your own
+Linux machine, skip to 5b. If not:
+
+- **On a Proxmox appliance**, put them in from the **host** with
+  `sigmond-setup --reconfigure` (§1). That is easier and safer than editing
+  files.
+- **On your own Linux machine** (no Proxmox host) — `[VM]`:
+
+  ```bash
+  smd config psws --station S000418 \
+                  --instrument hf-timestd=367 --instrument mag-recorder=401
+  ```
+
+  `smd config psws` writes the ids into `/etc/sigmond/site-profile.toml`,
+  creating that file when the machine has none, and then runs
+  `smd config render`. Render copies them into each recorder's own
+  configuration. Ids you leave out stay as they were.
+
+  For a magnetometer that the portal enrolled under its own station, add
+  `--instrument-station mag-recorder=S000082` (with that station's ID).
 
 ### 5b. Register the key
 
