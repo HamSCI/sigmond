@@ -173,6 +173,9 @@ class NativeBuildVerbTests(_SourceRig):
         r = mock.patch.object(smd, "_record_native_build")
         self.record = r.start()
         self.addCleanup(r.stop)
+        # Root creates the marker directory (install.sh's run); these
+        # tests are not root, so it stands ready, as on a station.
+        self.failed.mkdir()
 
     def test_dry_run_names_the_rebuild_and_builds_nothing(self):
         self._pin(self.new)
@@ -309,6 +312,101 @@ class NativeBuildVerbTests(_SourceRig):
             smd.cmd_admin_native_build(args)
         self.assertFalse(self._marker("install").exists())
 
+    # -- root only, and by descriptor (security review of bb15419) ----------
+
+    def test_a_non_root_clear_goes_through_smd_as_root_never_rm(self):
+        self._plant()
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with mock.patch.object(smd, "_run", side_effect=fake_run), \
+                mock.patch.object(smd.os, "unlink",
+                                  side_effect=PermissionError(13, "denied")):
+            smd._clear_native_build_failed("ubersdr-decoders")
+        self.assertEqual(len(calls), 1, calls)
+        argv = calls[0]
+        self.assertEqual(argv[:4], ["sudo", "-n", "env",
+                                    "SIGMOND_ALLOW_SUDO=1"])
+        self.assertIn("--clear-failed", argv)
+        self.assertEqual(argv[-1], "ubersdr-decoders")
+        self.assertFalse(any(w in ("rm", "/bin/rm", "/usr/bin/rm")
+                             for w in argv), argv)
+        self.assertFalse(any(str(self.failed) in w for w in argv), argv)
+
+    def test_a_non_root_mark_with_no_directory_goes_through_root(self):
+        """Only root creates the directory, so an operator in the sigmond
+        group never ends up owning it."""
+        self.failed.rmdir()
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with mock.patch.object(smd, "_run", side_effect=fake_run):
+            smd._mark_native_build_failed("ubersdr-decoders", "parity")
+        self.assertFalse(os.path.lexists(self.failed))
+        self.assertEqual(calls[0][:4], ["sudo", "-n", "env",
+                                        "SIGMOND_ALLOW_SUDO=1"])
+        self.assertIn("--mark-failed", calls[0])
+
+    def test_clearing_through_a_symlinked_directory_leaves_its_target(self):
+        elsewhere = Path(self._tmp.name) / "elsewhere-dir2"
+        elsewhere.mkdir()
+        (elsewhere / "ubersdr-decoders").write_text("precious\n")
+        self.failed.rmdir()
+        self.failed.symlink_to(elsewhere)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            smd._clear_native_build_failed("ubersdr-decoders")
+        self.assertEqual((elsewhere / "ubersdr-decoders").read_text(),
+                         "precious\n")
+
+    def test_clear_failed_option_unlinks_by_descriptor(self):
+        """The root half of a non-root clear."""
+        self._plant()
+        args = types.SimpleNamespace(base=str(self.base), apply=False,
+                                     builders=["ubersdr-decoders"],
+                                     mark_failed=None, clear_failed=True)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            rc = smd.cmd_admin_native_build(args)
+        self.assertEqual(rc, 0)
+        self.assertFalse(self._marker().exists())
+
+    def test_root_makes_the_directory_0755_under_a_restrictive_umask(self):
+        """A root umask of 077 would leave 0700, and a non-root `smd
+        doctor` could not read it (re-review of bb15419)."""
+        self.failed.rmdir()
+        real_fstat = os.fstat
+
+        def fstat_as_root_owned(fd):
+            st = real_fstat(fd)
+            return os.stat_result((st.st_mode, st.st_ino, st.st_dev,
+                                   st.st_nlink, 0, 0, st.st_size,
+                                   st.st_atime, st.st_mtime, st.st_ctime))
+
+        old = os.umask(0o077)
+        try:
+            with mock.patch.object(smd.os, "geteuid", return_value=0), \
+                    mock.patch.object(smd.os, "fstat",
+                                      side_effect=fstat_as_root_owned):
+                os.close(smd._native_failed_dir_fd(create=True))
+        finally:
+            os.umask(old)
+        self.assertEqual(os.stat(self.failed).st_mode & 0o7777, 0o755)
+
+    def test_root_refuses_a_directory_it_does_not_own(self):
+        with mock.patch.object(smd.os, "geteuid", return_value=0):
+            with self.assertRaises(OSError):
+                smd._native_failed_dir_fd(create=True)
+            found = smd._native_build_failed_findings()
+        self.assertEqual(len(found), 1)
+        self.assertIn("unsafe", found[0].detail)
+
     # -- the marker directory is group-writable: no link is ever followed ---
 
     def test_a_symlink_at_the_marker_is_replaced_not_followed(self):
@@ -318,7 +416,6 @@ class NativeBuildVerbTests(_SourceRig):
         victim = Path(self._tmp.name) / "elsewhere" / "victim"
         victim.parent.mkdir()
         victim.write_text("precious\n")
-        self.failed.mkdir()
         self._marker().symlink_to(victim)
         smd._mark_native_build_failed("ubersdr-decoders", "parity")
         self.assertEqual(victim.read_text(), "precious\n")
@@ -328,7 +425,6 @@ class NativeBuildVerbTests(_SourceRig):
 
     def test_a_dangling_symlink_at_the_marker_creates_nothing_elsewhere(self):
         target = Path(self._tmp.name) / "created-by-root"
-        self.failed.mkdir()
         self._marker().symlink_to(target)
         smd._mark_native_build_failed("ubersdr-decoders", "parity")
         self.assertFalse(target.exists())
@@ -337,6 +433,7 @@ class NativeBuildVerbTests(_SourceRig):
     def test_a_symlinked_marker_directory_is_refused(self):
         elsewhere = Path(self._tmp.name) / "elsewhere-dir"
         elsewhere.mkdir()
+        self.failed.rmdir()
         self.failed.symlink_to(elsewhere)
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
@@ -347,7 +444,6 @@ class NativeBuildVerbTests(_SourceRig):
     def test_clearing_unlinks_a_symlink_and_leaves_its_target(self):
         victim = Path(self._tmp.name) / "victim2"
         victim.write_text("precious\n")
-        self.failed.mkdir()
         self._marker().symlink_to(victim)
         smd._clear_native_build_failed("ubersdr-decoders")
         self.assertFalse(os.path.lexists(self._marker()))
@@ -356,7 +452,6 @@ class NativeBuildVerbTests(_SourceRig):
     def test_doctor_does_not_read_through_a_symlink(self):
         victim = Path(self._tmp.name) / "victim3"
         victim.write_text('component = "secret"\nreason = "leak"\n')
-        self.failed.mkdir()
         self._marker().symlink_to(victim)
         found = smd._native_build_failed_findings()
         self.assertFalse(any("leak" in f.detail or f.component == "secret"

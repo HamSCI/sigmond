@@ -1493,23 +1493,55 @@ _NATIVE_FAILED_INSTALL = 'install'
 _NATIVE_MARKER_NAME = re.compile(r'^[a-z0-9][a-z0-9-]*$')
 
 
-def _native_failed_dir_fd() -> int:
-    """An O_NOFOLLOW descriptor on the marker directory, creating it (0755)
-    if absent.  As root, a directory someone else owns is refused: its
-    owner could swap names under us."""
+def _native_failed_dir_fd(create: bool = False) -> int:
+    """An O_NOFOLLOW descriptor on the marker directory, verified.
+
+    Only root creates the directory (`create`): os.mkdir, then fchmod 0755
+    on the open descriptor, so it stands root:root 0755 whatever root's
+    umask (a umask of 077 would otherwise leave 0700, and a non-root
+    `smd doctor` could not read it).  A caller that is not root never
+    creates it; its write goes through root (_native_marker_as_root), so an
+    operator in the sigmond group cannot end up owning it.
+
+    As root the directory must be root-owned, or it is refused: whoever
+    owns it could swap names under us.  A root-owned one gets fchmod 0755
+    on the verified descriptor, never by path.  Every read, write and
+    unlink below works relative to this one descriptor (openat/unlinkat)."""
     import errno
+    import stat
     from sigmond.safe_write import _open_parent
-    try:
-        os.mkdir(_NATIVE_BUILD_FAILED, 0o755)
-    except FileExistsError:
-        pass
+    root = os.geteuid() == 0
+    if create and root:
+        try:
+            os.mkdir(_NATIVE_BUILD_FAILED, 0o755)
+        except FileExistsError:
+            pass
+    elif create and not os.path.lexists(_NATIVE_BUILD_FAILED):
+        raise PermissionError(errno.EACCES, f'{_NATIVE_BUILD_FAILED}: only '
+                              f'root creates it')
     dfd = _open_parent(_NATIVE_BUILD_FAILED)
-    st = os.fstat(dfd)
-    if os.geteuid() == 0 and st.st_uid != 0:
-        os.close(dfd)
-        raise OSError(errno.EPERM, f'{_NATIVE_BUILD_FAILED} is owned by uid '
-                      f'{st.st_uid}, not root; refusing to write there')
+    if root:
+        st = os.fstat(dfd)
+        if st.st_uid != 0:
+            os.close(dfd)
+            raise OSError(errno.EPERM, f'{_NATIVE_BUILD_FAILED}: owned by '
+                          f'uid {st.st_uid}, not root; refusing to use it '
+                          f'(remove it, and root recreates it)')
+        if stat.S_IMODE(st.st_mode) != 0o755:
+            os.fchmod(dfd, 0o755)
     return dfd
+
+
+def _native_marker_as_root(flag: str, builder: str, *extra: str) -> None:
+    """Run this smd as root for one marker operation (`--mark-failed` or
+    `--clear-failed`): the same descriptor-relative code, with the
+    privilege, never a path-based rm/mv/tee as root."""
+    r = _run(['sudo', '-n', 'env', 'SIGMOND_ALLOW_SUDO=1', sys.executable,
+              str(Path(__file__).resolve()), 'admin', 'native-build',
+              flag, *extra, builder])
+    if r.returncode:
+        _warn(f'native-build: {flag} {builder} as root failed: '
+              f'{(r.stderr or "").strip()[-200:]}')
 
 
 def _mark_native_build_failed(builder: str, reason: str) -> None:
@@ -1517,7 +1549,7 @@ def _mark_native_build_failed(builder: str, reason: str) -> None:
     doctor`.  The install.sh hook cannot fail its install, so on the v3.85
     → main path nothing else would say so (2026-11-09 review)."""
     from datetime import datetime, timezone
-    from sigmond.safe_write import write_owned
+    from sigmond.safe_write import _write_at
     if not _NATIVE_MARKER_NAME.match(builder):
         _warn(f'native-build: not a builder name: {builder!r}')
         return
@@ -1525,27 +1557,35 @@ def _mark_native_build_failed(builder: str, reason: str) -> None:
     reason = reason.replace('\\', '/').replace('"', "'").replace('\n', ' ')
     text = f'component = "{builder}"\nreason = "{reason}"\nat = "{at}"\n'
     try:
-        os.close(_native_failed_dir_fd())
-        write_owned(_NATIVE_BUILD_FAILED / builder, text, mode=0o644,
-                    owner_from_dir=False,
-                    owner=(0, 0) if os.geteuid() == 0 else None)
+        dfd = _native_failed_dir_fd(create=True)
     except PermissionError:
-        # Not root: the same writer, as root.
-        r = _run(['sudo', '-n', 'env', 'SIGMOND_ALLOW_SUDO=1',
-                  sys.executable, str(Path(__file__).resolve()), 'admin',
-                  'native-build', '--mark-failed', reason, builder])
-        if r.returncode:
-            _warn(f'could not record the failed {builder} build: '
-                  f'{(r.stderr or "").strip()[-200:]}')
+        if os.geteuid() != 0:
+            _native_marker_as_root('--mark-failed', builder, reason)
+            return
+        raise
     except (OSError, ValueError) as exc:
         _warn(f'could not record the failed {builder} build: {exc}')
+        return
+    try:
+        _write_at(dfd, os.fstat(dfd), builder, _NATIVE_BUILD_FAILED / builder,
+                  text.encode(), 0o644,
+                  (0, 0) if os.geteuid() == 0 else None)
+    except PermissionError:
+        if os.geteuid() != 0:
+            _native_marker_as_root('--mark-failed', builder, reason)
+        else:
+            _warn(f'could not record the failed {builder} build: '
+                  f'permission denied')
+    except (OSError, ValueError) as exc:
+        _warn(f'could not record the failed {builder} build: {exc}')
+    finally:
+        os.close(dfd)
 
 
 def _native_failed_markers() -> list:
     """The builder names with a failure marker standing."""
-    from sigmond.safe_write import _open_parent
     try:
-        dfd = _open_parent(_NATIVE_BUILD_FAILED)
+        dfd = _native_failed_dir_fd()
     except OSError:
         return []
     try:
@@ -1556,14 +1596,14 @@ def _native_failed_markers() -> list:
 
 
 def _clear_native_build_failed(builder: str) -> None:
-    """Remove `builder`'s marker: unlink the NAME inside the O_NOFOLLOW
+    """Remove `builder`'s marker: unlinkat the NAME relative to the verified
     directory descriptor, never open it, so a planted link goes and its
-    target stays."""
-    from sigmond.safe_write import _open_parent
+    target stays.  Not root and not permitted: this smd again, as root,
+    through the same code (`--clear-failed`); never a path-based rm."""
     if not _NATIVE_MARKER_NAME.match(builder):
         return
     try:
-        dfd = _open_parent(_NATIVE_BUILD_FAILED)
+        dfd = _native_failed_dir_fd()
     except FileNotFoundError:
         return
     except OSError as exc:
@@ -1574,8 +1614,11 @@ def _clear_native_build_failed(builder: str) -> None:
     except FileNotFoundError:
         pass
     except PermissionError:
-        _run(['rm', '-f', '--', str(_NATIVE_BUILD_FAILED / builder)],
-             sudo=True)
+        if os.geteuid() != 0:
+            _native_marker_as_root('--clear-failed', builder)
+        else:
+            _warn(f'native-build: could not clear {builder}: permission '
+                  f'denied')
     except OSError as exc:
         _warn(f'native-build: could not clear {builder}: {exc}')
     finally:
@@ -1587,11 +1630,39 @@ def _native_build_failed_findings() -> list:
     Read without following a link; an unsafe marker is reported as such,
     its target never read."""
     from sigmond.doctor import Finding
-    from sigmond.safe_write import read_nofollow
+    from sigmond.safe_write import _read_at
     out = []
-    for name in _native_failed_markers():
+    try:
+        os.close(_native_failed_dir_fd())
+    except FileNotFoundError:
+        return out
+    except OSError as exc:
+        return [Finding('native-build', 'native-build-failed',
+                        f'the failure-marker directory is unsafe, so no '
+                        f'marker in it was read: {exc}')]
+    names = _native_failed_markers()
+    if not names:
+        return out
+    try:
+        dfd = _native_failed_dir_fd()
+    except OSError:
+        return out
+    try:
+        dst = os.fstat(dfd)
+        texts = {}
+        for name in names:
+            try:
+                got = _read_at(dfd, dst, name, _NATIVE_BUILD_FAILED / name)
+                texts[name] = got[0] if got else ''
+            except OSError as exc:
+                texts[name] = exc
+    finally:
+        os.close(dfd)
+    for name in names:
         try:
-            text = read_nofollow(_NATIVE_BUILD_FAILED / name) or ''
+            text = texts[name]
+            if isinstance(text, OSError):
+                raise text
             data = tomllib.loads(text)
         except OSError:
             out.append(Finding(
@@ -1652,6 +1723,12 @@ def cmd_admin_native_build(args) -> int:
     base = Path(getattr(args, 'base', None) or '/opt/git/sigmond')
     only = set(getattr(args, 'builders', None) or ())
     apply_ = getattr(args, 'apply', False)
+    clear = getattr(args, 'clear_failed', False)
+    if clear:
+        # The root half of a non-root clear (_clear_native_build_failed).
+        for b in sorted(only):
+            _clear_native_build_failed(b)
+        return 0
     mark = getattr(args, 'mark_failed', None)
     if mark is not None:
         # install.sh's fallback, when the --apply run itself died.  Named
@@ -1662,6 +1739,15 @@ def cmd_admin_native_build(args) -> int:
         for b in targets:
             _mark_native_build_failed(b, mark)
         return 0
+    if apply_ and os.geteuid() == 0:
+        # install.sh's run, as root: make the marker directory now, root:root
+        # 0755, before anything that is not root could ask for it.  Through
+        # the verified descriptor, not `install -d`, which as root would
+        # chown and chmod through a link planted in /var/lib/sigmond.
+        try:
+            os.close(_native_failed_dir_fd(create=True))
+        except OSError as exc:
+            _warn(f'native-build: marker directory: {exc}')
     due_all = _native_rebuilds_due(base)
     due = [d for d in due_all if not only or d[1] in only]
     if apply_ and not only:
@@ -29500,6 +29586,9 @@ def _build_parser() -> argparse.ArgumentParser:
                           help='record a failed build for smd doctor (the '
                                'named builders, else "install"); install.sh '
                                'uses it when the --apply run dies')
+    p_native.add_argument('--clear-failed', action='store_true',
+                          help='remove the named builders\' failure markers '
+                               '(smd itself uses it to clear as root)')
     p_native.add_argument('--base', default='/opt/git/sigmond',
                           help='checkout root (default /opt/git/sigmond)')
 

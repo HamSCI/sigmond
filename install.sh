@@ -1411,7 +1411,10 @@ fi
 # The verb writes it.  If the verb died before it could, `--mark-failed`
 # records an `install` marker through the same writer; never tee into that
 # directory from bash, since the recorders' group can write /var/lib/sigmond
-# and a planted link would aim root's write anywhere.
+# and a planted link would aim root's write anywhere.  The same root run
+# creates /var/lib/sigmond/native-build-failed, root:root 0755 whatever the
+# umask (fchmod on a verified descriptor).  Not `install -d -o root`: as
+# root that would chown and chmod through a link planted beside it.
 info "Checking native sources against sigmond's pins…"
 if $SUDO env SIGMOND_ALLOW_SUDO=1 "$INSTALL_SMD" admin native-build --apply; then
     ok "native sources at sigmond's pins"

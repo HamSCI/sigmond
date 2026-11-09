@@ -180,7 +180,16 @@ native-build --mark-failed`; only a full run that succeeds removes that
 one. The recorders' group can write `/var/lib/sigmond`, so smd writes and
 removes these markers through `sigmond.safe_write`, which never follows a
 link: a link planted at a marker gets replaced, and its target stays as it
-was. After a ka9q-web rebuild, the command prints a
+was.
+
+Only root creates the marker directory. `install.sh`'s run of the command
+makes it, root:root 0755 whatever root's umask. Root then uses the
+directory only while root owns it, and reads, writes and removes each
+marker relative to one open descriptor on it, never by path. smd run by
+another user never creates the directory, and never deletes a marker with a
+path-based `rm`. When it lacks permission, it runs itself again as root
+(`sudo -n`, with `--mark-failed` or `--clear-failed`), through the same
+code. After a ka9q-web rebuild, the command prints a
 reminder to restart ka9q-web; it does not restart the viewer itself.
 
 Git in these checkouts runs as the tree's owner, never as root. `smd
