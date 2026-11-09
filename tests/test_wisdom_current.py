@@ -654,3 +654,56 @@ def test_the_module_paths_are_read_at_call_time(tmp_path, monkeypatch):
     assert wisdom.cpu_model() == 'Imaginary CPU 9000'
     assert wisdom.identify_cpu([tmp_path])['model'] == 'Imaginary CPU 9000'
     assert wisdom.wisdom_is_current() is False          # no file at the patched path
+
+
+# ── sigma 2026-11-09: radiod started mid-plan never loaded the new wisdom ──
+
+def test_resume_restarts_a_radiod_that_started_before_the_wisdom(pairing, monkeypatch, tmp_path):
+    calls, marker = pairing
+    monkeypatch.setattr(smd, 'cmd_restart', lambda a: calls.append('restart') or 0)
+    monkeypatch.setattr(smd, '_radiods_older_than_wisdom', lambda *a: ['radiod@sigma.service'])
+    assert smd.cmd_wisdom_suspend(_Args()) == 0
+    assert smd.cmd_wisdom_resume(_Args()) == 0
+    assert calls == ['stop', 'start', 'restart']
+
+
+def test_resume_leaves_a_radiod_started_after_the_wisdom(pairing, monkeypatch):
+    calls, marker = pairing
+    monkeypatch.setattr(smd, 'cmd_restart', lambda a: calls.append('restart') or 0)
+    monkeypatch.setattr(smd, '_radiods_older_than_wisdom', lambda *a: [])
+    assert smd.cmd_wisdom_suspend(_Args()) == 0
+    assert smd.cmd_wisdom_resume(_Args()) == 0
+    assert calls == ['stop', 'start']
+
+
+def test_radiods_older_than_wisdom_compares_active_entry_with_the_file(monkeypatch, tmp_path):
+    import os
+    import time as _t
+    wf = tmp_path / 'wisdomf'
+    wf.write_text('x')
+    now = _t.time()
+    os.utime(wf, (now, now))
+    boot = now - _t.monotonic()
+    entered = {'radiod@old.service': now - 3600, 'radiod@new.service': now + 60}
+
+    def run(cmd, **kw):
+        if cmd[:2] == ['systemctl', 'list-units']:
+            out = 'radiod@old.service loaded active running x\nradiod@new.service loaded active running x\n'
+        else:
+            out = str(int((entered[cmd[-1]] - boot) * 1e6))
+        return subprocess.CompletedProcess(cmd, 0, out, '')
+    monkeypatch.setattr(smd, '_run', run)
+    assert smd._radiods_older_than_wisdom(wf) == ['radiod@old.service']
+
+
+def test_the_streaming_gate_never_starts_radiod_while_the_planner_holds_it(monkeypatch, tmp_path):
+    marker = tmp_path / 'wisdom-suspended'
+    marker.write_text('suspended\n')
+    monkeypatch.setattr(smd, '_WISDOM_SUSPEND_MARKER', marker)
+    monkeypatch.setattr('glob.glob', lambda pat: ['/etc/radio/radiod@sigma.conf'])
+    ran = []
+    monkeypatch.setattr(smd, '_run', lambda cmd, **kw: ran.append(cmd) or
+                        subprocess.CompletedProcess(cmd, 3, '', ''))
+    monkeypatch.setattr(smd.time, 'sleep', lambda s: None)
+    smd._bringup_wait_streaming()
+    assert not any('restart' in c or 'start' in c for c in ran), ran
