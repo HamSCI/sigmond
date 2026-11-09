@@ -3,7 +3,7 @@
 > **Audience:** operator
 > **Status:** current
 > **Verified against:** sigmond 913bfed on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 6406025 on 2026-10-10: remote-access words and the addresses the host relays checked against commands/remote.py, the wizard's switch and the appliance console panel; held packages against sink_doors.py
-> **Canonical for:** getting a station's uploads accepted (PSWS, wsprnet, pskreporter, wsprdaemon)
+> **Canonical for:** getting a station's uploads accepted (PSWS, wsprnet, pskreporter, wsprdaemon; airframes.io, optional)
 
 Your station starts hearing signals the moment the install finishes. This page
 is about the other half: making the four places your data goes **accept** it and
@@ -16,6 +16,9 @@ The good news first, because it saves most people an afternoon of worry:
 - **wsprdaemon.org** — nothing to register; it registers itself on your first upload.
 - **PSWS (HamSCI)** — **the only place you fill in a form.** One account, one
   site, one instrument per product, then paste one key.
+
+One more place stays **off unless you turn it on**: airframes.io, which collects the aircraft
+messages hfdl-recorder decodes.  It needs an account of your own.  See §9.
 
 So: read the first three sections to learn *where to look* for your data, and
 budget your real effort for PSWS.
@@ -553,3 +556,47 @@ yourself; the full diagnosis for each lives in
 When you ask for help, send the four outputs listed on
 [the operator front page](README.md#getting-help--what-to-send), plus
 `smd psws status`.
+
+---
+
+## 9. airframes.io — optional, off by default
+
+If your station runs **hfdl-recorder**, it decodes the HFDL data links between aircraft and their
+ground stations, on 3 to 22 MHz.  It always keeps those decodes on the station, one file per band
+under `/var/lib/hfdl-recorder/`.  HamSCI uses hfdl-recorder for timing, from the ground stations'
+squitters, and needs nothing from airframes.io.
+
+[airframes.io](https://app.airframes.io) gathers HFDL decodes from listeners around the world and
+maps the aircraft.  hfdl-recorder can send your decodes there as they arrive.  The feed ships
+**switched off**, because airframes.io needs an account and a station registered in your name.
+Turn it on only if you want to share.
+
+**To turn it on** — the steps live in hfdl-recorder's README, under
+[*Feeding airframes.io*](https://github.com/HamSCI/hfdl-recorder#feeding-airframesio).  In short:
+
+1. Create an account at <https://app.airframes.io>.
+2. Register a station under it, with the software set to `HFDL-DUMPHFDL`.  Note the station name
+   you chose; airframes.io matches it exactly, capitals included.
+3. In `/etc/hfdl-recorder/hfdl-recorder-config.toml`, under `[sinks]`, set
+   `airframes_io = true` and `airframes_station_id` to that name.  Leave `station_id` under
+   `[station]` as it is: your own HFDL records keep that name.
+4. Check the file and restart — `[VM]`:
+
+   ```bash
+   sudo -u hfdlrec hfdl-recorder validate --json | jq .ok    # → true
+   sudo systemctl restart hfdl-recorder@<radiod-id>
+   ```
+
+5. Within about 15 minutes of the first aircraft heard, your station appears at
+   `https://app.airframes.io/stations/<your-station-name>`.
+
+**Things to know:**
+
+- airframes.io accepts the connection even when the station name does not match a registered
+  station, then throws the messages away.  An empty station page after an hour, with traffic on
+  the bands, almost always means a mismatched name.
+- This feed runs outside the site sink switch (§6, and the
+  [glossary](glossary.md)): `smd sink` does not stop it.  To stop it, set `airframes_io = false`
+  and restart hfdl-recorder.
+- To turn it off, reverse step 3.  Nothing else on the station depends on it.
+
