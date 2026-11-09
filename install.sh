@@ -111,7 +111,7 @@ else
 
     # Check sudo-granting group membership: sudo (Debian/Ubuntu),
     # wheel (RHEL/Fedora/Arch), admin (some derivatives).
-    if ! id -nG "$INVOKER" 2>/dev/null | tr ' ' '\n' | grep -Eqx 'sudo|wheel|admin'; then
+    if ! grep -Eqx 'sudo|wheel|admin' <<<"$(id -nG "$INVOKER" 2>/dev/null | tr ' ' '\n')"; then
         cat >&2 <<EOF
 
 ${RED}[error]${NC} User '$INVOKER' is not in the sudo (or wheel) group.
@@ -299,7 +299,7 @@ ok "sigmond user/group ready: $(getent passwd sigmond | cut -d: -f1,3,4,7)"
 # sudo; falls back to $USER for direct-as-root invocations.
 INVOKER="${SUDO_USER:-${USER:-}}"
 if [[ -n "$INVOKER" && "$INVOKER" != "root" ]]; then
-    if ! id -nG "$INVOKER" 2>/dev/null | tr ' ' '\n' | grep -qx sigmond; then
+    if ! grep -qx sigmond <<<"$(id -nG "$INVOKER" 2>/dev/null | tr ' ' '\n')"; then
         info "Adding $INVOKER to sigmond group"
         $SUDO usermod -aG sigmond "$INVOKER"
         warn "$INVOKER must log out and back in (or 'newgrp sigmond') for group membership to take effect"
@@ -328,8 +328,8 @@ ok "/opt/git/sigmond ownership and permissions set"
 info "Adding system-wide git safe.directory entries for /opt/git/sigmond/*"
 for _repo_dir in /opt/git/sigmond/*/; do
     _repo_dir="${_repo_dir%/}"  # strip trailing slash
-    if ! $SUDO git config --system --get-all safe.directory 2>/dev/null \
-            | grep -Fxq "$_repo_dir"; then
+    if ! grep -Fxq "$_repo_dir" \
+            <<<"$($SUDO git config --system --get-all safe.directory 2>/dev/null || true)"; then
         $SUDO git config --system --add safe.directory "$_repo_dir"
     fi
 done
@@ -1193,8 +1193,12 @@ ok "sigmond-radiod-pin-threads symlink installed"
 # child from taking the agent with it.  `smd doctor --fix` rewrites a stale
 # copy on stations this script no longer reaches.  See the drop-in's header and
 # scripts/proxmox/pm-heartbeat.py::_check_guest_exec (the alarm side).
-if systemctl list-unit-files qemu-guest-agent.service >/dev/null 2>&1 \
-        && systemctl list-unit-files qemu-guest-agent.service 2>/dev/null | grep -q qemu-guest-agent; then
+# Capture first, then grep: under `set -o pipefail` a `systemctl ... | grep -q`
+# pipeline fails whenever grep -q exits before systemctl finishes writing
+# (SIGPIPE), and the drop-in was then skipped without a word (v3.86 golden
+# build, 2026-11-09 17:40Z; the same build had passed four hours earlier).
+_qga_units=$(systemctl list-unit-files qemu-guest-agent.service 2>/dev/null || true)
+if grep -q qemu-guest-agent <<<"$_qga_units"; then
     info "Installing qemu-guest-agent self-heal drop-in"
     $SUDO install -d -m 0755 /etc/systemd/system/qemu-guest-agent.service.d
     $SUDO install -m 0644 "$REPO_DIR/systemd/qemu-guest-agent-selfheal.conf" \
@@ -1378,7 +1382,7 @@ info "Marking /opt/git/sigmond repos as git safe.directory (system-wide)…"
 for _repo in /opt/git/sigmond/*/; do
     _repo="${_repo%/}"
     [[ -d "$_repo/.git" ]] || continue
-    $SUDO git config --system --get-all safe.directory 2>/dev/null | grep -qxF "$_repo" \
+    grep -qxF "$_repo" <<<"$($SUDO git config --system --get-all safe.directory 2>/dev/null || true)" \
         || $SUDO git config --system --add safe.directory "$_repo"
 done
 
