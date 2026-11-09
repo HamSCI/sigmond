@@ -87,6 +87,12 @@ class _Rig(unittest.TestCase):
         _git("push", "origin", "main", cwd=seed)
         self.logdir = root / "logs"
         self._patches = [
+            # The host's own native build records (the devbox holds real
+            # decoder builds) must not decide what these rigs plan.
+            mock.patch.object(smd, "_DECODER_DIR", root / "decoders"),
+            mock.patch.object(smd, "_BUILD_MANIFEST_DIR", root / "manifests"),
+            mock.patch.object(smd, "_NATIVE_BUILD_FAILED",
+                              root / "native-build-failed"),
             mock.patch.object(smd.subprocess, "run", side_effect=_run_without_runuser),
             mock.patch.object(smd, "UPDATE_LOG_DIR", self.logdir),
             mock.patch.object(smd, "_venv_sibling_skew", return_value=([], [])),
@@ -674,13 +680,53 @@ class NativeBuildOffPinUbersdrTests(_NativePinRig):
             calls.append(cmd)
             return subprocess.CompletedProcess(cmd, 0, "built\n", "")
 
-        with mock.patch.object(smd.subprocess, "run", side_effect=fake_run):
+        with mock.patch.object(smd.subprocess, "run", side_effect=fake_run), \
+                mock.patch.object(smd.os, "geteuid", return_value=0):
             rc = smd._run_native_build_step("ubersdr-decoders", self.base)
         self.assertEqual(rc, 0)
         argv = calls[-1]
         self.assertIn(str(Path(smd.__file__).resolve()), argv)
         self.assertEqual(argv[-5:], ["native-build", "--apply", "--base",
                                      str(self.base), "ubersdr-decoders"])
+        # Already root: no sudo in front.
+        self.assertNotIn("sudo", argv)
+
+    def test_the_step_elevates_when_the_operator_runs_the_update(self):
+        """An operator runs `smd update --apply` as themselves.  The child
+        must run as root, non-interactively: the ownership repair, the
+        history line and the failure record need it, and a builder's own
+        `sudo` would otherwise prompt inside a captured child (review of
+        69f036a)."""
+        calls = []
+
+        def fake_run(cmd, *a, **kw):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with mock.patch.object(smd.subprocess, "run", side_effect=fake_run), \
+                mock.patch.object(smd.os, "geteuid", return_value=1000):
+            smd._run_native_build_step("ubersdr-decoders", self.base)
+        self.assertEqual(calls[-1][:4],
+                         ["sudo", "-n", "env", "SIGMOND_ALLOW_SUDO=1"])
+        self.assertIn("native-build", calls[-1])
+
+    def test_at_its_pin_with_a_stale_build_the_update_rebuilds(self):
+        """The build failed after its checkout (UberSDR's parity check
+        refuses to install): HEAD sits at the new pin, the old decoders
+        stay.  A HEAD-only check held it as current for good."""
+        pin = self._head()
+        self._pin_constant(self.CONST, pin)
+        old = "529ec5d2530f5ffc2ad4a73a3be6c10c0a8b4027"
+        marker = Path(self._tmp.name) / "decoders" / "ubersdr" / ".provenance"
+        marker.parent.mkdir(parents=True)
+        marker.write_text(f"ubersdr-decoders {old} version=x parity=verified\n")
+        step = self._mock_native_step()
+        rc, text = self._run_update()
+        self.assertIn("[native-build] ubersdr-decoders", text)
+        self.assertIn(f"rebuild ubersdr-decoders: pin {old[:7]} → {pin[:7]}",
+                      text)
+        self.assertNotIn("HELD", text)
+        self.assertEqual(rc, 0, text)
 
 
 class NativeBuildPinTableTests(unittest.TestCase):

@@ -1405,13 +1405,21 @@ fi
 # this install.sh, though, so the newer pin lands here in the same run.  The
 # v3.86 update test (2026-11-09) found v3.85 → main leaving ubersdr_wsprd and
 # its decoders at 529ec5d.  At the pin, and on a fresh host with no native
-# checkout yet, it does nothing.  Non-fatal: `smd update` and `smd doctor`
-# go on naming a source still off its pin.
+# checkout yet, it does nothing.  Non-fatal, so it must not be silent: a
+# failed build leaves /var/lib/sigmond/native-build-failed, which `smd
+# doctor` reports until a later build succeeds.  The verb writes it; the
+# line below covers a verb that died before it could.
 info "Checking native sources against sigmond's pins…"
 if $SUDO env SIGMOND_ALLOW_SUDO=1 "$INSTALL_SMD" admin native-build --apply; then
     ok "native sources at sigmond's pins"
 else
-    warn "a native rebuild failed (non-fatal) — see the lines above; 'smd update' plans it again"
+    _nbf=/var/lib/sigmond/native-build-failed
+    if [[ ! -f "$_nbf" ]]; then
+        $SUDO install -d /var/lib/sigmond
+        printf 'component = "native-build"\nreason = "smd admin native-build --apply exited non-zero during install.sh"\nat = "%s"\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" | $SUDO tee "$_nbf" >/dev/null
+    fi
+    warn "a native rebuild failed (non-fatal) — see the lines above; 'smd doctor' reports it, 'smd update' plans it again"
 fi
 
 # ─── done ─────────────────────────────────────────────────────────────────────

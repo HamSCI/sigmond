@@ -71,6 +71,16 @@ class _SourceRig(unittest.TestCase):
         _git("commit", "-qm", "two", cwd=self.src)
         self.new = _git("rev-parse", "HEAD", cwd=self.src).stdout.strip()
         _git("checkout", "-q", self.old, cwd=self.src)
+        root = Path(self._tmp.name)
+        self.decoders = root / "decoders"
+        self.manifests = root / "manifests"
+        self.failed = root / "native-build-failed"
+        for name, path in (("_DECODER_DIR", self.decoders),
+                           ("_BUILD_MANIFEST_DIR", self.manifests),
+                           ("_NATIVE_BUILD_FAILED", self.failed)):
+            p = mock.patch.object(smd, name, path)
+            p.start()
+            self.addCleanup(p.stop)
 
     def _pin(self, sha):
         p = mock.patch.object(smd, "_UBERSDR_COMMIT", sha)
@@ -106,6 +116,50 @@ class NativeRebuildsDueTests(_SourceRig):
         empty = Path(self._tmp.name) / "empty"
         empty.mkdir()
         self.assertEqual(smd._native_rebuilds_due(empty), [])
+
+
+class StaleBuildAtThePinTests(_SourceRig):
+    """Review of 69f036a, finding 2: a build that fails after its checkout
+    leaves HEAD at the new pin and the old binaries installed."""
+
+    def _provenance(self, sha):
+        m = self.decoders / "ubersdr" / ".provenance"
+        m.parent.mkdir(parents=True, exist_ok=True)
+        m.write_text(f"ubersdr-decoders {sha} version=x parity=verified\n")
+
+    def test_at_the_pin_with_a_stale_provenance_is_due(self):
+        self._pin(self.old)                  # HEAD == pin
+        self._provenance(self.new)           # but the build came from elsewhere
+        self.assertEqual(smd._native_rebuilds_due(self.base),
+                         [("ubersdr_wsprd", "ubersdr-decoders",
+                           self.new, self.old)])
+
+    def test_at_the_pin_with_a_matching_provenance_is_held(self):
+        self._pin(self.old)
+        self._provenance(self.old)
+        self.assertEqual(smd._native_rebuilds_due(self.base), [])
+
+    def test_at_the_pin_with_no_build_record_is_held(self):
+        """A host that never built UberSDR's decoders must not retry the
+        build on every update."""
+        self._pin(self.old)
+        self.assertEqual(smd._native_rebuilds_due(self.base), [])
+
+    def test_the_build_manifest_is_the_fallback_record(self):
+        self._pin(self.old)
+        self.manifests.mkdir()
+        (self.manifests / "ubersdr-decoders.toml").write_text(
+            '[[upstream]]\nname = "ubersdr_wsprd"\n'
+            f'sha = "{self.new}"\n')
+        self.assertEqual(smd._native_built_from("ubersdr_wsprd"), self.new)
+        self.assertEqual(len(smd._native_rebuilds_due(self.base)), 1)
+
+    def test_diag_checks_the_decoder_builds_against_their_pins(self):
+        pins = smd._expected_build_pins()
+        self.assertEqual(pins["ubersdr-decoders"],
+                         {"ubersdr_wsprd": smd._UBERSDR_COMMIT})
+        self.assertEqual(pins["wsjtx-decoders"],
+                         {"wsjtx": smd._WSJTX_COMMIT})
 
 
 class NativeBuildVerbTests(_SourceRig):
@@ -149,6 +203,56 @@ class NativeBuildVerbTests(_SourceRig):
         self.assertEqual(rc, 1, text)
         self.record.assert_not_called()
 
+    def test_a_failed_build_leaves_a_record_doctor_reports(self):
+        """install.sh cannot fail its install over this, so on the v3.85 →
+        main path nothing else says it (review of 69f036a, finding 3)."""
+        self._pin(self.new)
+        self.build.return_value = False
+        self._verb(apply=True)
+        self.assertTrue(self.failed.exists())
+        found = smd._native_build_failed_findings()
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].kind, "native-build-failed")
+        self.assertEqual(found[0].component, "ubersdr-decoders")
+        self.assertIn("smd admin native-build --apply", found[0].detail)
+
+    def test_a_successful_build_clears_the_record(self):
+        self._pin(self.new)
+        self.build.return_value = False
+        self._verb(apply=True)
+        self.build.return_value = True
+        rc, _text = self._verb(apply=True)
+        self.assertEqual(rc, 0)
+        self.assertFalse(self.failed.exists())
+        self.assertEqual(smd._native_build_failed_findings(), [])
+
+    def test_a_run_with_nothing_due_clears_the_record(self):
+        self.failed.write_text('component = "ubersdr-decoders"\n')
+        self._pin(self.old)
+        self._verb(apply=True)
+        self.assertFalse(self.failed.exists())
+
+    def test_a_dry_run_leaves_the_record(self):
+        self.failed.write_text('component = "ubersdr-decoders"\n')
+        self._pin(self.old)
+        self._verb()
+        self.assertTrue(self.failed.exists())
+
+    def test_a_ka9q_web_build_says_to_restart_the_viewer(self):
+        with mock.patch.object(smd, "_ONION_COMMIT", "f" * 40), \
+                mock.patch.object(smd, "_build_ka9q_web_with_onion",
+                                  return_value=True):
+            onion = self.base / "onion"
+            onion.mkdir()
+            _git("init", "-q", "-b", "master", cwd=onion)
+            (onion / "x").write_text("x\n")
+            _git("add", "-A", cwd=onion)
+            _git("commit", "-qm", "x", cwd=onion)
+            self._pin(self.old)
+            rc, text = self._verb("ka9q-web", apply=True)
+        self.assertEqual(rc, 0, text)
+        self.assertIn("restart ka9q-web", text)
+
     def test_a_named_builder_limits_the_run(self):
         self._pin(self.new)
         rc, text = self._verb("wsjtx-decoders", apply=True)
@@ -181,8 +285,10 @@ class NativeGitOwnershipTests(unittest.TestCase):
             self.calls.append(list(cmd))
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
-        for target, kw in ((smd, dict(new=fake_run, attr="_run")),):
-            p = mock.patch.object(target, kw["attr"], side_effect=kw["new"])
+        for attr, fake in (("_run", fake_run),
+                           ("_run_git_net",
+                            lambda cmd, verb: fake_run(cmd))):
+            p = mock.patch.object(smd, attr, side_effect=fake)
             p.start()
             self.addCleanup(p.stop)
 
@@ -207,6 +313,18 @@ class NativeGitOwnershipTests(unittest.TestCase):
         self.assertEqual(len(git), 1, self.calls)
         self.assertEqual(git[0][:5], ["sudo", "-u", "sigmond", "-H", "--"])
         self.assertIn("fetch", git[0])
+
+    def test_a_fetch_is_bounded_by_the_network_timeout(self):
+        """install.sh runs these builds; a black-holed fetch must fail it,
+        not hang it."""
+        self._as_root("drop", "sigmond")
+        with mock.patch.object(smd, "_run_git_net",
+                               return_value=subprocess.CompletedProcess(
+                                   [], 0, "", "")) as net:
+            smd._native_git(self.src, "fetch", "--quiet", "origin")
+            smd._native_git(self.src, "checkout", "--quiet", "abc")
+        self.assertEqual(net.call_count, 1)
+        self.assertIn("fetch", net.call_args.args[0])
 
     def test_a_tree_owned_by_a_user_runs_git_as_that_user(self):
         self._as_root("drop", "sigmond")

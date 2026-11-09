@@ -160,6 +160,21 @@ pulls a newer sigmond runs the newer `install.sh`, so the newer pin still
 lands in that one `smd update --apply`. At the pin, the command does
 nothing. Move a pin by bumping the constant.
 
+A checkout at its pin can still need its build. UberSDR's parity check
+refuses to install a build that decodes differently, and then the checkout
+sits at the new pin while the old decoders stay installed. So the command
+also compares the pin with the commit the installed build records: the
+decoders' `.provenance` marker first, then the build manifest. `smd admin
+diag` checks the same manifests. A source with no build record at all
+stays held, because a host that never built UberSDR's decoders should not
+retry the build on every update.
+
+The update runs the command as root, through `sudo -n` when the operator
+runs `smd update` as themselves. A failed build leaves
+`/var/lib/sigmond/native-build-failed`, and `smd doctor` reports it until a
+later build succeeds. After a ka9q-web rebuild, the command prints a
+reminder to restart ka9q-web; it does not restart the viewer itself.
+
 Git in these checkouts runs as the tree's owner, never as root. `smd
 install` elevates itself, so on v3.85 and earlier images each build's
 `git clone` ran as root and left onion, wsjtx and ubersdr_wsprd root-owned.

@@ -394,6 +394,15 @@ class CollectFindingsTests(unittest.TestCase):
         # _load_topology take its deterministic "no topology file"
         # default rather than picking up whatever the test host has.
         smd.TOPOLOGY_PATH = self.tdir / 'no-such-topology.toml'
+        # Native build records live on the host; this one may hold real
+        # decoder builds (the devbox does).  Point them at nothing.
+        for name, path in (('_DECODER_DIR', self.tdir / 'decoders'),
+                           ('_BUILD_MANIFEST_DIR', self.tdir / 'manifests'),
+                           ('_NATIVE_BUILD_FAILED',
+                            self.tdir / 'native-build-failed')):
+            p = mock.patch.object(smd, name, path)
+            p.start()
+            self.addCleanup(p.stop)
         # The guest-agent family asks the host's systemd whether the agent
         # unit exists; keep these tests independent of the machine they run on.
         # So does radiod's drop-in family; tests/conftest.py fails a real
@@ -641,6 +650,32 @@ class CollectFindingsTests(unittest.TestCase):
             _clean, findings = smd.collect_findings(base=str(self.base))
         self.assertEqual([f for f in findings
                           if f.kind in ('off-pin', 'detached')], [])
+
+    def test_a_failed_native_build_record_is_a_finding(self):
+        self._force_manifest_clean()
+        smd._NATIVE_BUILD_FAILED.write_text(
+            'component = "ubersdr-decoders"\nreason = "parity"\n'
+            'at = "2026-11-09T15:00:00Z"\n')
+        _clean, findings = smd.collect_findings(base=str(self.base))
+        found = [f for f in findings if f.kind == 'native-build-failed']
+        self.assertEqual(len(found), 1, findings)
+        self.assertIn('parity', found[0].detail)
+
+    def test_at_a_native_pin_with_a_stale_build_is_a_finding(self):
+        self._force_manifest_clean()
+        self._make_component('ubersdr_wsprd')
+        self._doctor_mod.git_state = lambda d: {
+            'error': None, 'dirty': [], 'untracked': [], 'ahead': 0,
+            'detached': True, 'pin': '', 'head': self.SHA, 'at_pin': False}
+        marker = smd._DECODER_DIR / 'ubersdr' / '.provenance'
+        marker.parent.mkdir(parents=True)
+        marker.write_text(f"ubersdr-decoders {'5' * 40} parity=verified\n")
+        with mock.patch.object(smd, '_UBERSDR_COMMIT', self.SHA):
+            _clean, findings = smd.collect_findings(base=str(self.base))
+        found = [f for f in findings if f.kind == 'off-pin']
+        self.assertEqual(len(found), 1, findings)
+        self.assertIn('installed build came from 555555555555',
+                      found[0].detail)
 
 
 if __name__ == '__main__':

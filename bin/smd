@@ -1385,12 +1385,18 @@ def _native_git_prefix(src: Path) -> 'list | None':
 
 
 def _native_git(src: Path, *args: str) -> subprocess.CompletedProcess:
-    """`git -C <src> <args>` as the tree's owner (_native_git_prefix)."""
+    """`git -C <src> <args>` as the tree's owner (_native_git_prefix).
+
+    A fetch goes through _run_git_net, bounded: install.sh runs these
+    builds, and a black-holed fetch must fail it, not hang it."""
     prefix = _native_git_prefix(src)
     if prefix is None:
         return _git_refused(src, args[0] if args else 'git')
-    return _run(prefix + ['git', '-c', f'safe.directory={src}',
-                          '-C', str(src), *args])
+    cmd = prefix + ['git', '-c', f'safe.directory={src}', '-C', str(src),
+                    *args]
+    if args and args[0] == 'fetch':
+        return _run_git_net(cmd, 'fetch')
+    return _run(cmd)
 
 
 def _native_clone(url: str, src: Path) -> subprocess.CompletedProcess:
@@ -1402,23 +1408,124 @@ def _native_clone(url: str, src: Path) -> subprocess.CompletedProcess:
     return _run(cmd)
 
 
+_HEX40 = re.compile(r'\b[0-9a-f]{40}\b')
+
+
+def _native_built_from(name: str) -> str:
+    """The commit the INSTALLED build of native source `name` came from, or
+    '' when no record of a build exists here.
+
+    The decoders' `.provenance` marker is what their builders trust for
+    idempotency, so it comes first; the build manifest is the fallback, and
+    the only record onion has (ka9q-web's manifest)."""
+    marker = {
+        _UBERSDR_SRC.name: _DECODER_DIR / 'ubersdr' / '.provenance',
+        _WSJTX_SRC.name: _DECODER_DIR / 'wsjtx' / '.provenance',
+    }.get(name)
+    if marker is not None:
+        try:
+            m = _HEX40.search(marker.read_text())
+            if m:
+                return m.group(0)
+        except OSError:
+            pass
+    return _manifest_upstream_sha(_NATIVE_BUILD_OF.get(name, name), name)
+
+
+def _manifest_upstream_sha(component: str, upstream: str) -> str:
+    """The sha <component>'s build manifest records for <upstream>, or ''."""
+    mf = _BUILD_MANIFEST_DIR / f'{component}.toml'
+    try:
+        data = tomllib.loads(mf.read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        return ''
+    for u in data.get('upstream', []):
+        if u.get('name') == upstream:
+            return (u.get('sha') or '').strip()
+    return ''
+
+
 def _native_rebuilds_due(base: Path) -> list:
-    """Native sources under `base` whose checkout is off sigmond's pin:
-    [(source, builder, head, pin)], in _native_build_pins order.
+    """Native sources under `base` that need their build:
+    [(source, builder, from, pin)], in _native_build_pins order.
+
+    Due when the checkout is off sigmond's pin, OR when it sits at the pin
+    but the installed build records another commit.  The second case is a
+    build that failed after its checkout (UberSDR's parity check refuses to
+    install): HEAD moved, the old binaries stayed, and a HEAD-only check
+    would hold the source as current for good.  `from` names the commit to
+    move off: HEAD when it is off the pin, else the commit the build records.
 
     A source with no checkout here was never built here, so an update has
-    nothing to return (`smd align` builds a missing one).  A checkout whose
-    HEAD cannot be read is left out, rather than rebuilt on a guess."""
+    nothing to return (`smd align` builds a missing one); and a checkout at
+    its pin with no build record at all stays held, since a host that never
+    built UberSDR's decoders must not retry the build on every update.  A
+    checkout whose HEAD cannot be read is left out, not rebuilt on a guess."""
     due = []
     for name, pin in _native_build_pins().items():
         src = Path(base) / name
         if not (src / '.git').exists():
             continue
         head = _git_head(src)
-        if not head or head.startswith(pin):
+        if not head:
             continue
-        due.append((name, _NATIVE_BUILD_OF.get(name, name), head, pin))
+        builder = _NATIVE_BUILD_OF.get(name, name)
+        if not head.startswith(pin):
+            due.append((name, builder, head, pin))
+            continue
+        built = _native_built_from(name)
+        if built and not built.startswith(pin):
+            due.append((name, builder, built, pin))
     return due
+
+
+_NATIVE_BUILD_FAILED = Path('/var/lib/sigmond/native-build-failed')
+
+
+def _mark_native_build_failed(builder: str, reason: str) -> None:
+    """Leave a record that a native build failed, for `smd doctor`.  The
+    install.sh hook cannot fail its install, so on the v3.85 → main path
+    nothing else would say so (2026-11-09 review)."""
+    from datetime import datetime, timezone
+    at = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    text = (f'component = "{builder}"\nreason = "{reason}"\n'
+            f'at = "{at}"\n')
+    try:
+        try:
+            _NATIVE_BUILD_FAILED.parent.mkdir(parents=True, exist_ok=True)
+            _NATIVE_BUILD_FAILED.write_text(text)
+        except PermissionError:
+            _run(['install', '-d', str(_NATIVE_BUILD_FAILED.parent)],
+                 sudo=True)
+            _install_root_text(text, _NATIVE_BUILD_FAILED)
+    except OSError as exc:
+        _warn(f'could not record the failed {builder} build: {exc}')
+
+
+def _clear_native_build_failed() -> None:
+    try:
+        _NATIVE_BUILD_FAILED.unlink(missing_ok=True)
+    except PermissionError:
+        _run(['rm', '-f', str(_NATIVE_BUILD_FAILED)], sudo=True)
+    except OSError:
+        pass
+
+
+def _native_build_failed_findings() -> list:
+    """Doctor: one finding while a failed native build's record stands."""
+    from sigmond.doctor import Finding
+    try:
+        data = tomllib.loads(_NATIVE_BUILD_FAILED.read_text())
+    except OSError:
+        return []
+    except tomllib.TOMLDecodeError:
+        data = {}
+    comp = str(data.get('component') or 'native-build')
+    return [Finding(
+        comp, 'native-build-failed',
+        f"the {comp} build failed at {data.get('at', '?')}: "
+        f"{data.get('reason', '?')} — `smd admin native-build --apply` "
+        f"retries it, and a success clears this")]
 
 
 def _run_native_builder(builder: str, base: Path) -> bool:
@@ -1465,6 +1572,8 @@ def cmd_admin_native_build(args) -> int:
            if not only or d[1] in only]
     if not due:
         _ok("native-build: every native source sits at sigmond's pin")
+        if apply_ and not only:
+            _clear_native_build_failed()
         return 0
     failed = 0
     seen = set()
@@ -1478,12 +1587,21 @@ def cmd_admin_native_build(args) -> int:
         if _run_native_builder(builder, base):
             _record_native_build(builder, head, pin)
             _ok(f'{builder}: rebuilt at {pin[:9]}')
+            if builder == 'ka9q-web':
+                # Not restarted here: install.sh and `smd update` both run
+                # this, and a viewer restart belongs with the restart step.
+                _info('restart ka9q-web to load the new libonion: '
+                      "systemctl restart 'ka9q-web@*' ka9q-web")
         else:
             _err(f'{builder}: rebuild FAILED — the source or the binary '
                  f'may still be off pin {pin[:9]}')
+            _mark_native_build_failed(
+                builder, f'rebuild {head[:9]} → {pin[:9]} failed')
             failed += 1
     if not apply_:
         print('(dry run — re-run with --apply)')
+    elif not failed:
+        _clear_native_build_failed()
     return 1 if failed else 0
 
 
@@ -1497,10 +1615,17 @@ def _run_native_build_step(builder: str, base: Path, *,
     the pulled sigmond names.  The full output goes to UPDATE_LOG_DIR, as
     install.sh's does."""
     smd_path = str(Path(__file__).resolve())
-    r = subprocess.run(
-        [sys.executable, smd_path, 'admin', 'native-build', '--apply',
-         '--base', str(base), builder],
-        capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    argv = [sys.executable, smd_path, 'admin', 'native-build', '--apply',
+            '--base', str(base), builder]
+    # As root, like install.sh's step beside it: the ownership repair, the
+    # history line and the failure record all need it, and a builder's own
+    # `sudo` would otherwise prompt inside this captured child.  `-n`: a
+    # password prompt here hangs the update instead of failing it.
+    # SIGMOND_ALLOW_SUDO=1 is smd's own elevation marker (_need_root).
+    if os.geteuid() != 0:
+        argv = ['sudo', '-n', 'env', 'SIGMOND_ALLOW_SUDO=1'] + argv
+    r = subprocess.run(argv, capture_output=True, text=True,
+                       stdin=subprocess.DEVNULL)
     logpath = _write_update_log(builder, r, what='native-build')
     lines = ((r.stdout or '') + (r.stderr or '')).strip().splitlines()
     for line in lines[-(tail_lines if r.returncode else 3):]:
@@ -1619,6 +1744,8 @@ def _expected_build_pins() -> dict:
     pattern (docs/native-binaries.md)."""
     return {
         'ka9q-web': {'onion': _ONION_COMMIT},
+        'wsjtx-decoders': {'wsjtx': _WSJTX_COMMIT},
+        'ubersdr-decoders': {'ubersdr_wsprd': _UBERSDR_COMMIT},
     }
 
 
@@ -1782,7 +1909,7 @@ def _diag_build_manifests() -> int:
                 _ok(f'{component}: {dep} built at pinned {want[:12]}')
             else:
                 _warn(f'  {component}: {dep} built at {have[:12]}, pin is now '
-                      f'{want[:12]} — rebuild: smd install {component} --force')
+                      f'{want[:12]} — rebuild: smd admin native-build --apply')
                 warns += 1
     return warns
 
@@ -4723,6 +4850,8 @@ def cmd_update(args) -> int:
     _refresh_upstreams(checkouts, fetch=not getattr(args, 'no_fetch', False))
 
     repos = {}
+    # Native sources off their pin, or at it with a build from elsewhere.
+    native_rebuilds = {d[0]: d for d in _native_rebuilds_due(base)}
     # Only populated for a component `--unpin` is about to release from a
     # DETACHED HEAD: name -> branch to `git checkout` before the pull, since
     # `git pull --ff-only` refuses outright on a detached HEAD.
@@ -4745,8 +4874,10 @@ def cmd_update(args) -> int:
         # ran that build: v3.85 → main left ubersdr_wsprd and its decoders
         # at 529ec5d after sigmond moved the pin to 8719788 (2026-11-09).
         native_pin = _native_build_pins().get(d.name) or ''
+        native_due = native_rebuilds.get(d.name)
         native_hold = (bool(native_pin) and bool(st['head'])
-                       and st['head'].startswith(native_pin))
+                       and st['head'].startswith(native_pin)
+                       and native_due is None)
         # bring-up's image build and `smd align` both detach onto `.pin`
         # deliberately — a held component's checkout legitimately has no
         # usable @{u}, so comparing against it is noise on top of the
@@ -4836,10 +4967,10 @@ def cmd_update(args) -> int:
             repos[d.name]['pinned'] = native_pin
             repos[d.name]['at_pin'] = True
             repos[d.name]['pin_source'] = 'native-build'
-        elif native_pin and st['head']:
+        elif native_pin and native_due:
             repos[d.name]['native_rebuild'] = {
-                'builder': _NATIVE_BUILD_OF.get(d.name, d.name),
-                'head': st['head'], 'pin': native_pin}
+                'builder': native_due[1], 'head': native_due[2],
+                'pin': native_pin}
         elif held:
             repos[d.name]['pinned'] = pin
             repos[d.name]['at_pin'] = True
@@ -9211,6 +9342,17 @@ def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
             if native_pin:
                 pin = native_pin
                 at_pin = (st.get('head') or '').startswith(native_pin)
+            if native_pin and at_pin:
+                built = _native_built_from(name)
+                if built and not built.startswith(native_pin):
+                    # At the pin, but the installed build came from another
+                    # commit: a build that failed after its checkout.
+                    findings.append(Finding(
+                        name, 'off-pin',
+                        f"checkout at sigmond's build pin "
+                        f"{native_pin[:12]}, but the installed build came "
+                        f"from {built[:12]} — `smd update --apply` rebuilds "
+                        f"{_NATIVE_BUILD_OF.get(name, name)}"))
             if native_pin and not at_pin and not st['detached'] \
                     and st.get('head'):
                 # On a branch, off the pin: ubersdr_wsprd after v3.85 → main
@@ -9469,8 +9611,12 @@ def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
         # See _decoder_findings.
         findings.extend(_decoder_findings())
 
+    def _native_failed() -> None:
+        findings.extend(_native_build_failed_findings())
+
     _guarded('sdr-events', _sdr)
     _guarded('decoders', _decoders)
+    _guarded('native-build', _native_failed)
 
     if unassessed:
         clean = None
