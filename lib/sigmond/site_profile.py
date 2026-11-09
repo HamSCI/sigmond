@@ -237,6 +237,11 @@ def _f(v) -> float:
         return 0.0
 
 
+#: (profile path, recorder, station) overrides already noticed, so a command
+#: that loads the profile many times prints each one once.
+_NOTICED_STATIONS: set = set()
+
+
 def load_site_profile(path: Optional[Path] = None) -> Optional[SiteProfile]:
     """Parse the site profile, or return None if the file does not exist.
     ``path`` defaults to SITE_PROFILE_PATH, read at call time."""
@@ -273,10 +278,13 @@ def load_site_profile(path: Optional[Path] = None) -> Optional[SiteProfile]:
              for k, v in ((psws.get("stations") or {}).items()
                           if isinstance(psws.get("stations"), dict) else ())
              if _clean(v) and _clean(v).upper() != _site}
-    if _over:
+    _new = {k: v for k, v in _over.items()
+            if (str(path), k, v) not in _NOTICED_STATIONS}
+    if _new:
         import sys as _sys
+        _NOTICED_STATIONS.update((str(path), k, v) for k, v in _new.items())
         print(f"NOTICE: {path}: [psws.stations] sends "
-              + ", ".join(f"{k} -> {v}" for k, v in sorted(_over.items()))
+              + ", ".join(f"{k} -> {v}" for k, v in sorted(_new.items()))
               + f" (not the site station {_site or '<unset>'})",
               file=_sys.stderr)
 

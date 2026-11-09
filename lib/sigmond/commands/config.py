@@ -811,12 +811,16 @@ def _merge_checks(receivers: list, profile_grid: str) -> list:
 def profile_problems(profile, has_station: bool) -> list:
     """The identity problems that make `smd config render` refuse a profile.
     `smd config psws` runs the same check on a profile before creating it."""
+    def _get(name, default=''):
+        # bring-up hands in whatever profile object it holds; read leniently.
+        return getattr(profile, name, default)
     problems = []
-    if has_station and not profile.call:
+    if has_station and not _get('call'):
         problems.append('station.callsign is empty')
-    if has_station and not profile.grid and not (profile.lat or profile.lon):
+    if has_station and not _get('grid') and not (_get('lat', 0.0)
+                                                 or _get('lon', 0.0)):
         problems.append('need station.grid_square or latitude/longitude')
-    if profile.psws_enabled and not profile.psws_station_id:
+    if _get('psws_enabled', False) and not _get('psws_station_id'):
         problems.append('psws.enabled but station_id missing')
     return problems
 
@@ -1050,7 +1054,6 @@ def cmd_config_psws(args) -> int:
         coord = load_coordination(COORDINATION_PATH)
         seed = {'call': coord.host.call, 'grid': coord.host.grid,
                 'lat': coord.host.lat, 'lon': coord.host.lon,
-                'elevation_m': getattr(coord.host, 'elevation_m', 0.0),
                 'reporter_id': getattr(coord.station, 'reporter_id', '')}
     try:
         text = set_psws_identity(old_text, station_id=station,

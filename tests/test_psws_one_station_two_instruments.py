@@ -452,3 +452,40 @@ def test_bringup_refuses_instruments_without_a_station():
     a = smd._build_parser().parse_args(
         ["bringup", "dasi2", "--psws-station-id", "S0418"])
     assert "S0418" in smd._bringup_psws_check(a, None)
+
+
+# --- review round 2 ---------------------------------------------------------
+
+def test_bringup_refuses_a_profile_render_would_reject(tmp_path):
+    """Callsign, no grid, no lat/lon in the profile: a grid in coordination
+    must not paper over it, since the later render refuses the profile."""
+    smd = _smd()
+    p = _write(tmp_path, '[station]\ncallsign = "AC0G"\n')
+    prof = load_site_profile(p)
+    problem = smd._bringup_profile_location_problem(prof)
+    assert problem and "location" in problem
+    assert smd._bringup_grid_fallback(prof, "EM38ww") == ""
+
+
+def test_bringup_takes_coordination_grid_only_beside_profile_lat_lon(tmp_path):
+    smd = _smd()
+    p = _write(tmp_path, '[station]\ncallsign = "AC0G"\n'
+                         'latitude = 38.93\nlongitude = -92.33\n')
+    prof = load_site_profile(p)
+    assert smd._bringup_profile_location_problem(prof) is None
+    assert smd._bringup_grid_fallback(prof, "EM38ww") == "EM38ww"
+    # a receiver-only profile (no [station]) is one render accepts
+    q = tmp_path / "q"
+    q.mkdir()
+    rx = load_site_profile(_write(q, '[psws]\nstation_id = "S000418"\n'))
+    assert smd._bringup_profile_location_problem(rx) is None
+    assert smd._bringup_profile_location_problem(None) is None
+
+
+def test_station_notice_prints_once_per_process(capsys, tmp_path):
+    p = _write(tmp_path,
+               '[psws]\nenabled = true\nstation_id = "S000170"\n'
+               '[psws.stations]\n"mag-recorder" = "S000083"\n')
+    load_site_profile(p)
+    load_site_profile(p)
+    assert capsys.readouterr().err.count("S000083") == 1

@@ -11006,12 +11006,10 @@ def cmd_bringup(args) -> int:
         reporter = reporter or _site_profile.effective_reporter_id
         grid = grid or _site_profile.grid
         if not grid:
-            # A profile that carries a GPS lat/lon holds no grid_square
-            # (GPSDO location where one exists); coordination [host] keeps
-            # the grid `smd config location` derived from the same fix.
             try:
                 from sigmond.coordination import load_coordination
-                grid = load_coordination().host.grid
+                grid = _bringup_grid_fallback(
+                    _site_profile, load_coordination().host.grid)
             except Exception:                               # noqa: BLE001
                 pass
         callsign = callsign or _site_profile.call
@@ -11295,6 +11293,15 @@ def cmd_bringup(args) -> int:
             _warn(f'  • {what}')
             _info(f'      fix: {fix}')
         print()
+
+    # A site profile that render would refuse (a [station] with no
+    # location) stops bring-up here, before anything installs: the Stage 4
+    # render would refuse it after the clients are in.
+    if _HAS_SIGMOND_LIB:
+        problem = _bringup_profile_location_problem(_site_profile)
+        if problem:
+            _err(f'bringup: {problem}')
+            return 1
 
     # PSWS ids: refuse a malformed flag now, before anything installs.
     psws_argv = _bringup_psws_argv(args)
@@ -28431,6 +28438,40 @@ def cmd_secrets_bundle(args) -> int:
 # steps and points at the human ones. Plan-first; --yes executes (self-elevates).
 # See docs/PROVISIONING-INPUTS.md §9.
 # ===========================================================================
+
+def _bringup_grid_fallback(site_profile, coord_grid: str) -> str:
+    """The grid bring-up takes from coordination [host] when the site
+    profile holds none.  Only beside a profile lat/lon: such a profile holds
+    no grid_square (GPSDO location where one exists), and coordination keeps
+    the grid `smd config location` derived from the same fix.  A profile
+    with no location at all gets nothing here; render would refuse it."""
+    if site_profile is None or getattr(site_profile, 'grid', ''):
+        return ''
+    if getattr(site_profile, 'lat', 0.0) or getattr(site_profile, 'lon', 0.0):
+        return (coord_grid or '').strip()
+    return ''
+
+
+def _bringup_profile_location_problem(site_profile):
+    """Why `smd config render` would refuse this site profile's identity,
+    or None.  Same check as render (sigmond.commands.config.profile_problems)."""
+    if site_profile is None:
+        return None
+    import tomllib
+    try:
+        with open(getattr(site_profile, 'source_path', None), 'rb') as fh:
+            has_station = 'station' in tomllib.load(fh)
+    except (OSError, TypeError, tomllib.TOMLDecodeError):
+        has_station = bool(getattr(site_profile, 'call', ''))
+    from sigmond.commands.config import profile_problems
+    problems = profile_problems(site_profile, has_station)
+    if not problems:
+        return None
+    where = getattr(site_profile, 'source_path', None) or 'site-profile.toml'
+    return (f'{where}: ' + '; '.join(problems)
+            + ' — set a location first, e.g. smd config location --from-gps, '
+              'or add grid_square (or latitude/longitude) under [station]')
+
 
 def _bringup_psws_check(args, site_profile):
     """What is wrong with bring-up's PSWS flags, or None.  Instrument ids
