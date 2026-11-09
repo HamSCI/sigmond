@@ -315,6 +315,12 @@ class GreenfieldScreen(Vertical):
         with Horizontal(classes="gf-field"):
             yield Label("PSWS station id")
             yield Input(placeholder="optional", id="gf-psws")
+        with Horizontal(classes="gf-field"):
+            yield Label("  RX888 instrument id")
+            yield Input(placeholder="optional — e.g. 367", id="gf-psws-grape")
+        with Horizontal(classes="gf-field"):
+            yield Label("  Magnetometer instrument id")
+            yield Input(placeholder="optional — e.g. 401", id="gf-psws-mag")
         with Horizontal(classes="gf-field", id="gf-remote-row"):
             yield Label("Remote radiod DNS")
             yield Input(placeholder="e.g. bee3-status.local", id="gf-remote")
@@ -555,6 +561,8 @@ class GreenfieldScreen(Vertical):
             "grid": val("#gf-grid"),
             "callsign": val("#gf-callsign"),
             "psws": val("#gf-psws"),
+            "psws_grape": val("#gf-psws-grape"),
+            "psws_mag": val("#gf-psws-mag"),
             "remote": val("#gf-remote"),
             "with_optional": with_optional,
         }
@@ -580,6 +588,11 @@ class GreenfieldScreen(Vertical):
             argv += ["--callsign", g["callsign"]]
         if g["psws"]:
             argv += ["--psws-station-id", g["psws"]]
+        # One PSWS station id, one instrument id per product under it.
+        if g.get("psws_grape"):
+            argv += ["--psws-instrument", f"hf-timestd={g['psws_grape']}"]
+        if g.get("psws_mag"):
+            argv += ["--psws-instrument", f"mag-recorder={g['psws_mag']}"]
         if not self._profile_is_local(g["profile"]) and g["remote"]:
             argv += ["--remote-radiod", g["remote"]]
         if g.get("with_optional"):

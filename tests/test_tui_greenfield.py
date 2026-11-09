@@ -280,6 +280,20 @@ class GreenfieldArgvTests(unittest.IsolatedAsyncioTestCase):
              "--callsign", "AC0G", "--psws-station-id", "S000170",
              "--with-optional"])
 
+    async def test_one_station_two_instruments_argv(self):
+        argv = await self._argv({"profile": "dasi2", "reporter": "AC0G/S",
+                                 "grid": "EM38ww", "callsign": "AC0G",
+                                 "psws": "S000418", "psws_grape": "367",
+                                 "psws_mag": "401", "remote": "",
+                                 "with_optional": False})
+        self.assertEqual(
+            argv[1:],
+            ["bringup", "dasi2", "--non-interactive",
+             "--reporter", "AC0G/S", "--grid", "EM38ww",
+             "--callsign", "AC0G", "--psws-station-id", "S000418",
+             "--psws-instrument", "hf-timestd=367",
+             "--psws-instrument", "mag-recorder=401"])
+
     async def test_remote_profile_argv_shape_unchanged(self):
         argv = await self._argv({"profile": "client", "reporter": "AC0G/S",
                                  "grid": "EM38ww", "callsign": "",

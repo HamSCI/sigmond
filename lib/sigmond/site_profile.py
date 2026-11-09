@@ -42,17 +42,20 @@ description  = ""                  # free text (antenna / receiver)
 
 [psws]                             # HamSCI PSWS / GRAPE (optional)
 enabled       = false
-station_id    = ""                 # e.g. S000082 — one per site
+station_id    = ""                 # e.g. S000418 -- the site's one station id
 instrument_id = ""                 # legacy single id (= hf-timestd/GRAPE's)
 
-[psws.instruments]                 # per-recorder instrument/device ids
-# "hf-timestd"   = "172"           # GRAPE instrument id from the portal
-# "mag-recorder" = "84"            # magnetometer instrument id from the portal
+[psws.instruments]                 # one instrument id per product, same station
+# "hf-timestd"   = "367"           # RX888 (GRAPE) instrument id from the portal
+# "mag-recorder" = "401"           # magnetometer instrument id from the portal
 
-# NOTE: [psws.stations] (per-recorder station overrides) was REMOVED
-# 2026-09-23.  One site, one PSWS station id; instruments differ by
-# instrument id, not by station.  A leftover [psws.stations] in an existing
-# profile is IGNORED and warned about, never silently honoured.
+# [psws.stations]                  # ONLY for an instrument enrolled under a
+# "mag-recorder" = "S000082"       # different portal station; absent = the
+#                                  # recorder uploads under [psws].station_id
+#
+# Or set all of this from the command line:
+#   smd config psws --station S000418 \
+#       --instrument hf-timestd=367 --instrument mag-recorder=401
 
 [reporters]                        # default to [station].callsign when blank
 reporter_id      = ""              # WSPR/PSK reporter instance id, e.g. AC0G/S
@@ -126,6 +129,9 @@ class SiteProfile:
     psws_station_id: str = ""
     psws_instrument_id: str = ""
     psws_instruments: dict = field(default_factory=dict)
+    # [psws.stations]: a recorder enrolled under its own portal station.
+    # Empty, the primary case: every recorder uploads under psws_station_id.
+    psws_stations: dict = field(default_factory=dict)
     reporter_id: str = ""
     wsprnet_call: str = ""
     pskreporter_call: str = ""
@@ -206,18 +212,22 @@ class SiteProfile:
         return ""
 
     def station_for(self, recorder: str) -> str:
-        """PSWS station id for a recorder: the SITE station, always.
+        """PSWS station id for a recorder.
 
-        Until 2026-09-23 a ``[psws.stations]`` table let a recorder claim
-        its own portal station, added for AC0G's magnetometer (station
-        S000082 / instrument 84 against the receiver's S000170).  No
-        station ever used it -- AC0G-B4 and AC0G-ND both upload their
-        magnetometer under the site station id -- and carrying two station
-        identities per site made every "which station is this?" question
-        ambiguous for no benefit.  One site, one station id; instruments
-        are distinguished by instrument id.
+        The primary case (Michael, 2026-11-09): the portal lets ONE station
+        id carry several instruments -- the RX888 (GRAPE) instrument and the
+        magnetometer -- so every recorder uploads under ``[psws].station_id``
+        and the instrument id tells them apart.  ``[psws.stations]`` names
+        the exception: an instrument enrolled under a station of its own.
+        The GRAPE recorders share one entry, as they share one instrument.
         """
-        return self.psws_station_id
+        v = str(self.psws_stations.get(recorder, "") or "").strip()
+        if not v and recorder in GRAPE_RECORDERS:
+            for other in GRAPE_RECORDERS:
+                v = str(self.psws_stations.get(other, "") or "").strip()
+                if v:
+                    break
+        return v or self.psws_station_id
 
 
 def _f(v) -> float:
@@ -249,26 +259,6 @@ def load_site_profile(path: Optional[Path] = None) -> Optional[SiteProfile]:
     if not isinstance(comps, dict):
         comps = {}
 
-    def _clean_early(v) -> str:
-        v = str(v or "").strip()
-        return "" if (v.startswith("<") and v.endswith(">")) else v
-
-    # [psws.stations] was removed 2026-09-23 (one site, one station id).  A
-    # profile that still carries it would otherwise have its uploads quietly
-    # redirected to the site station -- say so, since AI6VN was unreachable
-    # when this landed and nobody could confirm its magnetometer config.
-    _dead = psws.get("stations") or {}
-    if _dead:
-        import sys as _sys
-        print(
-            f"WARNING: {path}: [psws.stations] is no longer supported and was "
-            f"IGNORED ({', '.join(sorted(map(str, _dead)))}). Every recorder "
-            f"now uploads under [psws].station_id "
-            f"({_clean_early(psws.get('station_id')) or '<unset>'}). Remove the "
-            f"section, or open a portal ticket to move the instrument.",
-            file=_sys.stderr,
-        )
-
     def _clean(s) -> str:
         s = str(s or "").strip()
         # treat unfilled <...> placeholders as empty
@@ -287,6 +277,11 @@ def load_site_profile(path: Optional[Path] = None) -> Optional[SiteProfile]:
         psws_instruments={
             str(k): _clean(v)
             for k, v in (psws.get("instruments", {}) or {}).items()
+            if _clean(v)
+        },
+        psws_stations={
+            str(k): _clean(v).upper()
+            for k, v in (psws.get("stations", {}) or {}).items()
             if _clean(v)
         },
         reporter_id=_clean(rep.get("reporter_id")).upper(),
@@ -481,3 +476,139 @@ def carry_operator_blocks(new_text: str, old_text) -> str:
     for name in OPERATOR_BLOCKS:
         new_text = carry_uploads_block(new_text, old_text, name)
     return new_text
+
+
+# --- PSWS identity from the command line --------------------------------------
+# `smd bringup --psws-station-id/--psws-instrument` and `smd config psws` write
+# the ids HERE, the one place sigmond keeps site identity; `smd config render`
+# then carries them into each recorder's own config file.  Before 2026-11-09
+# bring-up only exported the station id as an env var, so on a host with no
+# site-profile.toml (every bare-metal bring-up) the id reached nothing.
+
+#: Recorders that upload to PSWS, by the names an operator may type.  The GRAPE
+#: instrument is filed under "hf-timestd", the name the appliance wizard and
+#: instrument_for() already use; "hamsci-physics" names the same instrument.
+PSWS_RECORDER_NAMES = ("hf-timestd", "hamsci-physics", "mag-recorder")
+
+_STATION_RE = re.compile(r"^S\d{3,}$")
+_INSTRUMENT_RE = re.compile(r"^\d+$")
+
+
+def normalize_psws_station_id(value) -> str:
+    """A PSWS station id (``S000418``), uppercased; ValueError otherwise."""
+    v = str(value or "").strip().upper()
+    if not _STATION_RE.match(v):
+        raise ValueError(f"{value!r} is not a PSWS station id (e.g. S000418)")
+    return v
+
+
+def parse_psws_assignments(items, *, kind: str) -> dict:
+    """``["hf-timestd=367", ...]`` as ``{"hf-timestd": "367", ...}``.
+
+    ``kind`` is "instrument" (a number from the portal) or "station" (an
+    S-number).  An unknown recorder, a malformed value, or one recorder named
+    twice with two values raises ValueError.  "hamsci-physics" files under
+    "hf-timestd": both name the one GRAPE instrument."""
+    out: dict = {}
+    for item in items or ():
+        name, sep, value = str(item).partition("=")
+        name, value = name.strip(), value.strip()
+        if not sep or not name or not value:
+            raise ValueError(f"{item!r}: expected RECORDER={kind.upper()}_ID, "
+                             f"e.g. hf-timestd=367")
+        if name not in PSWS_RECORDER_NAMES:
+            raise ValueError(f"{item!r}: {name!r} uploads nothing to PSWS; "
+                             f"use one of {', '.join(PSWS_RECORDER_NAMES)}")
+        if kind == "station":
+            value = normalize_psws_station_id(value)
+        elif not _INSTRUMENT_RE.match(value):
+            raise ValueError(f"{item!r}: a PSWS instrument id is a number "
+                             f"from the portal, e.g. 367")
+        key = "hf-timestd" if name in GRAPE_RECORDERS else name
+        if out.get(key, value) != value:
+            raise ValueError(f"{key} named twice, as {out[key]} and {value}")
+        out[key] = value
+    return out
+
+
+def _q(v) -> str:
+    return '"' + str(v).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _psws_block(station_id: str, legacy_instrument: str,
+                instruments: dict, stations: dict) -> str:
+    lines = ["[psws]", "enabled    = true", f"station_id = {_q(station_id)}"]
+    if legacy_instrument:
+        lines.append(f"instrument_id = {_q(legacy_instrument)}  "
+                     f"# legacy single id; [psws.instruments] wins")
+    lines += ["", "[psws.instruments]                 "
+                  "# one instrument id per product, same station"]
+    lines += [f"{_q(k)} = {_q(v)}" for k, v in sorted(instruments.items())]
+    if stations:
+        lines += ["", "[psws.stations]                    "
+                      "# instruments enrolled under another station"]
+        lines += [f"{_q(k)} = {_q(v)}" for k, v in sorted(stations.items())]
+    return "\n".join(lines) + "\n"
+
+
+def _seed_profile(seed: dict) -> str:
+    """A new profile's identity, from what bring-up or coordination.toml
+    already knows.  No callsign means no [station] table: render refuses a
+    [station] table without one, and a non-ham station still needs its
+    PSWS ids rendered."""
+    call = str(seed.get("call") or "").strip().upper()
+    grid = str(seed.get("grid") or "").strip()
+    reporter = str(seed.get("reporter_id") or "").strip().upper()
+    out = ["# /etc/sigmond/site-profile.toml -- single non-secret per-site "
+           "source of truth.",
+           "# Written by smd from the bring-up / `smd config psws` flags. "
+           "Edit, then run:  sudo smd config render",
+           "schema_version = 1", ""]
+    if call:
+        out += ["[station]", f"callsign    = {_q(call)}"]
+        if grid:
+            out.append(f"grid_square = {_q(grid)}")
+        out.append("")
+    if reporter:
+        out += ["[reporters]", f"reporter_id = {_q(reporter)}", ""]
+    return "\n".join(out)
+
+
+def set_psws_identity(text, *, station_id: str = "", instruments=None,
+                      stations=None, seed=None) -> str:
+    """The profile ``text`` with its PSWS identity set; ``None`` builds a new
+    profile from ``seed`` (call / grid / reporter_id).
+
+    The [psws] block (and its subtables) is rewritten whole; every other
+    block stays as it was.  Ids already in the profile survive unless named
+    again: a run that names only the magnetometer keeps the GRAPE id, and a
+    run that names no station id keeps the profile's."""
+    if text is None:
+        text = _seed_profile(seed or {})
+    old = (tomllib.loads(text).get("psws") or {}) if text.strip() else {}
+    if not isinstance(old, dict):
+        old = {}
+
+    def _table(name):
+        t = old.get(name) or {}
+        return {str(k): str(v).strip() for k, v in t.items()
+                if str(v).strip() and not str(v).strip().startswith("<")} \
+            if isinstance(t, dict) else {}
+
+    sid = (normalize_psws_station_id(station_id) if station_id
+           else str(old.get("station_id") or "").strip())
+    if not sid or sid.startswith("<"):
+        raise ValueError("no PSWS station id: pass one (e.g. S000418)")
+    ins = _table("instruments")
+    ins.update(instruments or {})
+    sts = _table("stations")
+    sts.update(stations or {})
+    # A per-instrument station equal to the site's says nothing; drop it so
+    # the profile shows the primary case plainly.
+    sts = {k: v for k, v in sts.items() if v.upper() != sid}
+    legacy = str(old.get("instrument_id") or "").strip()
+    if legacy.startswith("<"):
+        legacy = ""
+    rest, _ = _split_block(text, "psws")
+    return (rest.rstrip("\n") + "\n\n"
+            + _psws_block(sid, legacy, ins, sts))

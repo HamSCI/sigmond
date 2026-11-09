@@ -120,7 +120,7 @@ try:
     from sigmond.commands.timing      import cmd_timing
     from sigmond.commands.timing_show import cmd_timing_show
     from sigmond.commands.ka9q_watch  import cmd_ka9q_watch
-    from sigmond.commands.config      import cmd_config_show, cmd_config_migrate, cmd_config_identity, cmd_config_refresh, cmd_config_render, cmd_config_upload, cmd_config_location, cmd_config_uploads, cmd_config_profile_install
+    from sigmond.commands.config      import cmd_config_show, cmd_config_migrate, cmd_config_identity, cmd_config_refresh, cmd_config_render, cmd_config_psws, cmd_config_upload, cmd_config_location, cmd_config_uploads, cmd_config_profile_install
     from sigmond.commands.client_config import cmd_config_init, cmd_config_edit_client
     from sigmond.commands.environment import (
         cmd_environment_list,
@@ -11287,6 +11287,22 @@ def cmd_bringup(args) -> int:
             _info(f'      fix: {fix}')
         print()
 
+    # PSWS ids: refuse a malformed flag now, before anything installs.
+    psws_argv = _bringup_psws_argv(args)
+    if psws_argv is not None and _HAS_SIGMOND_LIB:
+        from sigmond.site_profile import (normalize_psws_station_id,
+                                          parse_psws_assignments)
+        try:
+            if (getattr(args, 'psws_station_id', None) or '').strip():
+                normalize_psws_station_id(args.psws_station_id)
+            parse_psws_assignments(args.psws_instrument, kind='instrument')
+            parse_psws_assignments(args.psws_instrument_station, kind='station')
+        except ValueError as exc:
+            _err(f'bringup: {exc}')
+            return 1
+        _info('PSWS: smd ' + ' '.join(psws_argv)
+              + '  (site-profile.toml, then rendered into each recorder)')
+
     if getattr(args, 'dry_run', False):
         _info('(dry-run — no changes made)')
         return 0
@@ -11356,12 +11372,24 @@ def cmd_bringup(args) -> int:
     if psws_id:
         os.environ['STATION_ID'] = psws_id
 
+    # PSWS flags land in site-profile.toml, the one place sigmond keeps site
+    # identity -- creating the profile, seeded from the coordination.toml
+    # just written, on a host that has none (every bare-metal bring-up).
+    # `config psws` also renders, so the render below is then redundant.
+    psws_rendered = False
+    if psws_argv is not None:
+        if _run_smd(*psws_argv) == 0:
+            psws_rendered = True
+        else:
+            _warn('could not write the PSWS ids into site-profile.toml — '
+                  'run `smd ' + ' '.join(psws_argv) + '` after bring-up')
+
     # With a site profile, run the full render as well: beyond [host] it
     # writes coordination [station] (PSWS + reporter identity — the env
     # bag Stage 3 wizards read as defaults) and the station SSH key.  The
     # Stage 4 plan step re-renders after client configs exist, pushing the
     # PSWS ids through into each recorder's own file.
-    if _site_profile is not None:
+    if _site_profile is not None and not psws_rendered:
         if _run_smd('config', 'render', '--if-present') != 0:
             _warn('site-profile render failed — client wizards will fall '
                   'back to prompts/placeholders')
@@ -28396,6 +28424,26 @@ def cmd_secrets_bundle(args) -> int:
 # See docs/PROVISIONING-INPUTS.md §9.
 # ===========================================================================
 
+def _bringup_psws_argv(args):
+    """The `smd config psws` argv bring-up runs for its PSWS flags, or None
+    when it was given none.  Bring-up used to export --psws-station-id as an
+    env var only; on a host with no site-profile.toml it reached no recorder
+    (sigma, 2026-11-09)."""
+    station = (getattr(args, 'psws_station_id', None) or '').strip()
+    inst = list(getattr(args, 'psws_instrument', None) or [])
+    inst_st = list(getattr(args, 'psws_instrument_station', None) or [])
+    if not (station or inst or inst_st):
+        return None
+    argv = ['config', 'psws']
+    if station:
+        argv += ['--station', station]
+    for i in inst:
+        argv += ['--instrument', i]
+    for i in inst_st:
+        argv += ['--instrument-station', i]
+    return argv
+
+
 def _run_smd(*argv) -> int:
     """Invoke another smd verb in a child process (same interpreter/script)."""
     return subprocess.run([sys.executable, str(_SCRIPT), *argv]).returncode
@@ -28957,8 +29005,19 @@ def _build_parser() -> argparse.ArgumentParser:
                            help='amateur radio callsign (optional; hams only) — recorded '
                                 'as the host identity in coordination.toml')
     p_bringup.add_argument('--psws-station-id', metavar='ID', dest='psws_station_id',
-                           help='PSWS station id for GRAPE/hf-timestd uploads (e.g. S000171; '
-                                'optional — leave unset to configure PSWS upload later)')
+                           help='the site PSWS station id (e.g. S000418); every '
+                                'instrument uploads under it.  Optional — leave '
+                                'unset to configure PSWS later (smd config psws)')
+    p_bringup.add_argument('--psws-instrument', metavar='RECORDER=ID',
+                           action='append', default=[], dest='psws_instrument',
+                           help='instrument id per product under that station, '
+                                'repeatable: --psws-instrument hf-timestd=367 '
+                                '--psws-instrument mag-recorder=401')
+    p_bringup.add_argument('--psws-instrument-station', metavar='RECORDER=ID',
+                           action='append', default=[],
+                           dest='psws_instrument_station',
+                           help='only for an instrument enrolled under ANOTHER '
+                                'station (e.g. mag-recorder=S000082)')
     p_bringup.add_argument('--ignore-capacity', action='store_true',
                            dest='ignore_capacity',
                            help='proceed even when the capacity gate says the host '
@@ -30339,6 +30398,25 @@ def _build_parser() -> argparse.ArgumentParser:
                    help='exit 0 quietly when site-profile.toml does not exist '
                         '(for unconditional bring-up steps)')
 
+    p = config_sub.add_parser('psws',
+                              help='set the PSWS station id and one instrument id '
+                                   'per product in site-profile.toml, then render '
+                                   'them into each recorder')
+    p.add_argument('--station', metavar='ID',
+                   help='the site PSWS station id (e.g. S000418)')
+    p.add_argument('--instrument', metavar='RECORDER=ID', action='append',
+                   default=[],
+                   help='instrument id per product under that station, repeatable: '
+                        '--instrument hf-timestd=367 --instrument mag-recorder=401')
+    p.add_argument('--instrument-station', metavar='RECORDER=ID',
+                   action='append', default=[], dest='instrument_station',
+                   help='only for an instrument enrolled under ANOTHER station '
+                        '(e.g. mag-recorder=S000082)')
+    p.add_argument('--no-render', action='store_true', dest='no_render',
+                   help='write site-profile.toml only; skip `smd config render`')
+    p.add_argument('--dry-run', action='store_true',
+                   help='print the profile that would be written')
+
     p = config_sub.add_parser('profile-install',
                               help='install a new site-profile.toml (the wizard writes '
                                    'it beside the old one), keeping a site sink switch '
@@ -31224,6 +31302,10 @@ def main() -> int:
             if _need_root('config profile-install'):
                 return 1
             return cmd_config_profile_install(args)
+        if sub_cmd == 'psws':
+            if not getattr(args, 'dry_run', False) and _need_root('config psws'):
+                return 1
+            return cmd_config_psws(args)
         if sub_cmd == 'render':
             # --dry-run / --init(scaffold) read-only-ish; writing path needs root.
             writing = not getattr(args, 'dry_run', False)

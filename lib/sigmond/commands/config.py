@@ -954,6 +954,91 @@ def cmd_config_render(args) -> int:
     return 0
 
 
+def cmd_config_psws(args) -> int:
+    """`smd config psws`: set the site's PSWS identity, then render it.
+
+    The primary case (Michael, 2026-11-09): ONE portal station id carrying
+    one instrument per product --
+
+        smd config psws --station S000418 \\
+            --instrument hf-timestd=367 --instrument mag-recorder=401
+
+    writes [psws] in site-profile.toml (creating the profile, seeded from
+    coordination.toml, when the host has none -- a bare-metal bring-up never
+    wrote one) and runs `smd config render`, which carries the ids into each
+    recorder's own config.  ``--instrument-station mag-recorder=S000082``
+    keeps an instrument enrolled under a station of its own.  `smd bringup
+    --psws-station-id/--psws-instrument` runs this same verb."""
+    import tomllib
+    from ..site_profile import (normalize_psws_station_id,
+                                parse_psws_assignments, set_psws_identity)
+    try:
+        station = (normalize_psws_station_id(args.station)
+                   if getattr(args, 'station', None) else '')
+        instruments = parse_psws_assignments(
+            getattr(args, 'instrument', None) or [], kind='instrument')
+        stations = parse_psws_assignments(
+            getattr(args, 'instrument_station', None) or [], kind='station')
+    except ValueError as exc:
+        err(f'config psws: {exc}; nothing written')
+        return 1
+    if not (station or instruments or stations):
+        err('config psws: name --station and/or --instrument RECORDER=ID')
+        return 1
+
+    exists = SITE_PROFILE_PATH.exists()
+    try:
+        old_text = SITE_PROFILE_PATH.read_text() if exists else None
+    except OSError as exc:
+        err(f'cannot read {SITE_PROFILE_PATH}: {exc}')
+        return 1
+    seed = None
+    if old_text is None:
+        coord = load_coordination(COORDINATION_PATH)
+        seed = {'call': coord.host.call, 'grid': coord.host.grid,
+                'reporter_id': getattr(coord.station, 'reporter_id', '')}
+    try:
+        text = set_psws_identity(old_text, station_id=station,
+                                 instruments=instruments, stations=stations,
+                                 seed=seed)
+        tomllib.loads(text)
+    except (ValueError, tomllib.TOMLDecodeError) as exc:
+        err(f'config psws: {exc}; {SITE_PROFILE_PATH} unchanged')
+        return 1
+
+    if getattr(args, 'dry_run', False):
+        heading('config psws (dry-run)')
+        info(f'would {"update" if exists else "create"} {SITE_PROFILE_PATH}:')
+        print(text, end='')
+        return 0
+
+    tmp = SITE_PROFILE_PATH.with_name(SITE_PROFILE_PATH.name + '.tmp')
+    try:
+        SITE_PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(text)
+        if exists:
+            import shutil
+            shutil.copymode(SITE_PROFILE_PATH, tmp)
+        os.replace(tmp, SITE_PROFILE_PATH)
+    except PermissionError:
+        err(f'permission denied writing {SITE_PROFILE_PATH}; re-run smd as root')
+        return 1
+    prof = load_site_profile(SITE_PROFILE_PATH)
+    ok(f'{"updated" if exists else "created"} {SITE_PROFILE_PATH}: PSWS '
+       f'station {prof.psws_station_id}'
+       + ''.join(f' / {rec}={prof.instrument_for(rec)}'
+                 + (f' (station {prof.station_for(rec)})'
+                    if prof.station_for(rec) != prof.psws_station_id else '')
+                 for rec in ('hf-timestd', 'mag-recorder')
+                 if prof.instrument_for(rec)))
+    if getattr(args, 'no_render', False):
+        info('not rendered (--no-render); run: smd config render')
+        return 0
+    import types
+    return cmd_config_render(types.SimpleNamespace(
+        init=False, if_present=False, dry_run=False))
+
+
 def plan_psws_updates(profile, recorder: str, state) -> list:
     """(section, key, value) writes that bring one PSWS recorder's own
     config file in line with the site profile.
