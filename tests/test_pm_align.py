@@ -3093,3 +3093,45 @@ def test_the_real_wizard_carries_the_console_menu():
     for path, mode in pm_align.WIZARD_HEREDOCS_SINCE_V382.items():
         assert path in files, f"the wizard no longer writes {path} from a quoted heredoc"
         assert files[path].mode == mode
+
+
+# --- pm-storage rides with the heartbeat setup (v3.86 B4: "cannot stat
+#     /tmp/pm-align-hb-*/pm-storage.py") ---------------------------------------
+
+def test_every_file_the_heartbeat_setup_installs_from_its_dir_is_fetched():
+    """pm-heartbeat-setup.sh installs from its own directory; pm-align stages
+    that directory, so every "$SELF_DIR/<name>" the script reads must be a
+    file pm-align fetches."""
+    import re
+    setup = (Path(pm_align.__file__).parent / "pm-heartbeat-setup.sh").read_text()
+    named = set(re.findall(r'\$SELF_DIR/([A-Za-z0-9_.-]+)', setup))
+    for unit_loop in re.findall(r'for unit in ([^;]+);', setup):
+        named |= {u for u in unit_loop.replace("\\", " ").split() if "." in u}
+    staged = set(pm_align.HB_FILES) | set(pm_align.HB_OPTIONAL_FILES)
+    assert named <= staged, f"setup reads files pm-align never stages: {sorted(named - staged)}"
+    assert staged <= set(pm_align.PROXMOX_FILES)
+
+
+def test_heartbeat_step_stages_the_pm_storage_files(tmp_path):
+    src = _src_with_heartbeat()
+    for n in pm_align.HB_OPTIONAL_FILES:
+        src.proxmox[n] = f"#{n}\n".encode()
+    seen = {}
+
+    def run(argv, **kw):
+        d = Path(argv[0]).parent
+        seen.update({n: (d / n).exists() for n in pm_align.HB_OPTIONAL_FILES})
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    pm_align.heartbeat_step(tmp_path, src, [], run=run, tmpdir=tmp_path / "hb")
+    assert seen and all(seen.values()), seen
+
+
+def test_fetch_sources_treats_a_404_on_pm_storage_as_absent():
+    routes = _source_routes()
+    for n in ("pm-storage.py", "pm-storage.service", "pm-storage.timer"):
+        key = "sigmond/" + "d" * 40 + "/scripts/proxmox/" + n
+        routes[key] = urllib.error.HTTPError(key, 404, "Not Found", None, None)
+    op = _urlopen(routes)
+    src = pm_align.fetch_sources(pm_align.fetch_release(urlopen=op), vmid=100, urlopen=op)
+    assert "pm-storage.py" not in src.proxmox

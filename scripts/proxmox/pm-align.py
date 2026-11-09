@@ -46,7 +46,13 @@ from typing import Callable, Optional
 RELEASES_API = "https://api.github.com/repos/HamSCI/sigmond-appliance/releases"
 RAW = "https://raw.githubusercontent.com/HamSCI"
 PROXMOX_FILES = ("pm-heartbeat.py", "pm-heartbeat.service", "pm-heartbeat.timer",
-                 "pm-heartbeat-setup.sh", "pm-align.py")
+                 "pm-heartbeat-setup.sh", "pm-align.py",
+                 "pm-storage.py", "pm-storage.service", "pm-storage.timer")
+# Files a release may predate: a 404 leaves them absent.  pm-storage arrived
+# with the storage ledger (v3.86); pm-heartbeat-setup.sh installs it from
+# its own directory whenever the release carries it.
+OPTIONAL_PROXMOX_FILES = ("pm-align.py", "pm-storage.py", "pm-storage.service",
+                          "pm-storage.timer")
 RECORD = "/etc/sigmond-appliance/host-aligned.json"
 
 # One parser reset for the guest agent: the byte 0xFF, then one sync request
@@ -79,6 +85,7 @@ HB_CONFIG = "/etc/pm-heartbeat/config.toml"
 HB_DEFAULT = ("wd30.wsprdaemon.org", "38222")      # sigmond-wizard.sh:680, 687
 HB_FILES = ("pm-heartbeat.py", "pm-heartbeat.service", "pm-heartbeat.timer",
             "pm-heartbeat-setup.sh")
+HB_OPTIONAL_FILES = ("pm-storage.py", "pm-storage.service", "pm-storage.timer")
 HB_REQUIRED_KEYS = ("station", "vmid", "dest_host")   # pm-heartbeat.py's own _REQUIRED_KEYS
 HB_KEY_PATH = "/etc/pm-heartbeat/id_ed25519"          # pm-heartbeat-setup.sh's KEY_PATH default
 
@@ -179,8 +186,8 @@ def render_wizard(text: str, vmid: int) -> str:
 def fetch_sources(rel: Release, *, vmid: int, urlopen: Callable = urllib.request.urlopen) -> Sources:
     """firstboot-v3.sh at appliance_commit, rendered with the tag and checked
     against firstboot_sha256; the wizard and PROXMOX_FILES at wizard_commit.
-    A 404 fetching pm-align.py means that commit predates the tool and is
-    simply absent; any other failure, on pm-align.py or any other name,
+    A 404 fetching pm-align.py or a pm-storage file means that commit
+    predates it and it is simply absent; any other failure, on pm-align.py or any other name,
     raises.  sigmond-vm6proxy comes from appliance_commit the same way: a 404
     leaves it absent, and a manifest that names vm6proxy_sha256 must match."""
     raw_fb = _get(f"{RAW}/sigmond-appliance/{rel.appliance_commit}/firstboot-v3.sh",
@@ -197,7 +204,7 @@ def fetch_sources(rel: Release, *, vmid: int, urlopen: Callable = urllib.request
         try:
             proxmox[name] = _get(f"{base}/{name}", urlopen)
         except PmAlignError as exc:
-            if name == "pm-align.py" and getattr(exc, "status", None) == 404:
+            if name in OPTIONAL_PROXMOX_FILES and getattr(exc, "status", None) == 404:
                 continue
             raise
     return Sources(firstboot, wizard, proxmox, _fetch_vm6proxy(rel, urlopen),
@@ -1325,6 +1332,11 @@ def heartbeat_step(root: Path, src: Sources, argv_tail: list, *, run, tmpdir: Pa
         p = tmpdir / name
         p.write_bytes(src.proxmox[name])
         os.chmod(p, 0o755 if name.endswith((".sh", ".py")) else 0o644)
+    for name in HB_OPTIONAL_FILES:
+        if name in src.proxmox:
+            p = tmpdir / name
+            p.write_bytes(src.proxmox[name])
+            os.chmod(p, 0o755 if name.endswith((".sh", ".py")) else 0o644)
     existed = _under(root, HB_CONFIG).exists()
     r = run([str(tmpdir / "pm-heartbeat-setup.sh"), *argv_tail],
             capture_output=True, text=True, timeout=300)
