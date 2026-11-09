@@ -264,6 +264,22 @@ def load_site_profile(path: Optional[Path] = None) -> Optional[SiteProfile]:
         # treat unfilled <...> placeholders as empty
         return "" if (s.startswith("<") and s.endswith(">")) else s
 
+    # [psws.stations] (restored 2026-11-09) names an instrument enrolled under
+    # a station of its own.  766b60e removed it on 2026-09-23 because two
+    # station ids per site made "which station is this?" ambiguous, so every
+    # load that honours one says so, recorder by recorder.
+    _site = _clean(psws.get("station_id")).upper()
+    _over = {str(k): _clean(v).upper()
+             for k, v in ((psws.get("stations") or {}).items()
+                          if isinstance(psws.get("stations"), dict) else ())
+             if _clean(v) and _clean(v).upper() != _site}
+    if _over:
+        import sys as _sys
+        print(f"NOTICE: {path}: [psws.stations] sends "
+              + ", ".join(f"{k} -> {v}" for k, v in sorted(_over.items()))
+              + f" (not the site station {_site or '<unset>'})",
+              file=_sys.stderr)
+
     return SiteProfile(
         call=_clean(st.get("callsign")).upper(),
         grid=_clean(st.get("grid_square")),
@@ -490,7 +506,7 @@ def carry_operator_blocks(new_text: str, old_text) -> str:
 #: instrument_for() already use; "hamsci-physics" names the same instrument.
 PSWS_RECORDER_NAMES = ("hf-timestd", "hamsci-physics", "mag-recorder")
 
-_STATION_RE = re.compile(r"^S\d{3,}$")
+_STATION_RE = re.compile(r"^S\d{6}$")
 _INSTRUMENT_RE = re.compile(r"^\d+$")
 
 
@@ -558,6 +574,8 @@ def _seed_profile(seed: dict) -> str:
     PSWS ids rendered."""
     call = str(seed.get("call") or "").strip().upper()
     grid = str(seed.get("grid") or "").strip()
+    lat, lon = seed.get("lat") or 0.0, seed.get("lon") or 0.0
+    elev = seed.get("elevation_m") or 0.0
     reporter = str(seed.get("reporter_id") or "").strip().upper()
     out = ["# /etc/sigmond/site-profile.toml -- single non-secret per-site "
            "source of truth.",
@@ -566,7 +584,16 @@ def _seed_profile(seed: dict) -> str:
            "schema_version = 1", ""]
     if call:
         out += ["[station]", f"callsign    = {_q(call)}"]
-        if grid:
+        # GPSDO location where one exists, else the typed grid: coordination
+        # holds lat/lon only from a GPS fix (`smd config location`) or an
+        # explicit `smd config identity --lat/--lon`.  A grid_square beside
+        # them would go stale and render would put it back.
+        if lat or lon:
+            out += [f"latitude    = {float(lat)!r}",
+                    f"longitude   = {float(lon)!r}"]
+            if elev:
+                out.append(f"elevation_m = {float(elev)!r}")
+        elif grid:
             out.append(f"grid_square = {_q(grid)}")
         out.append("")
     if reporter:
@@ -599,10 +626,19 @@ def set_psws_identity(text, *, station_id: str = "", instruments=None,
            else str(old.get("station_id") or "").strip())
     if not sid or sid.startswith("<"):
         raise ValueError("no PSWS station id: pass one (e.g. S000418)")
-    ins = _table("instruments")
-    ins.update(instruments or {})
-    sts = _table("stations")
-    sts.update(stations or {})
+    def _merge(old_t: dict, new_t: dict) -> dict:
+        # The GRAPE instrument has two names, and instrument_for() /
+        # station_for() read a recorder's own key first: setting one alias
+        # must drop the other, or hamsci-physics keeps the old id.
+        for key in new_t:
+            if key in GRAPE_RECORDERS:
+                for alias in GRAPE_RECORDERS:
+                    old_t.pop(alias, None)
+        old_t.update(new_t)
+        return old_t
+
+    ins = _merge(_table("instruments"), dict(instruments or {}))
+    sts = _merge(_table("stations"), dict(stations or {}))
     # A per-instrument station equal to the site's says nothing; drop it so
     # the profile shows the primary case plainly.
     sts = {k: v for k, v in sts.items() if v.upper() != sid}
@@ -612,3 +648,33 @@ def set_psws_identity(text, *, station_id: str = "", instruments=None,
     rest, _ = _split_block(text, "psws")
     return (rest.rstrip("\n") + "\n\n"
             + _psws_block(sid, legacy, ins, sts))
+
+
+#: [station] keys that carry the location; set_station_location replaces them.
+_LOCATION_KEYS = ("grid_square", "latitude", "longitude", "elevation_m")
+
+
+def set_station_location(text: str, *, lat: float, lon: float,
+                         elevation_m=None):
+    """``text`` with its [station] location set to a GPS fix: latitude,
+    longitude (and elevation_m), and no grid_square, which would go stale.
+    Every other line stays.  None when the profile has no [station] table:
+    render then leaves coordination's identity alone, so nothing to fix."""
+    lines = text.splitlines(keepends=True)
+    head = next((i for i, ln in enumerate(lines)
+                 if re.match(r"\s*\[\s*station\s*\]", ln)), None)
+    if head is None:
+        return None
+    key_re = re.compile(r"\s*(" + "|".join(_LOCATION_KEYS) + r")\s*=")
+    out = lines[:head + 1]
+    out += [f"latitude    = {float(lat)!r}\n",
+            f"longitude   = {float(lon)!r}\n"]
+    if elevation_m:
+        out.append(f"elevation_m = {float(elevation_m)!r}\n")
+    i = head + 1
+    while i < len(lines) and not lines[i].lstrip().startswith("["):
+        if not key_re.match(lines[i]):
+            out.append(lines[i])
+        i += 1
+    out += lines[i:]
+    return "".join(out)

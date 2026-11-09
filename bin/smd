@@ -11005,6 +11005,15 @@ def cmd_bringup(args) -> int:
     if _site_profile is not None:
         reporter = reporter or _site_profile.effective_reporter_id
         grid = grid or _site_profile.grid
+        if not grid:
+            # A profile that carries a GPS lat/lon holds no grid_square
+            # (GPSDO location where one exists); coordination [host] keeps
+            # the grid `smd config location` derived from the same fix.
+            try:
+                from sigmond.coordination import load_coordination
+                grid = load_coordination().host.grid
+            except Exception:                               # noqa: BLE001
+                pass
         callsign = callsign or _site_profile.call
         psws_id = psws_id or _site_profile.psws_station_id
         _info(f'identity from {_site_profile.source_path}: '
@@ -11290,15 +11299,9 @@ def cmd_bringup(args) -> int:
     # PSWS ids: refuse a malformed flag now, before anything installs.
     psws_argv = _bringup_psws_argv(args)
     if psws_argv is not None and _HAS_SIGMOND_LIB:
-        from sigmond.site_profile import (normalize_psws_station_id,
-                                          parse_psws_assignments)
-        try:
-            if (getattr(args, 'psws_station_id', None) or '').strip():
-                normalize_psws_station_id(args.psws_station_id)
-            parse_psws_assignments(args.psws_instrument, kind='instrument')
-            parse_psws_assignments(args.psws_instrument_station, kind='station')
-        except ValueError as exc:
-            _err(f'bringup: {exc}')
+        problem = _bringup_psws_check(args, _site_profile)
+        if problem:
+            _err(f'bringup: {problem}')
             return 1
         _info('PSWS: smd ' + ' '.join(psws_argv)
               + '  (site-profile.toml, then rendered into each recorder)')
@@ -11370,6 +11373,11 @@ def cmd_bringup(args) -> int:
     if grid:
         os.environ['STATION_GRID'] = grid
     if psws_id:
+        try:
+            from sigmond.site_profile import normalize_psws_station_id
+            psws_id = normalize_psws_station_id(psws_id)
+        except (ImportError, ValueError):
+            pass
         os.environ['STATION_ID'] = psws_id
 
     # PSWS flags land in site-profile.toml, the one place sigmond keeps site
@@ -28423,6 +28431,30 @@ def cmd_secrets_bundle(args) -> int:
 # steps and points at the human ones. Plan-first; --yes executes (self-elevates).
 # See docs/PROVISIONING-INPUTS.md §9.
 # ===========================================================================
+
+def _bringup_psws_check(args, site_profile):
+    """What is wrong with bring-up's PSWS flags, or None.  Instrument ids
+    need a station to sit under: the flag's, else the site profile's."""
+    from sigmond.site_profile import (normalize_psws_station_id,
+                                      parse_psws_assignments)
+    station = (getattr(args, 'psws_station_id', None) or '').strip()
+    try:
+        if station:
+            normalize_psws_station_id(station)
+        inst = parse_psws_assignments(
+            getattr(args, 'psws_instrument', None) or [], kind='instrument')
+        inst_st = parse_psws_assignments(
+            getattr(args, 'psws_instrument_station', None) or [],
+            kind='station')
+    except ValueError as exc:
+        return str(exc)
+    if (inst or inst_st) and not station and not (
+            site_profile is not None
+            and getattr(site_profile, 'psws_station_id', '')):
+        return ('--psws-instrument needs a PSWS station id: add '
+                '--psws-station-id S000NNN (the site station on the portal)')
+    return None
+
 
 def _bringup_psws_argv(args):
     """The `smd config psws` argv bring-up runs for its PSWS flags, or None

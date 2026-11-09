@@ -264,3 +264,191 @@ def test_config_psws_parser():
     assert a.station == "S000418"
     assert a.instrument == ["hf-timestd=367", "mag-recorder=401"]
     assert a.instrument_station == []
+
+
+# --- review fixes (2026-11-09) -------------------------------------------------
+
+def test_setting_one_grape_alias_drops_the_other(tmp_path):
+    """instrument_for() reads a recorder's own key first, so a stale
+    "hamsci-physics" entry would keep GRAPE uploading under the old id."""
+    old = ('[psws]\nenabled = true\nstation_id = "S000418"\n\n'
+           '[psws.instruments]\n"hamsci-physics" = "172"\n\n'
+           '[psws.stations]\n"hamsci-physics" = "S000082"\n')
+    text = sp.set_psws_identity(old, instruments={"hf-timestd": "367"},
+                                stations={"hf-timestd": "S000099"})
+    prof = load_site_profile(_write(tmp_path, text))
+    assert prof.instrument_for("hf-timestd") == "367"
+    assert prof.instrument_for("hamsci-physics") == "367"
+    assert prof.station_for("hamsci-physics") == "S000099"
+    assert "hamsci-physics" not in text
+
+
+def test_station_override_prints_a_notice_naming_it(capsys, tmp_path):
+    p = _write(tmp_path,
+               '[psws]\nenabled = true\nstation_id = "S000170"\n'
+               '[psws.stations]\n"mag-recorder" = "S000082"\n'
+               '"hf-timestd" = "S000170"\n')
+    load_site_profile(p)
+    err = capsys.readouterr().err
+    assert "mag-recorder" in err and "S000082" in err and "S000170" in err
+    assert "hf-timestd" not in err          # same as the site: no override
+
+
+def test_station_ids_are_s_and_six_digits():
+    assert sp.normalize_psws_station_id("s000418") == "S000418"
+    for bad in ("S0418", "S0000418", "S00041"):
+        with pytest.raises(ValueError):
+            sp.normalize_psws_station_id(bad)
+
+
+def _run_config_psws(tmp_path, coord_text, **kw):
+    import sigmond.commands.config as cfg
+    import sigmond.psws as psws
+    prof = tmp_path / "site-profile.toml"
+    coord = tmp_path / "coordination.toml"
+    coord.write_text(coord_text)
+    env = tmp_path / "coordination.env"
+    _, recorders = _fake_recorder_configs(tmp_path)
+    args = types.SimpleNamespace(
+        station="S000418", instrument=["hf-timestd=367"],
+        instrument_station=[], no_render=False, dry_run=False)
+    for k, v in kw.items():
+        setattr(args, k, v)
+    with mock.patch.object(sp, "SITE_PROFILE_PATH", prof), \
+            mock.patch.object(cfg, "SITE_PROFILE_PATH", prof), \
+            mock.patch.object(cfg, "COORDINATION_PATH", coord), \
+            mock.patch.object(cfg, "COORDINATION_ENV", env), \
+            mock.patch.object(psws, "RECORDERS", recorders), \
+            mock.patch.object(psws, "_sudo", lambda: []), \
+            mock.patch.object(cfg, "_report_station_key", lambda p: None):
+        rc = cfg.cmd_config_psws(args)
+    return rc, prof, coord
+
+
+def test_seed_with_gps_lat_lon_writes_no_grid(tmp_path, capsys):
+    """GPSDO location where one exists, else the typed grid: coordination
+    holding lat/lon seeds lat/lon, and no grid_square that could go stale."""
+    import tomllib
+    rc, prof, coord = _run_config_psws(
+        tmp_path, '[host]\ncall = "AC0G"\nlat = 38.93\nlon = -92.33\n')
+    assert rc == 0, capsys.readouterr()
+    st = tomllib.loads(prof.read_text())["station"]
+    assert st["latitude"] == 38.93 and st["longitude"] == -92.33
+    assert "grid_square" not in st
+    p = load_site_profile(prof)
+    assert p.lat == 38.93 and p.lon == -92.33
+
+
+def test_seed_with_grid_and_gps_prefers_gps(tmp_path, capsys):
+    import tomllib
+    rc, prof, _ = _run_config_psws(
+        tmp_path,
+        '[host]\ncall = "AC0G"\ngrid = "EM38ww"\nlat = 38.93\nlon = -92.33\n')
+    assert rc == 0
+    st = tomllib.loads(prof.read_text())["station"]
+    assert "grid_square" not in st and st["latitude"] == 38.93
+
+
+def test_seed_that_render_would_reject_leaves_no_file(tmp_path, capsys):
+    """A callsign with no grid and no lat/lon: render refuses [station]
+    without a location, so config psws must not leave that profile behind."""
+    rc, prof, _ = _run_config_psws(tmp_path, '[host]\ncall = "AC0G"\n')
+    out = capsys.readouterr()
+    assert rc == 1
+    assert not prof.exists()
+    assert not list(tmp_path.glob("site-profile.toml*"))
+    assert "grid" in (out.out + out.err)
+
+
+def test_new_profile_is_0644(tmp_path, capsys):
+    rc, prof, _ = _run_config_psws(
+        tmp_path, '[host]\ncall = "AC0G"\ngrid = "EM38ww"\n')
+    assert rc == 0
+    assert (prof.stat().st_mode & 0o777) == 0o644
+
+
+def test_update_keeps_the_profile_mode_and_leaves_no_tmp(tmp_path, capsys):
+    prof = tmp_path / "site-profile.toml"
+    prof.write_text('[station]\ncallsign = "AC0G"\ngrid_square = "EM38ww"\n')
+    prof.chmod(0o640)
+    rc, prof, _ = _run_config_psws(
+        tmp_path, '[host]\ncall = "AC0G"\ngrid = "EM38ww"\n')
+    assert rc == 0
+    assert (prof.stat().st_mode & 0o777) == 0o640
+    assert sorted(x.name for x in tmp_path.glob("site-profile.toml*")) == \
+        ["site-profile.toml"]
+
+
+def test_write_cleans_up_its_tmp_on_failure(tmp_path):
+    import sigmond.commands.config as cfg
+    prof = tmp_path / "site-profile.toml"
+    with mock.patch.object(cfg, "SITE_PROFILE_PATH", prof), \
+            mock.patch.object(cfg.os, "replace",
+                              side_effect=OSError("disk full")):
+        with pytest.raises(OSError):
+            cfg._write_site_profile("schema_version = 1\n")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_config_location_updates_the_profile_location(tmp_path, capsys):
+    """`smd config location --from-gps` must reach site-profile.toml too, or
+    the next render puts the profile's stale grid back into coordination."""
+    import tomllib
+    import sigmond.commands.config as cfg
+    prof = tmp_path / "site-profile.toml"
+    prof.write_text('[station]\ncallsign = "AC0G"\n'
+                    'grid_square = "EM38aa"   # typed\ndescription = "x"\n\n'
+                    '[psws]\nenabled = true\nstation_id = "S000418"\n')
+    coord = tmp_path / "coordination.toml"
+    coord.write_text('[host]\ncall = "AC0G"\ngrid = "EM38aa"\n')
+    env = tmp_path / "coordination.env"
+    loc = {"fix": "3D", "grid": "EM38ww", "lat": 38.93, "lon": -92.33,
+           "altitude_m": 200.0}
+    with mock.patch.object(sp, "SITE_PROFILE_PATH", prof), \
+            mock.patch.object(cfg, "SITE_PROFILE_PATH", prof), \
+            mock.patch.object(cfg, "COORDINATION_PATH", coord), \
+            mock.patch.object(cfg, "COORDINATION_ENV", env), \
+            mock.patch("sigmond.coordination.COORDINATION_PATH", coord), \
+            mock.patch.object(cfg, "_gpsdo_location", lambda: loc):
+        rc = cfg.cmd_config_location(types.SimpleNamespace(
+            dry_run=False, restart=False))
+    assert rc == 0, capsys.readouterr()
+    st = tomllib.loads(prof.read_text())["station"]
+    assert "grid_square" not in st
+    assert st["latitude"] == 38.93 and st["longitude"] == -92.33
+    assert st["elevation_m"] == 200.0
+    assert st["callsign"] == "AC0G" and st["description"] == "x"
+    assert tomllib.loads(prof.read_text())["psws"]["station_id"] == "S000418"
+
+
+def test_config_location_without_a_profile_creates_none(tmp_path, capsys):
+    import sigmond.commands.config as cfg
+    prof = tmp_path / "site-profile.toml"
+    coord = tmp_path / "coordination.toml"
+    coord.write_text('[host]\ncall = "AC0G"\n')
+    loc = {"fix": "3D", "grid": "EM38ww", "lat": 38.93, "lon": -92.33,
+           "altitude_m": None}
+    with mock.patch.object(sp, "SITE_PROFILE_PATH", prof), \
+            mock.patch.object(cfg, "SITE_PROFILE_PATH", prof), \
+            mock.patch.object(cfg, "COORDINATION_PATH", coord), \
+            mock.patch.object(cfg, "COORDINATION_ENV", tmp_path / "e"), \
+            mock.patch("sigmond.coordination.COORDINATION_PATH", coord), \
+            mock.patch.object(cfg, "_gpsdo_location", lambda: loc):
+        assert cfg.cmd_config_location(types.SimpleNamespace(
+            dry_run=False, restart=False)) == 0
+    assert not prof.exists()
+
+
+def test_bringup_refuses_instruments_without_a_station():
+    smd = _smd()
+    a = smd._build_parser().parse_args(
+        ["bringup", "dasi2", "--psws-instrument", "hf-timestd=367"])
+    assert smd._bringup_psws_check(a, None) is not None
+    prof = sp.SiteProfile(psws_station_id="S000418")
+    assert smd._bringup_psws_check(a, prof) is None
+    a = smd._build_parser().parse_args(
+        ["bringup", "dasi2", "--psws-station-id", "s000418"])
+    assert smd._bringup_psws_check(a, None) is None
+    a = smd._build_parser().parse_args(
+        ["bringup", "dasi2", "--psws-station-id", "S0418"])
+    assert "S0418" in smd._bringup_psws_check(a, None)

@@ -505,7 +505,8 @@ def cmd_config_location(args) -> int:
         return 0
 
     try:
-        changed = write_host_identity(grid=grid, lat=lat, lon=lon)
+        changed = write_host_identity(grid=grid, lat=lat, lon=lon,
+                                      path=COORDINATION_PATH)
     except PermissionError:
         err(f'permission denied writing {COORDINATION_PATH}; re-run smd as root')
         return 1
@@ -513,6 +514,24 @@ def cmd_config_location(args) -> int:
         ok(f'seeded coordination [host]: grid={grid} lat={lat:.6f} lon={lon:.6f}')
     else:
         info('coordination [host] already matched the GPS — no change.')
+
+    # GPSDO location where one exists: the profile's [station] follows the
+    # fix too, or the next `smd config render` writes its typed grid back
+    # over the GPS location in coordination.toml.
+    if SITE_PROFILE_PATH.exists():
+        from ..site_profile import set_station_location
+        try:
+            new_text = set_station_location(SITE_PROFILE_PATH.read_text(),
+                                            lat=lat, lon=lon, elevation_m=alt)
+            if new_text is not None and new_text != SITE_PROFILE_PATH.read_text():
+                _write_site_profile(new_text)
+                ok(f'{SITE_PROFILE_PATH.name} [station]: latitude={lat:.6f} '
+                   f'longitude={lon:.6f} (grid_square dropped; the GPS fix '
+                   f'is the location)')
+        except PermissionError:
+            err(f'permission denied writing {SITE_PROFILE_PATH}; re-run smd '
+                'as root, or the next render restores the old location')
+            return 1
 
     try:
         COORDINATION_ENV.parent.mkdir(parents=True, exist_ok=True)
@@ -789,6 +808,19 @@ def _merge_checks(receivers: list, profile_grid: str) -> list:
     return problems
 
 
+def profile_problems(profile, has_station: bool) -> list:
+    """The identity problems that make `smd config render` refuse a profile.
+    `smd config psws` runs the same check on a profile before creating it."""
+    problems = []
+    if has_station and not profile.call:
+        problems.append('station.callsign is empty')
+    if has_station and not profile.grid and not (profile.lat or profile.lon):
+        problems.append('need station.grid_square or latitude/longitude')
+    if profile.psws_enabled and not profile.psws_station_id:
+        problems.append('psws.enabled but station_id missing')
+    return problems
+
+
 def cmd_config_render(args) -> int:
     """Render coordination.toml/.env from /etc/sigmond/site-profile.toml.
 
@@ -841,13 +873,7 @@ def cmd_config_render(args) -> int:
             err(p)
         return 1
 
-    problems = []
-    if has_station and not profile.call:
-        problems.append('station.callsign is empty')
-    if has_station and not profile.grid and not (profile.lat or profile.lon):
-        problems.append('need station.grid_square or latitude/longitude')
-    if profile.psws_enabled and not profile.psws_station_id:
-        problems.append('psws.enabled but station_id missing')
+    problems = profile_problems(profile, has_station)
     if problems:
         for p in problems:
             err(p)
@@ -954,6 +980,33 @@ def cmd_config_render(args) -> int:
     return 0
 
 
+def _write_site_profile(text: str, chown=os.chown) -> None:
+    """Replace site-profile.toml with ``text`` atomically.  A new file gets
+    0644; an existing one keeps its mode, owner and group (as
+    profile-install does).  The temp file has a unique name beside the
+    profile, so two writers never share one, and goes away on any failure."""
+    import tempfile
+    live = SITE_PROFILE_PATH.exists()
+    old_st = SITE_PROFILE_PATH.stat() if live else None
+    SITE_PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=SITE_PROFILE_PATH.name + '.',
+                                suffix='.tmp', dir=SITE_PROFILE_PATH.parent)
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, 'w') as fh:
+            fh.write(text)
+        if old_st is not None:
+            os.chmod(tmp, old_st.st_mode & 0o7777)
+            if (old_st.st_uid, old_st.st_gid) != (os.geteuid(), os.getegid()):
+                chown(tmp, old_st.st_uid, old_st.st_gid)
+        else:
+            os.chmod(tmp, 0o644)
+        os.replace(tmp, SITE_PROFILE_PATH)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def cmd_config_psws(args) -> int:
     """`smd config psws`: set the site's PSWS identity, then render it.
 
@@ -996,15 +1049,35 @@ def cmd_config_psws(args) -> int:
     if old_text is None:
         coord = load_coordination(COORDINATION_PATH)
         seed = {'call': coord.host.call, 'grid': coord.host.grid,
+                'lat': coord.host.lat, 'lon': coord.host.lon,
+                'elevation_m': getattr(coord.host, 'elevation_m', 0.0),
                 'reporter_id': getattr(coord.station, 'reporter_id', '')}
     try:
         text = set_psws_identity(old_text, station_id=station,
                                  instruments=instruments, stations=stations,
                                  seed=seed)
-        tomllib.loads(text)
+        data = tomllib.loads(text)
     except (ValueError, tomllib.TOMLDecodeError) as exc:
         err(f'config psws: {exc}; {SITE_PROFILE_PATH} unchanged')
         return 1
+    if old_text is None:
+        # A new profile must be one render accepts, or the host ends up
+        # with a file that blocks every later render.  Check it before it
+        # exists; leave nothing behind when it fails.
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            probe = Path(td) / 'site-profile.toml'
+            probe.write_text(text)
+            problems = profile_problems(load_site_profile(probe),
+                                        'station' in data)
+        if problems:
+            for p in problems:
+                err(f'config psws: a new {SITE_PROFILE_PATH.name} seeded from '
+                    f'{COORDINATION_PATH} would fail render: {p}')
+            info('  set the station location first, e.g.  smd config identity '
+                 '--grid EM38ww  (or smd config location --from-gps); '
+                 'nothing written')
+            return 1
 
     if getattr(args, 'dry_run', False):
         heading('config psws (dry-run)')
@@ -1012,14 +1085,8 @@ def cmd_config_psws(args) -> int:
         print(text, end='')
         return 0
 
-    tmp = SITE_PROFILE_PATH.with_name(SITE_PROFILE_PATH.name + '.tmp')
     try:
-        SITE_PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(text)
-        if exists:
-            import shutil
-            shutil.copymode(SITE_PROFILE_PATH, tmp)
-        os.replace(tmp, SITE_PROFILE_PATH)
+        _write_site_profile(text)
     except PermissionError:
         err(f'permission denied writing {SITE_PROFILE_PATH}; re-run smd as root')
         return 1
