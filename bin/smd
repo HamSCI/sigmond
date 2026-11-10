@@ -16779,7 +16779,12 @@ def cmd_status(args) -> int:
             from sigmond.catalog import load_catalog, next_steps
             _catalog = load_catalog()
             _items = next_steps(enabled, _catalog)
-            if _items:
+            # Drift is a whole-station question: a named status skips it.
+            _drift = None
+            if only is None:
+                from sigmond.topology_drift import topology_drift
+                _drift = topology_drift(topology, _catalog)
+            if _items or _drift:
                 _heading('action needed')
                 for kind, subject, action in _items:
                     if kind == 'install':
@@ -16788,6 +16793,13 @@ def cmd_status(args) -> int:
                     elif kind == 'enable_dep':
                         _warn(subject)
                         _info(f'       fix:  {action}')
+                for name in (_drift.running_not_enabled if _drift else ()):
+                    _warn(f'{name}  —  running, but not enabled in topology '
+                          f'(its uploads do not render; restart skips it)')
+                    _info(f'       run:  smd enable {name}')
+                for name in (_drift.enabled_not_running if _drift else ()):
+                    _warn(f'{name}  —  enabled in topology, but not running')
+                    _info(f'       run:  smd start {name}')
                 print()
         except Exception:
             pass

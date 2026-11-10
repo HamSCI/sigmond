@@ -66,6 +66,7 @@ CHECK_META = {
     'station pages':     ('platform.station-pages', 'platform', 'station-web'),
     'magnetometer page': ('platform.magnetometer-page', 'platform', 'gmag-webui'),
     'receivers':         ('receivers.instances', 'decode', None),
+    'topology':          ('platform.topology', 'platform', None),
 }
 FIX_SEP = '  ' + FIX
 
@@ -157,6 +158,7 @@ class Env:
     bringup: Callable[[], Any] = None                                  # final review I3
     bringup_marker: Path = Path('/var/lib/sigmond/.firstrun-bringup-done')  # residual R3
     mag_psws_id: Callable[[], str] = None                              # residual R2
+    drift: Callable[[], Any] = None                                    # topology drift
 
 
 def _installed(name: str) -> bool:
@@ -177,7 +179,7 @@ def default_env() -> Env:
                timestd_config=lambda: read_timestd_config(reader),
                coordination=_coordination, coordination_age_s=_switch_age_s,
                backlog=read_backlog, http=http_status, bringup=bringup_state,
-               mag_psws_id=lambda: read_mag_psws_id(reader))
+               mag_psws_id=lambda: read_mag_psws_id(reader), drift=_drift)
 
 
 def guarded(label: str, fn: Callable[[Env], Optional[Line]], env: Env) -> Optional[Line]:
@@ -1141,6 +1143,45 @@ def receivers_line(env: Env) -> Optional[Line]:
 
 
 # ---------------------------------------------------------------------------
+# topology.toml against what runs (sigmond.topology_drift)
+# ---------------------------------------------------------------------------
+
+def _drift():
+    from ..topology import load_topology
+    from ..topology_drift import topology_drift
+    return topology_drift(load_topology())
+
+
+def topology_line(env: Env) -> Optional[Line]:
+    """FAIL when a client runs that topology does not enable (sigmond renders
+    its uploads nowhere), or an enabled client stands stopped.  A client that
+    another line already watches (CHECK_META's client column) is left to that
+    line, so one fault never prints twice."""
+    label = 'topology'
+    if env.drift is None:
+        return None
+    d = env.drift()
+    watched = {meta[2] for meta in CHECK_META.values() if meta[2]}
+    stopped = [n for n in d.enabled_not_running if n not in watched]
+    if d.running_not_enabled:
+        names = ' '.join(d.running_not_enabled)
+        one = len(d.running_not_enabled) == 1
+        return Line(FAIL, label, f'{", ".join(d.running_not_enabled)} '
+                    f'{"runs" if one else "run"} but topology does not enable '
+                    f'{"it" if one else "them"}, so '
+                    f'{"its" if one else "their"} uploads do not render.  '
+                    f'{FIX}smd enable {names}')
+    if stopped:
+        names = ' '.join(stopped)
+        hold = bringup_hold(env)
+        if hold:
+            return Line(WAIT, label, f'{", ".join(stopped)} enabled, not running; {hold}')
+        return Line(FAIL, label, f'{", ".join(stopped)} enabled in topology but '
+                    f'not running.  {FIX}smd start {names}')
+    return Line(OK, label, 'every running client is enabled, and every enabled one runs')
+
+
+# ---------------------------------------------------------------------------
 # The lines, in the order the installer reads them (spec §2).  Each entry is
 # (label, function); a function returns a Line, or None for a line that does
 # not apply here at all.  Later tasks add their entries in place.
@@ -1154,6 +1195,7 @@ CHECKS: List[Tuple[str, Callable[[Env], Optional[Line]]]] = [
     ('magnetometer', mag_line),
     ('GRAPE', grape_line),
     ('storage', storage_line),
+    ('topology', topology_line),
     ('uploads', uploads_line),
     ('meteor scatter', meteor_line),
     *[(label, mag_page_line if label == MAG_PAGE else page_check(label, port, needs))
