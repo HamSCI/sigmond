@@ -153,6 +153,7 @@ hardware_gated  = "magnetometer (RM3100 / Pololu USB-I2C)"  # dormant when absen
 kind            = "library"                           # source-only dep from the catalog's perspective
 description     = "HamSCI uploader: the sink writer (hs_uploader.sink), the upload library and the hs-uploader daemon"
 repo            = "https://github.com/HamSCI/hs-uploader"
+services        = ["hs-uploader.service"]             # its install.sh installs this daemon; smd start/stop/restart <name> acts on it though topology omits it
 # No install_script: six clients (psk-recorder, meteor-scatter, wspr-recorder,
 # mag-recorder, hamsci-physics, hf-timestd) declare hs-uploader and point
 # [tool.uv.sources] at ../hs-uploader as an editable install — only the source

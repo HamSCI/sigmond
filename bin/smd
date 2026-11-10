@@ -771,11 +771,60 @@ def _resolve_only_list(args, topology):
     # so the operator gets a clear "not enabled" cue rather than silent
     # no-op.
     enabled_set = set(_enabled_components(topology) or [])
-    not_enabled = [c for c in combined if c not in enabled_set]
+    not_enabled = [c for c in combined if c not in enabled_set
+                   and not _declared_services(c)]
     if not_enabled:
         for name in not_enabled:
             _warn(f'{name}: not enabled in topology — skipping (run: smd enable {name})')
     return [c for c in combined if c in enabled_set]
+
+
+def _declared_services(name: str) -> tuple:
+    """systemd units a catalog entry declares via ``services`` (else ``()``)."""
+    if not _HAS_SIGMOND_LIB:
+        return ()
+    try:
+        entry = load_catalog().get(name)
+    except (FileNotFoundError, OSError):
+        return ()
+    return tuple(getattr(entry, 'services', ()) or ()) if entry else ()
+
+
+def _act_declared_services(verb: str, args) -> int:
+    """`smd <verb> <name>` for a NAMED component that is not enabled in
+    topology but declares ``services`` in the catalog (hs-uploader is a
+    "library" for its six clients yet installs a daemon): run systemctl
+    on those units directly.  A bare verb never reaches here."""
+    names = list(getattr(args, 'names', None) or [])
+    legacy_arg = getattr(args, 'components', None)
+    if legacy_arg:
+        names += [c.strip() for c in legacy_arg.split(',') if c.strip()]
+    if not names or 'all' in names:
+        return 0
+    topology = _load_topology(Path(args.topology) if getattr(args, 'topology', None)
+                              else TOPOLOGY_PATH)
+    enabled_set = set(_enabled_components(topology) if topology else [])
+    rc = 0
+    for raw in names:
+        try:
+            name = resolve_name(raw, load_catalog())
+        except Exception:
+            name = raw
+        units = _declared_services(name)
+        if not units or name in enabled_set:
+            continue
+        _info(f'{name}: not enabled in topology; {verb} its declared '
+              f'service(s) directly: {", ".join(units)}')
+        for unit in units:
+            if verb == 'restart':
+                _run(['systemctl', 'reset-failed', unit], sudo=True)
+            r = _run(['systemctl', verb, unit], sudo=True)
+            if r.returncode == 0:
+                _ok(_display_unit(unit))
+            else:
+                _err(f'{_display_unit(unit)}: {r.stderr.strip()}')
+                rc = 1
+    return rc
 
 
 def _autoenable_named_on_start(args, topology_path) -> bool:
@@ -14677,6 +14726,13 @@ def _ensure_other_affinity_drop_ins(topology_cpu_affinity=None) -> bool:
 def cmd_start(args) -> int:
     if _need_root('start'):
         return 1
+    rc = _act_declared_services('start', args)
+    return _cmd_start_enabled(args) or rc
+
+
+def _cmd_start_enabled(args) -> int:
+    if _need_root('start'):
+        return 1
     # Naming a component to start enables it if it's installed-but-disabled,
     # so the forward path is just install → start (no separate `smd enable`).
     # Writes topology.toml; the load below then sees the new enables.
@@ -14820,6 +14876,13 @@ def cmd_start(args) -> int:
 
 
 def cmd_stop(args) -> int:
+    if _need_root('stop'):
+        return 1
+    rc = _act_declared_services('stop', args)
+    return _cmd_stop_enabled(args) or rc
+
+
+def _cmd_stop_enabled(args) -> int:
     if _need_root('stop'):
         return 1
     topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
@@ -15757,7 +15820,7 @@ def _restart_verb(component: str, named, canonical=None) -> str:
     return 'restart' if canonical([component]) & named else 'start'
 
 
-def cmd_restart(args) -> int:
+def _cmd_restart_enabled(args) -> int:
     if _need_root('restart'):
         return 1
     topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
@@ -15834,6 +15897,13 @@ def cmd_restart(args) -> int:
             _err(f'{_display_unit(unit.unit)}: {r.stderr.strip()}')
             any_failed = True
     return 1 if any_failed else 0
+
+
+def cmd_restart(args) -> int:
+    if _need_root('restart'):
+        return 1
+    rc = _act_declared_services('restart', args)
+    return _cmd_restart_enabled(args) or rc
 
 
 def cmd_reload(args) -> int:

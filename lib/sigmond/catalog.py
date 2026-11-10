@@ -99,6 +99,10 @@ class CatalogEntry:
     # not hardware-gated.  Declared here so the gated set lives in config, not
     # code (harmonize._hardware_gated_registry).
     hardware_gated: Optional[str] = None
+    services: tuple[str, ...] = ()
+    """systemd units the entry owns even when its kind is "library"
+    (hs-uploader).  A NAMED `smd start|stop|restart` acts on them directly
+    when topology does not enable the component."""
     pin: Optional[str] = None
     """Exact commit/tag to build, or None to track the default branch.
 
@@ -216,6 +220,7 @@ def _entry_from_toml_block(name: str, cfg: dict) -> CatalogEntry:
         start_priority=int(raw_priority) if raw_priority is not None else None,
         hardware_gated=cfg.get('hardware_gated') or None,
         pin=cfg.get('pin') or None,
+        services=tuple(cfg.get('services', ())),
     )
 
 
@@ -243,6 +248,8 @@ def _entry_to_block(entry: CatalogEntry) -> dict:
         block['hardware_gated'] = entry.hardware_gated
     if entry.pin is not None:
         block['pin'] = entry.pin
+    if entry.services:
+        block['services'] = list(entry.services)
     return block
 
 
