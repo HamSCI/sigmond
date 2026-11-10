@@ -96,7 +96,7 @@ class AllLinesTests(unittest.TestCase):
     def test_the_lines_come_in_the_order_the_installer_reads(self):
         # 'bring-up' prints only while the first-run bring-up runs or after it failed.
         self.assertEqual([label for label, _ in check.CHECKS],
-                         ['bring-up', 'PSK', 'WSPR', 'receivers', 'magnetometer', 'GRAPE', 'storage', 'uploads',
+                         ['bring-up', 'PSK', 'WSPR', 'receivers', 'magnetometer', 'GRAPE', 'storage', 'topology', 'uploads',
                           'meteor scatter', 'receiver page', 'station pages', 'magnetometer page'])
 
 

@@ -48,7 +48,7 @@ def _run_restart(monkeypatch, named):
                             can_start=True, cloned=True, display_status="ok"))
     mod._need_root = lambda verb: False
     mod._load_topology = lambda path: {}
-    mod._resolve_only_list = lambda args, topo: list(named) if named else None
+    mod._resolve_only_list = lambda args, topo, **kw: list(named) if named else None
     mod._enabled_components = lambda topo, only: list(only or ["ka9q-radio", "hf-timestd"])
     mod.resolve_units = lambda comps, enabled: [
         _unit(c, {"ka9q-radio": "radiod@AC0G-B4.service",
