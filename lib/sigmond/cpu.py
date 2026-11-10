@@ -28,6 +28,11 @@ from typing import Callable, Optional
 
 # Drop-in filename written by smd.
 SMD_AFFINITY_DROP_IN = 'smd-cpu-affinity.conf'
+# Written into a radiod drop-in when radiod's own core is a single CPU (a
+# non-SMT host).  Its CPUAffinity is then wider than radiod's core, and this
+# names the core: the fft thread's CPU, and what every "radiod's CPUs" reader
+# reports.  See radiod_unit_grant().
+RADIOD_FFT_ENV = 'SIGMOND_RADIOD_FFT_CPUS'
 
 # Drop-in filenames installed by other tools that smd supersedes.
 FOREIGN_AFFINITY_DROP_INS = [
@@ -454,19 +459,30 @@ def compute_host_cpu_layout(
     if local_radiod_count < 1:
         raise ValueError("local_radiod_count must be >= 1")
     widths = {len(p) for p in pairs}
-    if widths != {2}:
+    # ⛔ NON-SMT HOSTS ARE NORMAL, NOT EXOTIC.  This used to demand 2-way
+    # pairs, so a 4-core i5-6500T (no Hyper-Threading) fell to the appliance's
+    # "layout failed" path: the VM ran unpinned, and the finalizer then
+    # skipped host tuning, USB passthrough AND its power-off, leaving the
+    # install apparently hung after the wizard (v3.87, 2026-11-10).  A
+    # non-SMT core is a one-CPU "pair"; everything downstream (host-apply,
+    # the pin hookscript) already reads VM_THREADS and the flat
+    # VCPU_TO_PCPU, so the only thing that changes is threads=1.
+    # Mixed widths (SMT partly off, hybrid P/E parts) still need a human.
+    if widths not in ({1}, {2}):
         raise ValueError(
-            f"host CPU layout requires uniform 2-way SMT pairs; got pair "
-            f"widths {sorted(widths)} — non-SMT or asymmetric host, "
-            f"configure manually"
+            f"host CPU layout requires every core to have the same thread "
+            f"count (1 or 2); got widths {sorted(widths)} — asymmetric "
+            f"host, configure manually"
         )
+    threads = widths.pop()
     total = len(pairs)
     need = reserve_host_pairs + local_radiod_count + 1  # +1 worker pair min
     if total < need:
+        unit = "HT pairs" if threads == 2 else "cores"
         raise ValueError(
-            f"need >= {need} HT pairs ({2 * need} CPUs) for "
+            f"need >= {need} {unit} ({threads * need} CPUs) for "
             f"{local_radiod_count} radiod instance(s) + workers + "
-            f"{reserve_host_pairs} reserved host pair(s); host has {total}"
+            f"{reserve_host_pairs} reserved host core(s); host has {total}"
         )
     vm_pairs = pairs[: total - reserve_host_pairs]
     # radiod takes the HIGHEST VM pairs, not the lowest: vm_pairs[0] always
@@ -489,7 +505,7 @@ def compute_host_cpu_layout(
         "vcpu_to_pcpu": vcpu_to_pcpu,
         "isolcpus": sorted(vcpu_to_pcpu),
         "vm_cores": len(vm_pairs),
-        "vm_threads": 2,
+        "vm_threads": threads,
         "vm_vcpu_count": len(vcpu_to_pcpu),
     }
 
@@ -637,9 +653,16 @@ def get_radiod_cpus_by_unit() -> dict:
         name = u.get('unit', '')
         if not name:
             continue
-        r2 = _run_capture(['systemctl', 'show', '-p', 'CPUAffinity', '--value', name])
-        mask = r2.stdout.strip()
-        if mask:
+        r2 = _run_capture(['systemctl', 'show', '-p', 'CPUAffinity',
+                           '-p', 'Environment', name])
+        props = dict(l.split('=', 1) for l in r2.stdout.splitlines() if '=' in l)
+        # A non-SMT radiod's CPUAffinity also spans the shared worker CPUs
+        # (radiod_unit_grant); its own core is the one the marker names.
+        own = radiod_fft_cpus_from_env(props.get('Environment', ''))
+        mask = props.get('CPUAffinity', '').strip()
+        if own:
+            by_unit[name] = own
+        elif mask:
             by_unit[name] = parse_cpu_mask(mask)
     return by_unit
 
@@ -936,8 +959,55 @@ def compute_affinity_plan(
 # Mutating operations (write drop-ins, remove foreign, apply runtime)
 # ---------------------------------------------------------------------------
 
+def radiod_fft_cpus_from_env(env: str) -> set:
+    """The CPUs named by RADIOD_FFT_ENV in a systemd ``Environment=`` value
+    (space-separated ``K=V`` pairs, as ``systemctl show -p Environment``
+    prints it), or an empty set when it is absent."""
+    for tok in (env or '').split():
+        if tok.startswith(RADIOD_FFT_ENV + '='):
+            return parse_cpu_mask(tok.split('=', 1)[1])
+    return set()
+
+
+def radiod_unit_grant(core_cpus: set, all_radiod_cpus: set,
+                      logical_cpus: int,
+                      topology_cpu_affinity: Optional[dict] = None
+                      ) -> "tuple[set, set]":
+    """The CPUs to grant one radiod unit, and its fft CPU(s) when that differs
+    from "the lowest CPU of the grant".
+
+    On an SMT host radiod's core is a sibling PAIR: the pinners put fft on one
+    sibling and every other radiod thread on the other, and the grant is just
+    the core -- ``(core, set())``, unchanged.
+
+    ⛔ On a NON-SMT host the core is ONE CPU, and confining radiod to it puts
+    fft, proc_rx888 (the USB drain), agc and libusb_event all on that one CPU.
+    AI6VN-2 (i5-6500T, 4 cores no HT, RX888 at 129.6 Msps, 2026-11-10): fft
+    84% + proc_rx888 16% saturated vCPU 2 and radiod lost 26.7 s of samples in
+    one burst.  With fft alone on vCPU 2 and the rest moved to the decoder
+    CPUs 0-1, loss went to zero over a full WSPR decode cycle (fft 99.9%,
+    proc_rx888 25%, cpu0 30%).  So here the grant is radiod's core PLUS the
+    shared worker pool, and the returned fft set names the core so the pinners
+    keep fft there alone.  The worker pool is ``[cpu_affinity].other_cpus``
+    when set, else every CPU no radiod owns.  radiod runs at Nice=-10, so on
+    the shared CPUs its threads win against the decoders.
+    """
+    core = set(core_cpus)
+    if len(core) != 1:
+        return core, set()
+    ca = topology_cpu_affinity or {}
+    spec = str(ca.get('other_cpus', '') or '').strip()
+    pool = (parse_cpu_mask(spec) if spec
+            else set(range(logical_cpus)) - set(all_radiod_cpus))
+    pool -= core
+    if not pool:
+        return core, set()
+    return core | pool, core
+
+
 def render_drop_in(cpus: set, label: str,
-                   exec_start_post: Optional[str] = None) -> str:
+                   exec_start_post: Optional[str] = None,
+                   fft_cpus: Optional[set] = None) -> str:
     """Render a systemd drop-in file for CPU affinity.
 
     exec_start_post, when given, appends ExecStartPost= line(s) (run as
@@ -961,6 +1031,10 @@ def render_drop_in(cpus: set, label: str,
         AllowedCPUs=
         AllowedCPUs={cpu_str}
     """)
+    if fft_cpus:
+        # radiod_unit_grant: a non-SMT radiod shares the worker CPUs; this
+        # names its own core, where fft runs alone.
+        body += f"Environment={RADIOD_FFT_ENV}={cpu_list_str(fft_cpus)}\n"
     if exec_start_post:
         hooks = ([exec_start_post] if isinstance(exec_start_post, str)
                  else list(exec_start_post))

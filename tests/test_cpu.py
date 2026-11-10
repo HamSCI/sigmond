@@ -413,14 +413,72 @@ class ComputeHostCpuLayoutTests(unittest.TestCase):
         self.assertNotIn(14, lay['isolcpus'])
         self.assertNotIn(15, lay['isolcpus'])
 
-    def test_rejects_non_smt(self):
+    def test_non_smt_4core_layout(self):
+        # i5-6500T: 4 cores, no Hyper-Threading.  host-discover emits
+        # HT_PAIRS="0 1 2 3".  Last core stays with the host, radiod takes
+        # the highest VM core, the rest are workers, one thread per core.
+        lay = compute_host_cpu_layout(parse_ht_pairs("0 1 2 3"),
+                                      local_radiod_count=1)
+        self.assertEqual(lay['vm_threads'], 1)
+        self.assertEqual(lay['vm_cores'], 3)
+        self.assertEqual(lay['vm_vcpu_count'], 3)
+        self.assertEqual(lay['radiod_cpus'], [2])
+        self.assertEqual(lay['worker_cpus'], [0, 1])
+        self.assertEqual(lay['vcpu_to_pcpu'], [0, 1, 2])
+        self.assertNotIn(3, lay['isolcpus'])
+        sh = layout_shell_vars(lay)
+        self.assertIn('VM_THREADS="1"', sh)
+        self.assertIn('ISOLCPUS_RANGE="0-2"', sh)
+
+    def test_smt_layout_still_two_threads(self):
+        lay = compute_host_cpu_layout(_seq_pairs(8), local_radiod_count=1)
+        self.assertEqual(lay['vm_threads'], 2)
+
+    def test_rejects_mixed_widths(self):
+        # SMT partly disabled, or a hybrid P/E part: not a uniform grid.
         with self.assertRaises(ValueError):
-            compute_host_cpu_layout([[0], [1], [2], [3]], local_radiod_count=1)
+            compute_host_cpu_layout([[0, 1], [2, 3], [4], [5]],
+                                    local_radiod_count=1)
+
+    def test_rejects_too_few_non_smt_cores(self):
+        # 2 cores, 1 radiod, 1 reserved -> no worker core.
+        with self.assertRaises(ValueError):
+            compute_host_cpu_layout([[0], [1]], local_radiod_count=1)
 
     def test_rejects_too_few_pairs(self):
         # 2 pairs, 1 radiod, 1 reserved host -> 0 worker pairs -> error.
         with self.assertRaises(ValueError):
             compute_host_cpu_layout(_seq_pairs(4), local_radiod_count=1)
+
+
+class RadiodUnitGrantTests(unittest.TestCase):
+    def test_smt_pair_is_the_whole_grant(self):
+        from sigmond.cpu import radiod_unit_grant
+        self.assertEqual(radiod_unit_grant({6, 7}, {6, 7}, 8), ({6, 7}, set()))
+
+    def test_non_smt_core_gets_the_worker_pool(self):
+        from sigmond.cpu import radiod_unit_grant
+        self.assertEqual(radiod_unit_grant({2}, {2}, 3), ({0, 1, 2}, {2}))
+
+    def test_pool_excludes_every_radiod_core(self):
+        from sigmond.cpu import radiod_unit_grant
+        grant, fft = radiod_unit_grant({4}, {3, 4}, 6)
+        self.assertEqual((grant, fft), ({0, 1, 2, 4, 5}, {4}))
+
+    def test_operator_other_cpus_wins(self):
+        from sigmond.cpu import radiod_unit_grant
+        self.assertEqual(radiod_unit_grant({2}, {2}, 4, {"other_cpus": "0"}),
+                         ({0, 2}, {2}))
+
+    def test_single_cpu_host_has_no_pool(self):
+        from sigmond.cpu import radiod_unit_grant
+        self.assertEqual(radiod_unit_grant({0}, {0}, 1), ({0}, set()))
+
+    def test_env_marker_parse(self):
+        from sigmond.cpu import radiod_fft_cpus_from_env
+        self.assertEqual(radiod_fft_cpus_from_env(
+            "PYTHONUNBUFFERED=1 SIGMOND_RADIOD_FFT_CPUS=2"), {2})
+        self.assertEqual(radiod_fft_cpus_from_env(""), set())
 
 
 class CpuRangeStrTests(unittest.TestCase):
