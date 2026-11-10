@@ -30,6 +30,7 @@ type = "sqlite"
 class HiddenPipelineWarning(unittest.TestCase):
     def setUp(self):
         um._WARNED_MISSING_FEATURES.clear()
+        um._WARNED_HIDDEN.clear()
         d = tempfile.mkdtemp()
         self.deploy = Path(d) / "deploy.toml"
         self.deploy.write_text(DEPLOY_TOML)
@@ -37,7 +38,7 @@ class HiddenPipelineWarning(unittest.TestCase):
             host=Host(call="AC0G/B4", grid="EM38ww"),
             radiods={"x.local": Radiod(id="x.local")})
 
-    def _collect(self, enabled, running):
+    def _collect(self, enabled, running, check_features=True, times=1):
         cat = {"demo": SimpleNamespace(name="demo", topology_alias=None)}
         asked = []
 
@@ -51,13 +52,15 @@ class HiddenPipelineWarning(unittest.TestCase):
         with mock.patch.object(um, "find_deploy_toml", side_effect=find), \
                 mock.patch.object(um, "load_catalog", return_value=cat), \
                 self.assertLogs(um.logger, level="DEBUG") as cm:
-            out = um.collect_pipelines(_Topo(enabled), self.coord,
-                                       store_version=2, receivers=[],
-                                       check_features=False,
-                                       is_running=is_running)
+            for _ in range(times):
+                out = um.collect_pipelines(_Topo(enabled), self.coord,
+                                           store_version=2, receivers=[],
+                                           check_features=check_features,
+                                           is_running=is_running)
             um.logger.debug("sentinel")
         warns = [r.getMessage() for r in cm.records
                  if r.levelname == "WARNING" and "not enabled in topology" in r.getMessage()]
+        self.asked = asked
         return out, warns
 
     def test_running_not_enabled_warns_once(self):
@@ -76,6 +79,16 @@ class HiddenPipelineWarning(unittest.TestCase):
         out, warns = self._collect(["demo"], True)
         self.assertEqual(warns, [])
         self.assertEqual({p["name"] for p in out}, {"demo-a", "demo-b"})
+
+    def test_two_collects_in_one_run_warn_once(self):
+        # The manifest step renders, then lists what the policy suppresses.
+        _, warns = self._collect([], True, times=2)
+        self.assertEqual(len(warns), 1)
+
+    def test_listing_neither_queries_systemd_nor_warns(self):
+        _, warns = self._collect([], True, check_features=False)
+        self.assertEqual(warns, [])
+        self.assertEqual(self.asked, [])
 
 
 if __name__ == "__main__":

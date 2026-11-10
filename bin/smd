@@ -732,7 +732,7 @@ def _expand_requires_closure(names, catalog) -> list[str]:
     return order
 
 
-def _resolve_only_list(args, topology):
+def _resolve_only_list(args, topology, services_handled=False):
     """Combine positional `names` + legacy `--components` into the lifecycle
     `only` filter.
 
@@ -743,6 +743,10 @@ def _resolve_only_list(args, topology):
             the topology — components that aren't enabled get a warning
             but stay in the list so the caller's gate can show the right
             error).
+
+    ``services_handled`` (start/stop/restart only): the caller has already
+    acted on a named component's catalog ``services``, so it draws no
+    "not enabled" warning.  Every other verb still warns.
     """
     positional = list(getattr(args, 'names', None) or [])
     legacy: list[str] = []
@@ -772,7 +776,7 @@ def _resolve_only_list(args, topology):
     # no-op.
     enabled_set = set(_enabled_components(topology) or [])
     not_enabled = [c for c in combined if c not in enabled_set
-                   and not _declared_services(c)]
+                   and not (services_handled and _declared_services(c))]
     if not_enabled:
         for name in not_enabled:
             _warn(f'{name}: not enabled in topology — skipping (run: smd enable {name})')
@@ -865,6 +869,10 @@ def _autoenable_named_on_start(args, topology_path) -> bool:
         entry = get_entry(raw, catalog)
         name = entry.name if entry is not None else resolve_name(raw, catalog)
         if entry is None or name in enabled_set:
+            continue
+        # A catalog entry that declares ``services`` (hs-uploader) starts
+        # through those units; start never writes it into topology.
+        if getattr(entry, 'services', ()):
             continue
         try:
             st = compute_state(name, topology)
@@ -14739,7 +14747,7 @@ def _cmd_start_enabled(args) -> int:
     _topo_path = Path(args.topology) if args.topology else TOPOLOGY_PATH
     _autoenable_named_on_start(args, _topo_path)
     topology = _load_topology(_topo_path)
-    only = _resolve_only_list(args, topology)
+    only = _resolve_only_list(args, topology, services_handled=True)
     if only is not None and not only:
         return 0  # operator named only not-enabled components; already warned
 
@@ -14886,7 +14894,7 @@ def _cmd_stop_enabled(args) -> int:
     if _need_root('stop'):
         return 1
     topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
-    only = _resolve_only_list(args, topology)
+    only = _resolve_only_list(args, topology, services_handled=True)
     if only is not None and not only:
         return 0  # operator named only not-enabled components; already warned
     enabled = _enabled_components(topology, only)
@@ -15824,7 +15832,7 @@ def _cmd_restart_enabled(args) -> int:
     if _need_root('restart'):
         return 1
     topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
-    only = _resolve_only_list(args, topology)
+    only = _resolve_only_list(args, topology, services_handled=True)
     if only is not None and not only:
         return 0  # operator named only not-enabled components; already warned
 

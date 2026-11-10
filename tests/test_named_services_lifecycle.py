@@ -84,3 +84,34 @@ def test_bare_restart_unchanged(monkeypatch):
     rc, calls, out = _run(monkeypatch, "restart", [])
     assert not [c for c in calls if "hs-uploader.service" in c]
     assert not [m for k, m in out if "hs-uploader" in m]
+
+
+def test_reload_named_services_entry_still_warns(monkeypatch):
+    # Only start/stop/restart act on declared services; reload must not go silent.
+    mod = _smd()
+    out = []
+    monkeypatch.setattr(sigmond.catalog, "load_catalog", lambda: CATALOG)
+    mod.load_catalog = lambda: CATALOG
+    mod._warn = lambda m: out.append(m)
+    args = types.SimpleNamespace(names=["hs-uploader"], components=None)
+    assert mod._resolve_only_list(args, {"components": {}}) == []
+    assert any("hs-uploader: not enabled in topology" in m for m in out)
+    out.clear()
+    assert mod._resolve_only_list(args, {"components": {}}, services_handled=True) == []
+    assert out == []
+
+
+def test_start_never_autoenables_a_services_entry(monkeypatch):
+    import sigmond.component_state
+    import sigmond.topology
+    mod = _smd()
+    monkeypatch.setattr(sigmond.catalog, "load_catalog", lambda: CATALOG)
+    flipped = []
+    monkeypatch.setattr(sigmond.topology, "set_component_enabled",
+                        lambda *a, **k: flipped.append(a))
+    monkeypatch.setattr(sigmond.component_state, "compute_state",
+                        lambda *a, **k: types.SimpleNamespace(installed=True))
+    mod._load_topology = lambda path: {"components": {}}
+    args = types.SimpleNamespace(names=["hs-uploader"], components=None)
+    assert mod._autoenable_named_on_start(args, "/nonexistent") is False
+    assert flipped == []

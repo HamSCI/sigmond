@@ -597,11 +597,14 @@ def _load_merge_receivers() -> list:
 # (pipeline, missing words) already warned about: the condition persists
 # across render cycles, and one line says it all.
 _WARNED_MISSING_FEATURES: set = set()
+# Clients already warned about as running outside topology (one line each
+# per process: the render and the suppressed listing both collect).
+_WARNED_HIDDEN: set = set()
 
 
-def _client_is_running(client: str) -> bool:
+def _client_is_running(client: str, deploy=None) -> bool:
     """True when any systemd unit the client's deploy.toml declares is active."""
-    deploy = find_deploy_toml(client)
+    deploy = deploy or find_deploy_toml(client)
     if not deploy:
         return False
     try:
@@ -618,7 +621,6 @@ def warn_hidden_pipelines(topology, is_running=None) -> list:
     runs on this host but is not enabled in topology (sigmond honours
     topology, so those pipelines render nowhere).  A client that does not
     run says nothing.  Returns the names warned about."""
-    is_running = is_running or _client_is_running
     try:
         catalog = load_catalog()
     except Exception:
@@ -636,15 +638,19 @@ def warn_hidden_pipelines(topology, is_running=None) -> list:
         if not decls:
             continue
         try:
-            running = is_running(name)
+            running = (is_running(name) if is_running
+                       else _client_is_running(name, deploy))
         except Exception:
             running = False
         if running:
+            warned.append(name)
+            if name in _WARNED_HIDDEN:
+                continue
+            _WARNED_HIDDEN.add(name)
             logger.warning(
                 "uploader-manifest: %s runs on this host but is not enabled "
                 "in topology, so its %d upload pipeline(s) are not rendered; "
                 "run: smd enable %s", name, len(decls), name)
-            warned.append(name)
     return warned
 
 
@@ -682,7 +688,8 @@ def collect_pipelines(topology: Optional[Topology] = None,
 
     ``is_running`` (client name -> bool; default: a systemd query) lets a
     client that runs yet is not enabled in topology draw one warning, since
-    its pipelines render nowhere (:func:`warn_hidden_pipelines`)."""
+    its pipelines render nowhere (:func:`warn_hidden_pipelines`).  A listing
+    (``check_features=False``) neither queries systemd nor warns."""
     topology = topology or load_topology()
     coord = coord or load_coordination()
     if receivers is None:
@@ -764,7 +771,8 @@ def collect_pipelines(topology: Optional[Topology] = None,
                 continue
             by_name[name] = rendered
             pipelines.append(rendered)
-    warn_hidden_pipelines(topology, is_running)
+    if check_features:
+        warn_hidden_pipelines(topology, is_running)
     return apply_merge(apply_proxying(pipelines, coord), target)
 
 
