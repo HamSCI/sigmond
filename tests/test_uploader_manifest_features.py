@@ -88,6 +88,38 @@ class RequiresFeaturesTests(unittest.TestCase):
         self.assertNotIn("hfdl-sigmondb-arrival", old.legacy_text)
         self.assertNotIn("requires_features", res.legacy_text)
 
+    def _block(self, value):
+        return BLOCK.replace('["sigmondb-tar"]', value)
+
+    def test_a_bare_string_is_one_word(self):
+        feats = frozenset({"sigmondb-tar"})
+        self.assertEqual(len(_collect(self._block('"sigmondb-tar"'), feats)), 1)
+        self.assertEqual(_collect(self._block('"sigmondb-tar"'), frozenset()), [])
+
+    def test_a_non_list_requirement_fails_loud(self):
+        for bad in ("3", "true", "{ a = 1 }"):
+            with self.assertRaises(um.MergeError):
+                _collect(self._block(bad), frozenset({"sigmondb-tar"}))
+
+    def _suppressed(self, features_probe=None):
+        coord = _coord()
+        coord.uploads.mode = "discard"
+        with mock.patch.object(um, "find_deploy_toml",
+                               return_value=_deploy(BLOCK)), \
+             mock.patch.object(um, "_load_merge_receivers", return_value=[]):
+            return um.suppressed_pipelines(_Topo(["hfdl-recorder"]), coord,
+                                           store_version=2)
+
+    def test_suppressed_pipelines_lists_it_and_stays_silent(self):
+        with self.assertNoLogs(um.logger, level="WARNING"):
+            self.assertEqual(self._suppressed(), ["hfdl-sigmondb-arrival"])
+        # and the dedup entry is untouched: a real render still warns once
+        with self.assertLogs(um.logger, level="WARNING") as cm:
+            _collect(BLOCK, frozenset({"gate"}))
+            _collect(BLOCK, frozenset({"gate"}))
+        self.assertEqual(
+            len([r for r in cm.records if "sigmondb-tar" in r.getMessage()]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

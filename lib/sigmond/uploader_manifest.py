@@ -602,7 +602,8 @@ def collect_pipelines(topology: Optional[Topology] = None,
                       coord: Optional[Coordination] = None,
                       *, store_version: int,
                       receivers: Optional[list] = None,
-                      features: Optional[frozenset] = None) -> list:
+                      features: Optional[frozenset] = None,
+                      check_features: bool = True) -> list:
     """Every enabled client's outbound pipeline(s), placeholders substituted.
 
     Returns a list of pipeline dicts ready for :func:`render_manifest`.  A
@@ -625,7 +626,8 @@ def collect_pipelines(topology: Optional[Topology] = None,
     must be a subset of it (``None`` counts as empty); otherwise the
     pipeline is skipped with one warning per (pipeline, missing words),
     since an older daemon would carry it wrongly.  The key never reaches
-    the rendered dict."""
+    the rendered dict.  ``check_features=False`` skips that test and its
+    warning, for a listing of declared pipelines that renders nothing."""
     topology = topology or load_topology()
     coord = coord or load_coordination()
     if receivers is None:
@@ -654,8 +656,17 @@ def collect_pipelines(topology: Optional[Topology] = None,
             missing: set = set()
             rendered = _subst(decl, tokens, used, missing)
             name = rendered.get("name") or f"{client}-pipeline"
-            required = rendered.pop("requires_features", None) or []
-            lacking = sorted(set(required) - (features or frozenset()))
+            required = rendered.pop("requires_features", None)
+            if required is None:
+                required = []
+            elif isinstance(required, str):
+                required = [required]
+            elif not isinstance(required, (list, tuple)):
+                raise MergeError(
+                    f"pipeline {name} ({client}): requires_features must be "
+                    f"a list of feature words, got {type(required).__name__}")
+            lacking = (sorted(set(required) - (features or frozenset()))
+                       if check_features else [])
             if lacking:
                 key = (name, tuple(lacking))
                 if key not in _WARNED_MISSING_FEATURES:
@@ -1027,8 +1038,10 @@ def suppressed_pipelines(topology: Optional[Topology] = None,
         store_version = hs_uploader_store_version()
         if store_version is None:
             store_version = 0
+    # A listing renders nothing: it names every declared pipeline and
+    # neither filters by feature nor logs the feature warning.
     return [p["name"] for p in collect_pipelines(
-        topology, coord, store_version=store_version)]
+        topology, coord, store_version=store_version, check_features=False)]
 
 
 def drop_inprocess_pipelines(pipelines: list, senders: set,
