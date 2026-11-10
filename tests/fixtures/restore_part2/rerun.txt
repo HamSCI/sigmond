@@ -1,4 +1,4 @@
-uploader: hs-uploader features: gate pipelines.d send-log-v3 switch-files
+uploader: hs-uploader features: gate pipelines.d send-log-v3 sigmondb-tar switch-files
 uploader: carry-over: site upload, kept (matches [uploads] mode = upload)
 uploader: carry-over: psk-recorder upload, kept (its switch file stands; the carry-over appends nothing)
 uploader: carry-over: wspr-recorder upload, kept (its switch file stands; the carry-over appends nothing)

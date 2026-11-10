@@ -148,7 +148,7 @@ class RealCheckoutTests(unittest.TestCase):
             os.environ.pop("PYTHONPATH", None)
             self.assertEqual(um.hs_uploader_features(self.py),
                              frozenset({"gate", "pipelines.d", "send-log-v3",
-                                        "switch-files"}))
+                                        "sigmondb-tar", "switch-files"}))
 
     def test_the_real_hs_uploader_through_the_runner(self):
         with mock.patch.dict(os.environ):
