@@ -3135,3 +3135,42 @@ def test_fetch_sources_treats_a_404_on_pm_storage_as_absent():
     op = _urlopen(routes)
     src = pm_align.fetch_sources(pm_align.fetch_release(urlopen=op), vmid=100, urlopen=op)
     assert "pm-storage.py" not in src.proxmox
+
+
+# --- pm-storage installs without a heartbeat (KFS-MAIN 2026-11-10: the wizard
+#     has turned heartbeats off since v3.84, so pm-storage arrived nowhere and
+#     the storage ledger alarmed "host pool report missing") -----------------
+
+def _src_with_storage():
+    return pm_align.Sources(FB_FULL, pm_align.render_wizard(WIZ, 100),
+                            {n: f"#{n}\n".encode() for n in
+                             ("pm-storage.py", "pm-storage.service", "pm-storage.timer")})
+
+
+def test_desired_files_install_pm_storage_without_a_heartbeat():
+    paths = {f.path: f.mode for f in pm_align.desired_files(_src_with_storage(), 100)}
+    assert paths["/usr/local/sbin/pm-storage.py"] == 0o755
+    assert paths["/etc/systemd/system/pm-storage.service"] == 0o644
+    assert paths["/etc/systemd/system/pm-storage.timer"] == 0o644
+
+
+def test_desired_files_omit_pm_storage_when_the_release_predates_it():
+    paths = {f.path for f in pm_align.desired_files(_src(), 100)}
+    assert "/usr/local/sbin/pm-storage.py" not in paths
+
+
+def test_a_newly_installed_pm_storage_timer_is_enabled():
+    calls = []
+    ch = [pm_align.Change(pm_align.HostFile(
+        "/etc/systemd/system/pm-storage.timer", b"", 0o644, "t"), "missing")]
+    enabled = pm_align.enable_new_relays(ch, run=_fake_run(calls))
+    assert enabled == ["pm-storage.timer"]
+    assert ["systemctl", "enable", "--now", "pm-storage.timer"] in calls
+
+
+def test_a_changed_pm_storage_timer_keeps_its_state():
+    calls = []
+    ch = [pm_align.Change(pm_align.HostFile(
+        "/etc/systemd/system/pm-storage.timer", b"", 0o644, "t"), "changed")]
+    assert pm_align.enable_new_relays(ch, run=_fake_run(calls)) == []
+    assert ["systemctl", "daemon-reload"] in calls

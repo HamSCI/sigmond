@@ -54,6 +54,9 @@ PROXMOX_FILES = ("pm-heartbeat.py", "pm-heartbeat.service", "pm-heartbeat.timer"
 OPTIONAL_PROXMOX_FILES = ("pm-align.py", "pm-storage.py", "pm-storage.service",
                           "pm-storage.timer")
 RECORD = "/etc/sigmond-appliance/host-aligned.json"
+PM_STORAGE_FILES = (("pm-storage.py", "/usr/local/sbin/pm-storage.py", 0o755),
+                    ("pm-storage.service", "/etc/systemd/system/pm-storage.service", 0o644),
+                    ("pm-storage.timer", "/etc/systemd/system/pm-storage.timer", 0o644))
 
 # One parser reset for the guest agent: the byte 0xFF, then one sync request
 # (sigmond tasks/plan-guest-agent-requests.md).  Proxmox writes a request
@@ -422,6 +425,12 @@ def desired_files(src: Sources, vmid: int, notes: Optional[list] = None) -> list
     if "pm-align.py" in src.proxmox:
         out.append(HostFile("/usr/local/sbin/pm-align", src.proxmox["pm-align.py"], 0o755,
                             "scripts/proxmox/pm-align.py"))
+    # pm-storage reports the host's thin pools to the storage ledger.  It used to arrive only
+    # through the heartbeat's setup script, and the wizard has turned heartbeats off since v3.84,
+    # so a host set up since then never got it (KFS-MAIN 2026-11-10: "host pool report missing").
+    for name, path, mode in PM_STORAGE_FILES:
+        if name in src.proxmox:
+            out.append(HostFile(path, src.proxmox[name], mode, f"scripts/proxmox/{name}"))
     if src.vm6proxy is not None:
         if vm6proxy_restricts(src.vm6proxy):
             out.append(HostFile(VM6PROXY, src.vm6proxy, 0o755, "sigmond-appliance/sigmond-vm6proxy"))
@@ -882,8 +891,9 @@ def apply_files(changes: list, root: Path, backup_dir: Path) -> list:
 
 def enable_new_relays(changes: list, *, run) -> list:
     """daemon-reload once any unit changed; then enable --now each relay
-    socket that did not exist before.  A socket that already existed keeps
-    its state — --rac-off may have stopped it on purpose."""
+    socket, and pm-storage's timer, that did not exist before.  A unit that
+    already existed keeps its state — --rac-off may have stopped a socket on
+    purpose, and an operator may have stopped pm-storage."""
     units = [c for c in changes if c.state != "current"
              and c.file.path.startswith("/etc/systemd/system/")]
     if not units:
@@ -892,7 +902,8 @@ def enable_new_relays(changes: list, *, run) -> list:
     enabled = []
     for c in units:
         name = Path(c.file.path).name
-        if c.state == "missing" and name.startswith("sigmond-vm-") and name.endswith("-relay.socket"):
+        if c.state == "missing" and (name == "pm-storage.timer" or (
+                name.startswith("sigmond-vm-") and name.endswith("-relay.socket"))):
             r = run(["systemctl", "enable", "--now", name], capture_output=True, text=True, timeout=60)
             if r.returncode == 0:
                 enabled.append(name)
