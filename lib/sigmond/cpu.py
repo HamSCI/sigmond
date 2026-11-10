@@ -454,19 +454,30 @@ def compute_host_cpu_layout(
     if local_radiod_count < 1:
         raise ValueError("local_radiod_count must be >= 1")
     widths = {len(p) for p in pairs}
-    if widths != {2}:
+    # ⛔ NON-SMT HOSTS ARE NORMAL, NOT EXOTIC.  This used to demand 2-way
+    # pairs, so a 4-core i5-6500T (no Hyper-Threading) fell to the appliance's
+    # "layout failed" path: the VM ran unpinned, and the finalizer then
+    # skipped host tuning, USB passthrough AND its power-off, leaving the
+    # install apparently hung after the wizard (v3.87, 2026-11-10).  A
+    # non-SMT core is a one-CPU "pair"; everything downstream (host-apply,
+    # the pin hookscript) already reads VM_THREADS and the flat
+    # VCPU_TO_PCPU, so the only thing that changes is threads=1.
+    # Mixed widths (SMT partly off, hybrid P/E parts) still need a human.
+    if widths not in ({1}, {2}):
         raise ValueError(
-            f"host CPU layout requires uniform 2-way SMT pairs; got pair "
-            f"widths {sorted(widths)} — non-SMT or asymmetric host, "
-            f"configure manually"
+            f"host CPU layout requires every core to have the same thread "
+            f"count (1 or 2); got widths {sorted(widths)} — asymmetric "
+            f"host, configure manually"
         )
+    threads = widths.pop()
     total = len(pairs)
     need = reserve_host_pairs + local_radiod_count + 1  # +1 worker pair min
     if total < need:
+        unit = "HT pairs" if threads == 2 else "cores"
         raise ValueError(
-            f"need >= {need} HT pairs ({2 * need} CPUs) for "
+            f"need >= {need} {unit} ({threads * need} CPUs) for "
             f"{local_radiod_count} radiod instance(s) + workers + "
-            f"{reserve_host_pairs} reserved host pair(s); host has {total}"
+            f"{reserve_host_pairs} reserved host core(s); host has {total}"
         )
     vm_pairs = pairs[: total - reserve_host_pairs]
     # radiod takes the HIGHEST VM pairs, not the lowest: vm_pairs[0] always
@@ -489,7 +500,7 @@ def compute_host_cpu_layout(
         "vcpu_to_pcpu": vcpu_to_pcpu,
         "isolcpus": sorted(vcpu_to_pcpu),
         "vm_cores": len(vm_pairs),
-        "vm_threads": 2,
+        "vm_threads": threads,
         "vm_vcpu_count": len(vcpu_to_pcpu),
     }
 
