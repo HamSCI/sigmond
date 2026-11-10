@@ -613,7 +613,7 @@ def test_resume_clears_the_marker_before_it_starts(pairing, monkeypatch):
 
 def test_cmd_start_passes_its_units_through_the_hold():
     src = (Path(smd.__file__).read_text())
-    body = src[src.index('def cmd_start(args)'):src.index('\ndef ', src.index('def cmd_start(args)') + 10)]
+    body = src[src.index('def _cmd_start_enabled(args)'):src.index('\ndef ', src.index('def _cmd_start_enabled(args)') + 10)]
     assert 'units = _hold_radiod_for_planner(units)' in body
 
 

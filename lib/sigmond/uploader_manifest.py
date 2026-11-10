@@ -46,9 +46,10 @@ import stat
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from . import psws, safe_write
+from .catalog import load_catalog
 from .coordination import Coordination, load_coordination
 from .discover import find_deploy_toml
 from .instance import display_reporter_id, list_instances
@@ -598,12 +599,62 @@ def _load_merge_receivers() -> list:
 _WARNED_MISSING_FEATURES: set = set()
 
 
+def _client_is_running(client: str) -> bool:
+    """True when any systemd unit the client's deploy.toml declares is active."""
+    deploy = find_deploy_toml(client)
+    if not deploy:
+        return False
+    try:
+        with open(deploy, "rb") as fh:
+            data = tomllib.load(fh)
+        from .component_state import _any_unit_active
+        return bool(_any_unit_active(data)[0])
+    except Exception:
+        return False
+
+
+def warn_hidden_pipelines(topology, is_running=None) -> list:
+    """Warn once per catalogued client that declares upload pipelines and
+    runs on this host but is not enabled in topology (sigmond honours
+    topology, so those pipelines render nowhere).  A client that does not
+    run says nothing.  Returns the names warned about."""
+    is_running = is_running or _client_is_running
+    try:
+        catalog = load_catalog()
+    except Exception:
+        return []
+    enabled = set(topology.enabled_components())
+    warned: list = []
+    for name, entry in catalog.items():
+        alias = getattr(entry, "topology_alias", None)
+        if name in enabled or (alias and alias in enabled):
+            continue
+        deploy = find_deploy_toml(name)
+        if not deploy:
+            continue
+        decls = _pipeline_decls(deploy)
+        if not decls:
+            continue
+        try:
+            running = is_running(name)
+        except Exception:
+            running = False
+        if running:
+            logger.warning(
+                "uploader-manifest: %s runs on this host but is not enabled "
+                "in topology, so its %d upload pipeline(s) are not rendered; "
+                "run: smd enable %s", name, len(decls), name)
+            warned.append(name)
+    return warned
+
+
 def collect_pipelines(topology: Optional[Topology] = None,
                       coord: Optional[Coordination] = None,
                       *, store_version: int,
                       receivers: Optional[list] = None,
                       features: Optional[frozenset] = None,
-                      check_features: bool = True) -> list:
+                      check_features: bool = True,
+                      is_running: Optional[Callable[[str], bool]] = None) -> list:
     """Every enabled client's outbound pipeline(s), placeholders substituted.
 
     Returns a list of pipeline dicts ready for :func:`render_manifest`.  A
@@ -627,7 +678,11 @@ def collect_pipelines(topology: Optional[Topology] = None,
     pipeline is skipped with one warning per (pipeline, missing words),
     since an older daemon would carry it wrongly.  The key never reaches
     the rendered dict.  ``check_features=False`` skips that test and its
-    warning, for a listing of declared pipelines that renders nothing."""
+    warning, for a listing of declared pipelines that renders nothing.
+
+    ``is_running`` (client name -> bool; default: a systemd query) lets a
+    client that runs yet is not enabled in topology draw one warning, since
+    its pipelines render nowhere (:func:`warn_hidden_pipelines`)."""
     topology = topology or load_topology()
     coord = coord or load_coordination()
     if receivers is None:
@@ -709,6 +764,7 @@ def collect_pipelines(topology: Optional[Topology] = None,
                 continue
             by_name[name] = rendered
             pipelines.append(rendered)
+    warn_hidden_pipelines(topology, is_running)
     return apply_merge(apply_proxying(pipelines, coord), target)
 
 

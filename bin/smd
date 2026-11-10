@@ -6080,8 +6080,8 @@ _PRELOAD_MODULES = {
                          'sigmond.installer_args', 'sigmond.sink_state',
                          'sigmond.uploader_manifest',
                          # uploader_manifest's own lazy imports
-                         'sigmond.catalog', 'sigmond.discover',
-                         'sigmond.inprocess_senders', 'sigmond.instance',
+                         'sigmond.catalog', 'sigmond.component_state',
+                         'sigmond.discover', 'sigmond.inprocess_senders', 'sigmond.instance',
                          'sigmond.lifecycle',
                          # ...and its merge_into checks, which read the
                          # [[receiver]] list
@@ -6107,7 +6107,7 @@ _PRELOAD_MODULES = {
                # site_profile's locally_managed name check
                'sigmond.installer', 'sigmond.lan_order'),
     'align': ('sigmond.align', 'sigmond.align_apply', 'sigmond.align_live',
-              'sigmond.provenance', 'sigmond.catalog', 'sigmond.discover',
+              'sigmond.provenance', 'sigmond.catalog', 'sigmond.component_state', 'sigmond.discover',
               'sigmond.commands.uploader', 'sigmond.inprocess_senders',
               'sigmond.coordination', 'sigmond.installer_args',
               # coordination's binding writers validate names with it
