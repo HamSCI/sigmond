@@ -192,6 +192,18 @@ def busy_pct(cpu: int, prev: dict) -> float | None:
     return None
 
 
+def named_fft_cpus(pid: int) -> set:
+    """CPUs named by SIGMOND_RADIOD_FFT_CPUS in radiod's environment, if any."""
+    try:
+        with open("/proc/%d/environ" % pid, "rb") as f:
+            for item in f.read().split(b"\0"):
+                if item.startswith(b"SIGMOND_RADIOD_FFT_CPUS="):
+                    return cpuset(item.split(b"=", 1)[1].decode())
+    except (OSError, ValueError):
+        pass
+    return set()
+
+
 def main() -> int:
     cfg = load_conf()
     auto_split = (cfg["FFT_CPUS"].strip().lower() == "auto"
@@ -246,7 +258,12 @@ def main() -> int:
                 time.sleep(interval)
                 continue
             if auto_split:
-                low = min(allowed)
+                # A non-SMT radiod is granted its own core plus the shared
+                # worker CPUs, and smd names that core in the unit's
+                # environment (radiod_unit_grant, sigmond/cpu.py).  The lowest
+                # granted CPU would then be a worker: honour the name.
+                own = named_fft_cpus(pid) & set(allowed)
+                low = min(own) if own else min(allowed)
                 fft_cpus, rest_cpus = {low}, set(allowed) - {low}
                 if not rest_cpus:
                     log("REFUSING to pin: radiod was granted a single CPU (%s); there "

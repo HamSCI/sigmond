@@ -150,6 +150,8 @@ try:
         read_proc_cpus    as _read_proc_cpus,
         thread_affinity_groups as _thread_affinity_groups,
         render_drop_in    as _render_drop_in,
+        radiod_unit_grant as _radiod_unit_grant,
+        radiod_fft_cpus_from_env as _radiod_fft_cpus_from_env,
         SMD_AFFINITY_DROP_IN as _SMD_AFFINITY_DROP_IN,
         FOREIGN_AFFINITY_DROP_INS as _FOREIGN_AFFINITY_DROP_INS,
         HFTIMESTD_AFFINITY_UNITS as _HFTIMESTD_AFFINITY_UNITS,
@@ -14379,11 +14381,18 @@ def _current_radiod_pins(units: list, sys_dir: Path = Path('/etc/systemd/system'
         except OSError:
             continue
         cpus = None
+        own = None
         for line in text.splitlines():
             if line.startswith('CPUAffinity='):
                 cpus = parse_cpu_mask(line.split('=', 1)[1].strip())
-        if cpus:
-            out[unit] = set(cpus)
+            elif line.startswith('Environment='):
+                # A non-SMT radiod's CPUAffinity spans the shared worker CPUs
+                # too (radiod_unit_grant); its PIN is the core the marker
+                # names.  Reading the grant here would look like a radiod
+                # spread over several cores and get it re-placed every apply.
+                own = _radiod_fft_cpus_from_env(line.split('=', 1)[1]) or own
+        if own or cpus:
+            out[unit] = set(own or cpus)
     return out
 
 
@@ -14478,17 +14487,25 @@ def _ensure_radiod_affinity_drop_ins(radiod_units: list,
                 _run(['rm', '-rf', str(p)], sudo=True)
                 wrote_any = True
 
+    all_radiod = set().union(*placement.values()) if placement else set()
     for unit_ref in sorted_units:
         core_cpus = placement.get(unit_ref.unit, set())
+        grant, fft_cpus = _radiod_unit_grant(core_cpus, all_radiod,
+                                             os.cpu_count() or 1,
+                                             topology_cpu_affinity)
         label = f'radiod {unit_ref.instance or unit_ref.unit} → CPUs {_cpu_list_str(core_cpus)}'
+        if fft_cpus:
+            label += (f' (non-SMT: fft alone there, other threads on '
+                      f'{_cpu_list_str(grant - fft_cpus)})')
         # Re-pin the xhci IRQs on every radiod start: their IRQ numbers change
         # when the RX888 re-enumerates, so the boot-time oneshot alone loses
         # them (AI6VN, 2026-08-26).  radiod starting is exactly the moment the
         # device is enumerated and about to be consumed.
         if _write_affinity_drop_in(
-                unit_ref.unit, core_cpus, label,
-                exec_start_post=RX888_IRQ_REPIN) == 'wrote':
-            _ok(f'affinity: {_display_unit(unit_ref.unit)} → CPUs {_cpu_list_str(core_cpus)}')
+                unit_ref.unit, grant, label,
+                exec_start_post=RX888_IRQ_REPIN,
+                fft_cpus=fft_cpus) == 'wrote':
+            _ok(f'affinity: {_display_unit(unit_ref.unit)} → CPUs {_cpu_list_str(grant)}')
             wrote_any = True
 
             # Check if the unit is already running with the wrong affinity.
@@ -14497,7 +14514,7 @@ def _ensure_radiod_affinity_drop_ins(radiod_units: list,
                 r_cur = _run(['systemctl', 'show', '-p', 'CPUAffinity',
                               '--value', unit_ref.unit])
                 current_cpus = parse_cpu_mask(r_cur.stdout.strip())
-                if current_cpus != core_cpus:
+                if current_cpus != grant:
                     units_to_restart.append(unit_ref.unit)
 
     if wrote_any:
@@ -14889,7 +14906,8 @@ RADIOD_THREAD_PIN = '/usr/local/sbin/sigmond-radiod-pin-threads'
 
 
 def _write_affinity_drop_in(unit: str, cpus: set, label: str,
-                            exec_start_post: str = None) -> str:
+                            exec_start_post: str = None,
+                            fft_cpus: set = None) -> str:
     """Write /etc/systemd/system/<unit>.d/smd-cpu-affinity.conf.
 
     exec_start_post is threaded through to render_drop_in(); the radiod
@@ -14904,7 +14922,8 @@ def _write_affinity_drop_in(unit: str, cpus: set, label: str,
     import tempfile
     drop_dir = Path(f'/etc/systemd/system/{unit}.d')
     drop_in  = drop_dir / _SMD_AFFINITY_DROP_IN
-    content  = _render_drop_in(cpus, label, exec_start_post=exec_start_post)
+    content  = _render_drop_in(cpus, label, exec_start_post=exec_start_post,
+                               fft_cpus=fft_cpus)
     if drop_in.exists():
         try:
             if drop_in.read_text() == content:
@@ -15222,16 +15241,25 @@ def cmd_diag_cpu_affinity(args) -> int:
         _info('Writing smd affinity drop-ins ...')
         errors = 0
 
+        _all_radiod = set().union(*radiod_plan.values()) if radiod_plan else set()
         for unit, cpus in radiod_plan.items():
             label = f'radiod instance → CPUs {_cpu_list_str(cpus)}'
+            # Same grant as _ensure_radiod_affinity_drop_ins, or the two
+            # apply paths flip each other's file.
+            grant, fft_cpus = _radiod_unit_grant(cpus, _all_radiod,
+                                                 os.cpu_count() or 1, ca)
+            if fft_cpus:
+                label += (f' (non-SMT: fft alone there, other threads on '
+                          f'{_cpu_list_str(grant - fft_cpus)})')
             # Same ExecStartPost as _ensure_radiod_affinity_drop_ins: the xhci
             # IRQ numbers change when the RX888 re-enumerates, so the pin must
             # re-run on every radiod start.  This is the diag --apply writer;
             # the two paths must not disagree about drop-in content or each
             # apply flips the file the other one wrote.
             res = _write_affinity_drop_in(
-                unit, cpus, label,
-                exec_start_post=RX888_IRQ_REPIN)
+                unit, grant, label,
+                exec_start_post=RX888_IRQ_REPIN,
+                fft_cpus=fft_cpus)
             if res == 'wrote':
                 _ok(f'{unit}: {label}')
             elif res == 'noop':

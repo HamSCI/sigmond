@@ -60,6 +60,18 @@ for u in $units; do
     [ $# -ge 2 ] || continue
     fft_cpu=$1; shift
     other_cpus=$(echo "$@" | tr ' ' ',')
+    # A non-SMT radiod is granted its own core PLUS the shared worker CPUs,
+    # and smd names the core in SIGMOND_RADIOD_FFT_CPUS (radiod_unit_grant in
+    # sigmond/cpu.py).  "Lowest CPU of the set" would then be a worker CPU:
+    # put fft on the named core instead, everything else on the rest.
+    own=$(tr '\0' '\n' < /proc/$pid/environ 2>/dev/null \
+          | sed -n 's/^SIGMOND_RADIOD_FFT_CPUS=//p' | head -1)
+    case "$own" in
+        ''|*[!0-9]*) ;;               # absent, or not a single CPU: keep the rule
+        *) fft_cpu=$own
+           other_cpus=$(echo "$all" | grep -vx "$own" | paste -sd, -) ;;
+    esac
+    [ -n "$other_cpus" ] || continue
 
     # fft appears shortly after start; wait up to 20 s for it.
     fft_tids=""

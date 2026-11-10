@@ -47,7 +47,7 @@ class RadiodDropInPlacementTests(unittest.TestCase):
         calls = {}
         self.exec_start_posts = {}
 
-        def fake_write(unit, cpus, label, exec_start_post=None):
+        def fake_write(unit, cpus, label, exec_start_post=None, fft_cpus=None):
             calls[unit] = set(cpus)
             self.exec_start_posts[unit] = exec_start_post
             return 'unchanged'          # no restart bookkeeping
@@ -108,6 +108,60 @@ class RenderDropInTests(unittest.TestCase):
     def test_no_exec_start_post_by_default(self):
         text = smd._render_drop_in({0, 1}, 'worker')
         self.assertNotIn('ExecStartPost', text)
+
+    def test_fft_marker_rendered_only_when_given(self):
+        self.assertNotIn('SIGMOND_RADIOD_FFT_CPUS',
+                         smd._render_drop_in({8, 9}, 'radiod'))
+        text = smd._render_drop_in({0, 1, 2}, 'radiod', fft_cpus={2})
+        self.assertIn("CPUAffinity=0 1 2\n", text)
+        self.assertIn('Environment=SIGMOND_RADIOD_FFT_CPUS=2\n', text)
+
+
+class NonSmtRadiodGrantTests(unittest.TestCase):
+    """AI6VN-2, i5-6500T, no HT, 2026-11-10: radiod on vCPU 2 alone lost
+    samples; fft alone there with the rest on the decoder CPUs did not."""
+
+    def test_current_pins_read_the_named_core_not_the_grant(self):
+        import tempfile
+        sysd = Path(tempfile.mkdtemp())
+        d = sysd / "radiod@ai6vn-2.service.d"; d.mkdir()
+        (d / smd._SMD_AFFINITY_DROP_IN).write_text(
+            smd._render_drop_in({0, 1, 2}, 'radiod', fft_cpus={2}))
+        self.assertEqual(
+            smd._current_radiod_pins(["radiod@ai6vn-2.service"], sys_dir=sysd),
+            {"radiod@ai6vn-2.service": {2}})
+
+    def test_apply_writes_core_plus_workers_with_marker(self):
+        unit = mock.Mock(unit="radiod@ai6vn-2.service", instance="ai6vn-2")
+        with mock.patch("sigmond.cpu.get_physical_cores",
+                        return_value=[{0}, {1}, {2}]), \
+             mock.patch("sigmond.cpu.get_isolated_cpus", return_value={2}), \
+             mock.patch.object(smd.os, "cpu_count", return_value=3), \
+             mock.patch.object(smd, "_current_radiod_pins", return_value={}), \
+             mock.patch.object(smd, "_err"), mock.patch.object(smd, "_ok"), \
+             mock.patch.object(smd, "_run"), \
+             mock.patch.object(smd, "_write_affinity_drop_in",
+                               return_value="noop") as wr:
+            smd._ensure_radiod_affinity_drop_ins([unit])
+        (args, kw), = [(c.args, c.kwargs) for c in wr.call_args_list]
+        self.assertEqual(args[1], {0, 1, 2})
+        self.assertEqual(kw["fft_cpus"], {2})
+
+    def test_smt_host_unchanged(self):
+        unit = mock.Mock(unit="radiod@rx.service", instance="rx")
+        with mock.patch("sigmond.cpu.get_physical_cores",
+                        return_value=[{0, 1}, {2, 3}, {4, 5}]), \
+             mock.patch("sigmond.cpu.get_isolated_cpus", return_value={4, 5}), \
+             mock.patch.object(smd.os, "cpu_count", return_value=6), \
+             mock.patch.object(smd, "_current_radiod_pins", return_value={}), \
+             mock.patch.object(smd, "_err"), mock.patch.object(smd, "_ok"), \
+             mock.patch.object(smd, "_run"), \
+             mock.patch.object(smd, "_write_affinity_drop_in",
+                               return_value="noop") as wr:
+            smd._ensure_radiod_affinity_drop_ins([unit])
+        (args, kw), = [(c.args, c.kwargs) for c in wr.call_args_list]
+        self.assertEqual(args[1], {4, 5})
+        self.assertFalse(kw["fft_cpus"])
 
 
 HOOKSCRIPT_SEQUENTIAL = """\
