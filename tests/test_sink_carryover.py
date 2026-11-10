@@ -706,6 +706,44 @@ class LateClients(unittest.TestCase):
         self.assertEqual(after, before)
         self.assertEqual(co.late_clients(st.roots).clients, ())
 
+    def _held_meteor(self):
+        """meteor-scatter has rows but is not enabled at the carry-over, so
+        its switch reads fill (REASON_DISABLED)."""
+        st = Station(self)
+        basic(st)
+        st.env("wspr-recorder", "AC0G=S", "WSPR_USE_HS_UPLOADER=1\n")
+        st.env("psk-recorder", "AC0G=S", "PSK_DELIVERY_PIPELINES=direct\n")
+        build_sink(st.roots.sink_db,
+                   "INSERT INTO pending_uploads(target_db,target_table,"
+                   "payload_json,queued_at,producer) VALUES ('psk','spots',"
+                   "'{\"mode\":\"MSK144\"}','t','');")
+        _, res, _ = st.run()
+        self.assertTrue(res.ok, res.lines())
+        self.assertEqual(st.switch("meteor-scatter")["state"], "fill")
+        return st
+
+    def test_fill_held_only_for_disabled_rises_once_enabled(self):
+        """B4, 2026-11-10: the manifest step wrote hfdl-recorder fill minutes
+        before `smd enable hfdl-recorder`; nothing raised it."""
+        st = self._held_meteor()
+        self.assertEqual(co.late_clients(st.roots).clients, ())   # still disabled
+        st.topology("wspr-recorder", "psk-recorder", "meteor-scatter")
+        p = co.late_clients(st.roots)
+        self.assertEqual(states(p), {"meteor-scatter": "upload"})
+        self.assertEqual(p.clients[0].reason, co.REASON_NOW_ENABLED)
+        res = co.apply(p, runner=Runner(st.log), systemctl=st.sc)
+        self.assertTrue(res.ok, res.lines())
+        self.assertEqual(st.switch("meteor-scatter")["state"], "upload")
+        self.assertEqual(co.late_clients(st.roots).clients, ())   # once
+
+    def test_operator_fill_stays_when_enabled(self):
+        st = self._held_meteor()
+        Runner(st.log)(["sink", "set", "meteor-scatter", "fill", "--reason",
+                        "holding for a look", "--by", "smd sink (mjh)",
+                        "--sinks", str(st.roots.sinks)])
+        st.topology("wspr-recorder", "psk-recorder", "meteor-scatter")
+        self.assertEqual(co.late_clients(st.roots).clients, ())
+
     def test_late_client_under_a_lowered_site_is_levered(self):
         st = Station(self, "k3lr")
         st.run()

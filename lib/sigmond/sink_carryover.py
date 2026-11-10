@@ -109,6 +109,10 @@ def site_reason(uploads_reason: str, mode: str) -> str:
     why = (uploads_reason or "").strip()
     return f"{why} ({carried})" if why else carried
 REASON_DISABLED = "carried over: not enabled in topology.toml, with rows in sink.db"
+# A fill the carry-over wrote only because the client was not enabled rises
+# once topology enables it: the reason it stood on no longer holds (2026-11-10:
+# B4's manifest step ran minutes before `smd enable hfdl-recorder`).
+REASON_NOW_ENABLED = "carried over: enabled in topology.toml since the carry-over held it"
 REASON_LATE = ("carried over after the marker: a client new since the "
                "carry-over")
 REASON_UNREAD = ("carried over at fill: cannot read {file} ({why}), so its "
@@ -259,6 +263,18 @@ def switch_state(path: Path) -> str:
     except (tomllib.TOMLDecodeError, UnicodeDecodeError):
         return "error"
     return state if state in STATES else "error"
+
+
+def _held_only_for_disabled(path: Path) -> bool:
+    """True when the switch reads fill, the carry-over set it, and its
+    reason is REASON_DISABLED: no one has decided anything about it since."""
+    try:
+        text = read_nofollow(path)
+        data = tomllib.loads(text) if text else {}
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+        return False
+    return (data.get("state") == "fill" and data.get("set_by") == BY
+            and data.get("reason") == REASON_DISABLED)
 
 
 def _site_limit(state: str) -> str:
@@ -579,9 +595,15 @@ def late_clients(roots: CarryRoots = CarryRoots()) -> CarryPlan:
     limit = _site_limit(site)
     writes, eff = [], {}
     for client in st.governed:
-        if switch_state(roots.sinks / f"{client}.toml") != "missing":
+        path = roots.sinks / f"{client}.toml"
+        if switch_state(path) == "missing":
+            w = _client_write(client, st, roots, default_reason=REASON_LATE)
+        elif (client in st.enabled and not _stop_order(client, roots)
+              and _held_only_for_disabled(path)):
+            w = FileWrite(client, "upload", REASON_NOW_ENABLED, "fill",
+                          identity_tables(client, roots, st.coord))
+        else:
             continue
-        w = _client_write(client, st, roots, default_reason=REASON_LATE)
         writes.append(w)
         eff[client] = _stricter(limit, w.state)
     below = tuple(c for c in sorted(eff) if eff[c] != "upload")
