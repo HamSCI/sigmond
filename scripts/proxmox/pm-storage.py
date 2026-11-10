@@ -588,7 +588,16 @@ def _refuse(msg: str) -> int:
     return 3
 
 
-def _snapshot(host, vmid: int, name: str, hours: Optional[float]) -> int:
+def _vm_running(host, vmid: int) -> bool:
+    try:
+        return any(int(vm.get("vmid", -1)) == int(vmid) and vm.get("status") == "running"
+                   for vm in json.loads(host.list_vms()))
+    except Exception:                               # noqa: BLE001
+        return True     # unknown: treat as running, so radiod is asked about
+
+
+def _snapshot(host, vmid: int, name: str, hours: Optional[float],
+              live: bool = False) -> int:
     if hours is not None and not hours > 0:
         print("pm-storage: --hours must be positive", file=sys.stderr)
         return 2
@@ -627,7 +636,37 @@ def _snapshot(host, vmid: int, name: str, hours: Optional[float]) -> int:
         life, why = hours, f"--hours {hours:g} (the pool allows {life:.1f} h)"
     expires = _iso((now + timedelta(hours=life)).replace(microsecond=0))
     description = SNAP_TAG + expires
+    # A snapshot of a running VM pauses it.  radiod's RX888 then overflows and
+    # loses ~100-200 ms of samples, and the guest's clock pauses too, so radiod
+    # cannot see the loss (B4 2026-11-10: 185 ms, seen only by the TS-1 pilot).
+    # A stopped radiod is a clean, visible restart instead; its consumers
+    # restart on their own when it starts (sigmond-radiod-consumers@).
+    stopped = []
+    if live:
+        print(f"pm-storage: --live: radiod in VM {vmid} keeps running and may silently lose "
+              f"~0.1-0.2 s of samples while the snapshot pauses the VM", file=sys.stderr)
+    elif _vm_running(host, vmid):
+        units = host.guest_radiods(vmid)
+        if units is None:
+            return _refuse(f"the guest agent in VM {vmid} cannot say which radiod units run; "
+                           f"a live snapshot costs radiod samples it cannot see. "
+                           f"Use --live to take it anyway")
+        if units:
+            r = host.guest_systemctl(vmid, "stop", units)
+            if r.rc != 0:
+                host.guest_systemctl(vmid, "start", units)
+                return _refuse(f"could not stop {' '.join(units)} in VM {vmid}: "
+                               f"{(r.stderr or r.stdout).strip()}")
+            stopped = list(units)
+            print(f"stopped {' '.join(stopped)} in VM {vmid} for the snapshot")
     res = host.snapshot(vmid, name, description)
+    if stopped:
+        r = host.guest_systemctl(vmid, "start", stopped)
+        if r.rc != 0:
+            print(f"pm-storage: could not start {' '.join(stopped)} in VM {vmid} again: "
+                  f"{(r.stderr or r.stdout).strip()}", file=sys.stderr)
+            return 1
+        print(f"started {' '.join(stopped)} again; its consumers restart on their own")
     if res.rc != 0:
         print(f"pm-storage: qm snapshot failed: {(res.stderr or res.stdout).strip()}",
               file=sys.stderr)
@@ -746,6 +785,31 @@ class RealHost:
         return _run(["qm", "snapshot", str(int(vmid)), name, "--description", description],
                     timeout=None)
 
+    def _guest_exec(self, vmid, argv, timeout=90):
+        args = ["qm", "guest", "exec", str(int(vmid)), "--timeout", str(timeout), "--"] + argv
+        if not all(a.isascii() for a in args):
+            raise ValueError("refusing a non-ASCII guest-agent request")
+        r = _run(args, timeout=timeout + 15)
+        if r.rc != 0:
+            return r
+        try:
+            res = json.loads(r.stdout)
+        except ValueError:
+            return RunResult(1, r.stdout, "unreadable guest-exec reply")
+        return RunResult(int(res.get("exitcode", 1)), res.get("out-data", ""),
+                         res.get("err-data", ""))
+
+    def guest_radiods(self, vmid):
+        """Active radiod@ units in the guest, or None when the agent cannot say."""
+        r = self._guest_exec(vmid, ["systemctl", "list-units", "--plain", "--no-legend",
+                                    "--state=active", "radiod@*.service"], timeout=30)
+        if r.rc != 0:
+            return None
+        return [line.split()[0] for line in r.stdout.splitlines() if line.strip()]
+
+    def guest_systemctl(self, vmid, action, units):
+        return self._guest_exec(vmid, ["systemctl", action] + list(units))
+
     def monotonic(self):
         return time.monotonic()
 
@@ -795,13 +859,15 @@ def main(argv=None, host=None) -> int:
     sp.add_argument("vmid", type=int)
     sp.add_argument("name")
     sp.add_argument("--hours", type=float, default=None)
+    sp.add_argument("--live", action="store_true",
+                    help="leave radiod running (it may silently lose ~0.1-0.2 s of samples)")
     args = ap.parse_args(argv)
     if host is None:
         host = RealHost()
         signal.signal(signal.SIGTERM, _on_sigterm)
     if args.cmd == "report":
         return _report(host)
-    return _snapshot(host, args.vmid, args.name, args.hours)
+    return _snapshot(host, args.vmid, args.name, args.hours, live=args.live)
 
 
 if __name__ == "__main__":

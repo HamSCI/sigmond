@@ -292,6 +292,9 @@ class FakeHost:
         self.storage_text = STORAGE_CFG
         self.pool_of = {}            # vmid -> storage id (default local-lvm)
         self.extra_lvs = []          # extra lv rows
+        self.radiods = {100: ["radiod@B4.service"]}   # vmid -> active radiod units; None = agent deaf
+        self.fail_systemctl = set()  # (vmid, action) that fail
+        self.fail_snapshot = False
 
     def calls_of(self, kind):
         return [c for c in self.calls if c[0] == kind]
@@ -345,7 +348,18 @@ class FakeHost:
 
     def snapshot(self, vmid, name, description):
         self.calls.append(("snapshot", vmid, name, description))
+        if self.fail_snapshot:
+            return pm.RunResult(2, "", "snapshot failed")
         return pm.RunResult(0, "", "")
+
+    def guest_radiods(self, vmid):
+        self.calls.append(("guest_radiods", vmid))
+        return self.radiods.get(vmid, [])
+
+    def guest_systemctl(self, vmid, action, units):
+        self.calls.append(("guest_systemctl", vmid, action, tuple(units)))
+        failed = (vmid, action) in self.fail_systemctl
+        return pm.RunResult(1 if failed else 0, "", "unit failed" if failed else "")
 
     def file_write(self, vmid, path, content):
         self.calls.append(("file_write", vmid, path, content))
@@ -807,3 +821,66 @@ def test_a_stop_before_the_guest_writes_carries_the_guest_episodes_forward():
     host._now = NOW + timedelta(minutes=10)
     pm.main(["report"], host)
     assert len(_raised(host, "guest 100 unreachable")) == 1
+
+
+# ---------------------------------------------------------------------------
+# snapshot quiesces radiod (B4 2026-11-10: a live snapshot pauses the VM and
+# radiod silently loses 100-200 ms of samples; a stopped radiod is a clean,
+# visible restart that every client already handles)
+# ---------------------------------------------------------------------------
+
+def _kinds(host):
+    return [c[0] if c[0] != "guest_systemctl" else f"{c[0]}:{c[2]}" for c in host.calls
+            if c[0] in ("guest_radiods", "guest_systemctl", "snapshot")]
+
+
+def test_snapshot_stops_radiod_snapshots_and_starts_it_again(capsys):
+    host = _fake_host(pool_pct=50)
+    assert pm.main(["snapshot", "100", "pre-v388"], host) == 0
+    assert _kinds(host) == ["guest_radiods", "guest_systemctl:stop", "snapshot",
+                            "guest_systemctl:start"]
+    assert host.calls_of("guest_systemctl")[0][3] == ("radiod@B4.service",)
+    assert "radiod@B4.service" in capsys.readouterr().out
+
+
+def test_snapshot_of_a_stopped_vm_touches_no_guest():
+    host = _fake_host(pool_pct=50, vms=[{"vmid": 100, "status": "stopped"}])
+    assert pm.main(["snapshot", "100", "a"], host) == 0
+    assert _kinds(host) == ["snapshot"]
+
+
+def test_snapshot_with_no_radiod_in_the_guest_just_snapshots():
+    host = _fake_host(pool_pct=50)
+    host.radiods = {100: []}
+    assert pm.main(["snapshot", "100", "a"], host) == 0
+    assert _kinds(host) == ["guest_radiods", "snapshot"]
+
+
+def test_snapshot_refused_when_the_agent_cannot_say_what_runs(capsys):
+    host = _fake_host(pool_pct=50)
+    host.radiods = {100: None}
+    assert pm.main(["snapshot", "100", "a"], host) == 3
+    assert host.calls_of("snapshot") == []
+    assert "--live" in capsys.readouterr().err
+
+
+def test_snapshot_refused_and_radiod_restarted_when_the_stop_fails():
+    host = _fake_host(pool_pct=50)
+    host.fail_systemctl = {(100, "stop")}
+    assert pm.main(["snapshot", "100", "a"], host) == 3
+    assert host.calls_of("snapshot") == []
+    assert _kinds(host)[-1] == "guest_systemctl:start"
+
+
+def test_radiod_starts_again_even_when_the_snapshot_fails():
+    host = _fake_host(pool_pct=50)
+    host.fail_snapshot = True
+    assert pm.main(["snapshot", "100", "a"], host) == 1
+    assert _kinds(host)[-1] == "guest_systemctl:start"
+
+
+def test_live_snapshot_skips_the_guest_and_warns(capsys):
+    host = _fake_host(pool_pct=50)
+    assert pm.main(["snapshot", "100", "a", "--live"], host) == 0
+    assert _kinds(host) == ["snapshot"]
+    assert "silently" in capsys.readouterr().err
