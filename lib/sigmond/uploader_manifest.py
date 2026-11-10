@@ -593,10 +593,16 @@ def _load_merge_receivers() -> list:
                          f"({e}); cannot tell what merges") from None
 
 
+# (pipeline, missing words) already warned about: the condition persists
+# across render cycles, and one line says it all.
+_WARNED_MISSING_FEATURES: set = set()
+
+
 def collect_pipelines(topology: Optional[Topology] = None,
                       coord: Optional[Coordination] = None,
                       *, store_version: int,
-                      receivers: Optional[list] = None) -> list:
+                      receivers: Optional[list] = None,
+                      features: Optional[frozenset] = None) -> list:
     """Every enabled client's outbound pipeline(s), placeholders substituted.
 
     Returns a list of pipeline dicts ready for :func:`render_manifest`.  A
@@ -612,7 +618,14 @@ def collect_pipelines(topology: Optional[Topology] = None,
     ``receivers`` is the site profile's [[receiver]] list (``None`` loads
     it).  Their ``merge_into`` goes onto the tar pipeline
     (:func:`apply_merge`); a declaration the render refuses raises
-    :class:`MergeError`, so the caller keeps the manifest it has."""
+    :class:`MergeError`, so the caller keeps the manifest it has.
+
+    ``features`` is what the installed hs-uploader offers
+    (:func:`hs_uploader_features`).  A declaration's ``requires_features``
+    must be a subset of it (``None`` counts as empty); otherwise the
+    pipeline is skipped with one warning per (pipeline, missing words),
+    since an older daemon would carry it wrongly.  The key never reaches
+    the rendered dict."""
     topology = topology or load_topology()
     coord = coord or load_coordination()
     if receivers is None:
@@ -641,6 +654,17 @@ def collect_pipelines(topology: Optional[Topology] = None,
             missing: set = set()
             rendered = _subst(decl, tokens, used, missing)
             name = rendered.get("name") or f"{client}-pipeline"
+            required = rendered.pop("requires_features", None) or []
+            lacking = sorted(set(required) - (features or frozenset()))
+            if lacking:
+                key = (name, tuple(lacking))
+                if key not in _WARNED_MISSING_FEATURES:
+                    _WARNED_MISSING_FEATURES.add(key)
+                    logger.warning(
+                        "uploader-manifest: skipping pipeline %s (%s) — "
+                        "hs-uploader lacks feature(s): %s; update hs-uploader",
+                        name, client, ", ".join(lacking))
+                continue
             if missing:
                 logger.warning(
                     "uploader-manifest: skipping pipeline %s (%s) — "
@@ -1045,7 +1069,8 @@ def _inprocess_pairs(topology, pipelines: list) -> set:
 def generate(topology: Optional[Topology] = None,
              coord: Optional[Coordination] = None,
              *, supports_discard=None,
-             store_version: Optional[int] = None) -> str:
+             store_version: Optional[int] = None,
+             features: Optional[frozenset] = None) -> str:
     """Full pipeline: collect declarations + identity, render the manifest.
 
     ``store_version`` is the installed hs-uploader's store schema
@@ -1075,7 +1100,8 @@ def generate(topology: Optional[Topology] = None,
                     f"cannot ask {HS_UPLOADER_PYTHON} for `hs-uploader "
                     "capabilities` (failed or timed out)")
         pipelines = collect_pipelines(topology, coord,
-                                      store_version=store_version)
+                                      store_version=store_version,
+                                      features=features)
         pipelines = drop_inprocess_pipelines(
             pipelines, _inprocess_pairs(topology, pipelines),
             store_version=store_version)
@@ -1163,7 +1189,7 @@ def generate_forms(topology: Optional[Topology] = None,
         return RenderResult(
             generate(topology=topology, coord=coord,
                      supports_discard=supports_discard,
-                     store_version=store_version),
+                     store_version=store_version, features=features),
             None)
     topology = topology or load_topology()
     coord = coord or load_coordination()
@@ -1174,7 +1200,8 @@ def generate_forms(topology: Optional[Topology] = None,
                 f"cannot ask {HS_UPLOADER_PYTHON} for `hs-uploader "
                 "capabilities` (failed or timed out)")
     pipelines = collect_pipelines(topology, coord,
-                                  store_version=store_version)
+                                  store_version=store_version,
+                                  features=features)
     pipelines = drop_inprocess_pipelines(
         pipelines, _inprocess_pairs(topology, pipelines),
         store_version=store_version)

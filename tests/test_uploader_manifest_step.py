@@ -589,7 +589,10 @@ class Test15NoneHalfTests(_Step):
         r = self.step(features_effect=self._timed_out_probe())
         part1 = self.step(features=frozenset())
         self.assertEqual(r.rc, 0, r.err)
-        self.assertEqual(r.generate_kw, part1.generate_kw)
+        # A failed probe (None) and the empty set both offer no feature word.
+        strip = lambda kws: [{k: v for k, v in kw.items() if k != "features"}
+                             for kw in kws]
+        self.assertEqual(strip(r.generate_kw), strip(part1.generate_kw))
         self.assertEqual(r.manifest, part1.manifest)
         self.assertEqual(r.calls, part1.calls)
         warnings = [ln for ln in r.err.splitlines() if "features" in ln]
