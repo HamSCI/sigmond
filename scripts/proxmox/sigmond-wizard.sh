@@ -2122,8 +2122,51 @@ ntp_from_dhcp() {
     printf '%s' "$s" | cut -d, -f1
 }
 
+# ntp_scan_lan -> "ip stratum refid" per synchronised NTP server on the uplink's
+# IPv4 subnet, the default gateway first.  DHCP option 42 is rarely set (the
+# ER-X at rob's HamLAN serves NTP and does not advertise it), so when DHCP is
+# silent the wizard asks the LAN directly: one NTP client packet to every host,
+# then 2 s for answers.  Measured on a /24, 2026-11-10: 2.06 s, found the
+# gateway.  Subnets wider than /22 are swept as the /22 around this host so the
+# cost stays bounded (1022 probes).  Servers that say they are unsynchronised
+# (leap 3, stratum 0 or 16) are dropped.  Prints nothing on an IPv6-only uplink.
+ntp_scan_lan() {
+    command -v python3 >/dev/null 2>&1 || return 0
+    python3 - <<'NTPSCANEOF' 2>/dev/null
+import ipaddress, socket, subprocess, time
+r = subprocess.run(["ip", "-4", "route", "show", "default"], capture_output=True, text=True).stdout.split()
+if "dev" not in r: raise SystemExit
+iface = r[r.index("dev") + 1]
+gw = r[r.index("via") + 1] if "via" in r else None
+a = subprocess.run(["ip", "-4", "-o", "addr", "show", iface], capture_output=True, text=True).stdout.split()
+if "inet" not in a: raise SystemExit
+me = ipaddress.ip_interface(a[a.index("inet") + 1])
+net = me.network if me.network.prefixlen >= 22 else ipaddress.ip_network(f"{me.ip}/22", strict=False)
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.setblocking(False)
+pkt = b"\x23" + b"\0" * 47          # version 4, mode 3 (client)
+t0 = time.monotonic()
+for h in net.hosts():
+    if h == me.ip: continue
+    for _ in range(3):
+        try: s.sendto(pkt, (str(h), 123)); break
+        except BlockingIOError: time.sleep(0.002)
+        except OSError: break
+found = {}
+while time.monotonic() - t0 < 2.0:
+    try: data, (ip, _) = s.recvfrom(512)
+    except BlockingIOError: time.sleep(0.02); continue
+    except OSError: continue
+    if len(data) < 48 or data[0] & 7 != 4 or data[0] >> 6 == 3 or not 1 <= data[1] <= 15: continue
+    rid = data[12:16]
+    found[ip] = (data[1], rid.decode("ascii", "replace").strip("\0") if data[1] == 1 else socket.inet_ntoa(rid))
+print(f"# {net}")
+for ip in sorted(found, key=lambda x: (x != gw, found[x][0], ipaddress.ip_address(x))):
+    print(ip, found[ip][0], found[ip][1], "gateway" if ip == gw else "")
+NTPSCANEOF
+}
+
 ask_ntp() {
-    local detected
+    local detected="" scan="" net="" _ip _st _ref _gw _where
     detected=$(ntp_from_dhcp)
     echo ""
     echo "  Time source, before this station's own timing comes up."
@@ -2133,9 +2176,33 @@ ask_ntp() {
     if [ -n "$detected" ]; then
         echo "  DHCP on this network offers: $detected"
     else
-        echo "  DHCP on this network offers no NTP server."
+        echo "  DHCP on this network does not name an NTP server (most don't)."
+        echo "  Asking every address on the local network instead (~2 s)..."
+        scan=$(ntp_scan_lan)
+        net=$(printf '%s\n' "$scan" | sed -n 's/^# //p')
+        scan=$(printf '%s\n' "$scan" | grep -v '^#' | grep .)
+        if [ -n "$scan" ]; then
+            echo "  Found NTP on ${net:-this network}:"
+            while read -r _ip _st _ref _gw; do
+                _where=""; [ "$_gw" = gateway ] && _where=" — your router (default gateway)"
+                echo "    $_ip  stratum $_st, synced to $_ref$_where"
+            done <<EOF
+$(printf '%s\n' "$scan" | head -5)
+EOF
+            detected=$(printf '%s\n' "$scan" | awk 'NR==1{print $1}')
+            echo "  Using $detected unless you name another."
+        else
+            echo "  No NTP server answered on ${net:-this network}."
+            echo "  If your site has one (often the router, a Windows domain"
+            echo "  controller, or a GPS time server), enter its address; ask"
+            echo "  your network admin if unsure.  Enter alone uses $NTP_PUBLIC_POOL."
+        fi
     fi
-    rd -r -p "Local NTP server (host or IP; Enter for none) [${detected:-none}]: " NTP_LOCAL
+    if [ -n "$detected" ]; then
+        rd -r -p "Local NTP server (host or IP; Enter = $detected, 'none' = public pool) [$detected]: " NTP_LOCAL
+    else
+        rd -r -p "Local NTP server (host or IP; Enter = public pool): " NTP_LOCAL
+    fi
     NTP_LOCAL="${NTP_LOCAL:-$detected}"
     case "$NTP_LOCAL" in none|None|NONE) NTP_LOCAL="" ;; esac
     NTP_LOCAL=$(printf '%s' "$NTP_LOCAL" | tr -cd 'A-Za-z0-9.:_-')
@@ -2996,10 +3063,13 @@ ask_reporter() {
     echo "  Your wsprnet.org reporter ID. This is the name your spots are"
     echo "  filed under on wsprnet.org, so it must be one wsprnet accepts."
     while [ -z "$REPORTER" ]; do
-        rd -r -p "wsprnet.org reporter ID — callsign, optionally /suffix (e.g. AC0G/B4 — required): " REPORTER
+        rd -r -p "wsprnet.org reporter ID — callsign, optionally /suffix or -suffix (e.g. AC0G/B4 or AC0G-B4 — required): " REPORTER
         REPORTER=$(echo "$REPORTER" | tr '[:lower:]' '[:upper:]' | tr -d ' ')
         if [ -z "$REPORTER" ]; then echo "  ✗ required — please enter your callsign"; continue; fi
-        echo "$REPORTER" | grep -qE '^[A-Z0-9]{3,}(/[A-Z0-9]+)?$' || { echo "  ✗ that doesn't look like a callsign"; REPORTER=""; continue; }
+        # The suffix separator may be '/' or '-' (rob, 2026-11-10: AI6VN-2 is
+        # as valid a reporter as AI6VN/2).  sigmond's own parser already takes
+        # both: '/' is stored as '=', a '-' is kept as typed.
+        echo "$REPORTER" | grep -qE '^[A-Z0-9]{3,}([/-][A-Z0-9]+)?$' || { echo "  ✗ that doesn't look like a callsign (CALL, CALL/SUFFIX or CALL-SUFFIX)"; REPORTER=""; continue; }
         # A WARNING, never a rejection.  Neither sigmond nor either uploader
         # enforces a length, and wsprnet's exact cap is not documented here --
         # so refusing a long id on a guessed limit could lock out a legitimate
@@ -3010,7 +3080,8 @@ ask_reporter() {
             echo "    relying on uploads. (Nothing here enforces a length.)"
         fi
     done
-    CALLSIGN="${REPORTER%%/*}"
+    # The bare call, before either separator: AC0G/B4 and AC0G-B4 both give AC0G.
+    CALLSIGN="${REPORTER%%[/-]*}"
 }
 
 ask_grid() {
