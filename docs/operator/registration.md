@@ -48,8 +48,9 @@ do not edit that file by hand and you do not repeat yourself per program.
 | **Remote access** *(no question; every install registers)* | the RAC tunnel | your fleet admin, not a data path |
 
 Note what is **not** on that list: the wizard never asks for your callsign. It
-takes the part of the reporter ID before the `/` — `AC0G/B4` gives `AC0G`
-(source: `scripts/proxmox/sigmond-wizard.sh`, `CALLSIGN="${REPORTER%%/*}"`) —
+takes the part of the reporter ID before the `/` or `-` — `AC0G/B4` and
+`AC0G-B4` both give `AC0G` (source: `scripts/proxmox/sigmond-wizard.sh`,
+`CALLSIGN="${REPORTER%%[/-]*}"`) —
 and stores it as `[station] callsign`. That derived, unsuffixed call is exactly
 what pskreporter wants (§3), which is why you never typed it twice.
 

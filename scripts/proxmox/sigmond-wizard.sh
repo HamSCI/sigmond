@@ -2996,10 +2996,13 @@ ask_reporter() {
     echo "  Your wsprnet.org reporter ID. This is the name your spots are"
     echo "  filed under on wsprnet.org, so it must be one wsprnet accepts."
     while [ -z "$REPORTER" ]; do
-        rd -r -p "wsprnet.org reporter ID — callsign, optionally /suffix (e.g. AC0G/B4 — required): " REPORTER
+        rd -r -p "wsprnet.org reporter ID — callsign, optionally /suffix or -suffix (e.g. AC0G/B4 or AC0G-B4 — required): " REPORTER
         REPORTER=$(echo "$REPORTER" | tr '[:lower:]' '[:upper:]' | tr -d ' ')
         if [ -z "$REPORTER" ]; then echo "  ✗ required — please enter your callsign"; continue; fi
-        echo "$REPORTER" | grep -qE '^[A-Z0-9]{3,}(/[A-Z0-9]+)?$' || { echo "  ✗ that doesn't look like a callsign"; REPORTER=""; continue; }
+        # The suffix separator may be '/' or '-' (rob, 2026-11-10: AI6VN-2 is
+        # as valid a reporter as AI6VN/2).  sigmond's own parser already takes
+        # both: '/' is stored as '=', a '-' is kept as typed.
+        echo "$REPORTER" | grep -qE '^[A-Z0-9]{3,}([/-][A-Z0-9]+)?$' || { echo "  ✗ that doesn't look like a callsign (CALL, CALL/SUFFIX or CALL-SUFFIX)"; REPORTER=""; continue; }
         # A WARNING, never a rejection.  Neither sigmond nor either uploader
         # enforces a length, and wsprnet's exact cap is not documented here --
         # so refusing a long id on a guessed limit could lock out a legitimate
@@ -3010,7 +3013,8 @@ ask_reporter() {
             echo "    relying on uploads. (Nothing here enforces a length.)"
         fi
     done
-    CALLSIGN="${REPORTER%%/*}"
+    # The bare call, before either separator: AC0G/B4 and AC0G-B4 both give AC0G.
+    CALLSIGN="${REPORTER%%[/-]*}"
 }
 
 ask_grid() {
