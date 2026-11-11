@@ -5629,7 +5629,12 @@ def cmd_version(args) -> int:
         components=component_versions(checkouts),
         history=update_history(HISTORY_FILE),
         radiod=radiod,
-        commits=component_commits(checkouts)))
+        commits=component_commits(checkouts),
+        # ⛔ The hash-only `components (live):` list stays in anything not
+        # on a terminal: the image build (build-golden-vm.sh), `smd fleet`
+        # and test-update-v3.sh all capture this output and parse that
+        # list.  --hashes prints it on a terminal too.
+        detail_only=sys.stdout.isatty() and not getattr(args, 'hashes', False)))
     return 0
 
 
@@ -29108,6 +29113,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser('version',
                        help='what is actually installed (image lineage + live commits)')
     p.add_argument('--base', help='component checkout root (default /opt/git/sigmond)')
+    p.add_argument('--hashes', action='store_true',
+                   help='also print the plain name + hash list (what the image '
+                        'manifest holds); it is always printed when output is '
+                        'not a terminal')
 
     p = sub.add_parser('doctor',
                        help='report deploy-tree damage (ownership, git, venv)')

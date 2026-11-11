@@ -160,3 +160,25 @@ def test_the_dated_block_leaves_the_manifest_block_parseable():
     assert tail[0].split()[:3] == ['2026-11-12', 'comp11', '000000b']   # newest first
     assert any('[+ local changes]' in l and 'comp03' in l for l in tail)
     assert all(len(l) < 140 for l in tail)                              # summary cut
+
+
+def test_on_a_terminal_only_the_dated_block_is_shown():
+    comps = {'sigmond': 'ad9be9f', 'ka9q-radio': '401992cd'}
+    commits = {'sigmond': {'date': '2026-11-11', 'summary': 's', 'dirty': False},
+               'ka9q-radio': {'date': '2026-09-19', 'summary': 'k', 'dirty': False}}
+    out = format_report(lineage={'image': 'v3.90', 'means': 'lineage'},
+                        components=comps, history=[], commits=commits, detail_only=True)
+    assert 'components (live):' not in out          # no hash-only list
+    assert 'ad9be9f' in out and '2026-09-19' in out
+    assert out.index('sigmond') < out.index('ka9q-radio')   # newest first
+    # with nothing dated to show, the hash list is kept rather than lost
+    bare = format_report(lineage={'image': 'v3.90', 'means': 'lineage'},
+                         components=comps, history=[], commits={}, detail_only=True)
+    assert 'components (live):' in bare
+
+
+def test_smd_keeps_the_hash_list_off_a_terminal():
+    """build-golden-vm.sh, smd fleet and test-update-v3.sh parse it."""
+    from pathlib import Path
+    smd = (Path(__file__).resolve().parent.parent / 'bin' / 'smd').read_text()
+    assert "detail_only=sys.stdout.isatty() and not getattr(args, 'hashes', False)" in smd

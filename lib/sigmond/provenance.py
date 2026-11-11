@@ -184,7 +184,8 @@ SUMMARY_WIDTH = 64
 
 def format_report(lineage: dict, components: dict, history: list,
                   radiod: Optional[dict] = None,
-                  commits: Optional[dict] = None) -> str:
+                  commits: Optional[dict] = None,
+                  detail_only: bool = False) -> str:
     """Human-readable provenance, with the lineage caveat kept adjacent.
 
     The caveat sits on the same line as the number deliberately: split
@@ -192,11 +193,16 @@ def format_report(lineage: dict, components: dict, history: list,
     "DASI002 is a v3.20 box" became something we believed.
     """
     lines = [f'image:      {lineage.get("image") or "(unstamped)"}'
-             f'   [{lineage.get("means")}]', '', 'components (live):']
-    for name in sorted(components):
-        lines.append(f'    {name:<16} {components[name]}')
-    if not components:
-        lines.append('    (no component checkouts found)')
+             f'   [{lineage.get("means")}]']
+    # On a terminal the dated block alone says everything the hash list does
+    # (rob, 2026-11-11: "suppress all that ... just have the second section").
+    detail_only = detail_only and bool(commits)
+    if not detail_only:
+        lines += ['', 'components (live):']
+        for name in sorted(components):
+            lines.append(f'    {name:<16} {components[name]}')
+        if not components:
+            lines.append('    (no component checkouts found)')
 
     # ⛔ A SEPARATE block, after a blank line.  The image build captures this
     # output as the image's manifest, and every reader of `components (live):`
@@ -205,7 +211,8 @@ def format_report(lineage: dict, components: dict, history: list,
     # or a summary on those rows would drop them all and fail the build's
     # 10-row floor.
     if commits:
-        lines += ['', 'what each is at (newest first):']
+        lines += ['', 'components (live), newest first: date, commit, what it changed'
+                      if detail_only else 'what each is at (newest first):']
         rows = [(commits[n].get('date') or '?', n) for n in components if n in commits]
         for date, name in sorted(rows, key=lambda r: (r[0], r[1]), reverse=True):
             c = commits[name]
