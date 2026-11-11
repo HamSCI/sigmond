@@ -1101,6 +1101,27 @@ def _ka9q_radio_pin() -> Optional[str]:
     return None
 
 
+# Tracked files ka9q-radio's `make` regenerates (from the man pages, via
+# mandoc).  A build on a host without mandoc rewrites them, the checkout reads
+# dirty, and `smd update` then HOLDS ka9q-radio for "local changes" that are
+# only build output (AI6VN-1, 2026-11-11).  Put them back after each build.
+_KA9Q_RADIO_GENERATED = ('docs/PREVIEW.html', 'docs/PREVIEW.txt')
+
+
+def _restore_ka9q_radio_generated_docs(src_dir: Path) -> None:
+    git = ['git', '-c', 'safe.directory=*', '-C', str(src_dir)]
+    st = subprocess.run(git + ['status', '--porcelain', '--', *_KA9Q_RADIO_GENERATED],
+                        capture_output=True, text=True)
+    dirty = [l[3:].strip() for l in (st.stdout or '').splitlines()
+             if l[:2].strip() == 'M']
+    if dirty:
+        r = subprocess.run(git + ['checkout', '--', *dirty],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            # The checkout may belong to another user; root can always do it.
+            _run(git + ['checkout', '--', *dirty], sudo=True)
+
+
 def _build_ka9q_radio(src_dir: Path, force: bool = False) -> bool:
     # Every radiod build goes through here (install, component update, align,
     # the TUI rebuild).  A ka9q-radio the site manages by hand (site-profile
@@ -1159,6 +1180,7 @@ def _build_ka9q_radio(src_dir: Path, force: bool = False) -> bool:
     if r.returncode != 0:
         _err(f'ka9q-radio install failed: {r.stderr.strip()}')
         return False
+    _restore_ka9q_radio_generated_docs(src_dir)
 
     # ⛔ Fail closed on a radiod that cannot drive our hardware.
     #

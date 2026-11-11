@@ -180,9 +180,13 @@ _state_file="/etc/sigmond/install-state.env"
 # openability, not existence.
 _tty_ok=0
 { : </dev/tty; } 2>/dev/null && _tty_ok=1
+# An existing install (coordination.toml, written by `smd config init`) is
+# never asked: install.sh also runs on every `smd update`, where this
+# fresh-install question was answered "y" by mistake (AI6VN-1, 2026-11-11).
 if [[ "$_virt" == "kvm" \
       && -z "${SIGMOND_SKIP_PROXMOX_PROMPT:-}" \
       && ! -f "$_state_file" \
+      && ! -f /etc/sigmond/coordination.toml \
       && "$_tty_ok" == 1 \
       && -x "$REPO_DIR/scripts/proxmox/bootstrap.sh" ]]; then
     info "Detected KVM guest. Sigmond can configure the Proxmox host's PCIe USB"
