@@ -181,4 +181,112 @@ def test_smd_keeps_the_hash_list_off_a_terminal():
     """build-golden-vm.sh, smd fleet and test-update-v3.sh parse it."""
     from pathlib import Path
     smd = (Path(__file__).resolve().parent.parent / 'bin' / 'smd').read_text()
-    assert "detail_only=sys.stdout.isatty() and not getattr(args, 'hashes', False)" in smd
+    assert "detail = sys.stdout.isatty() and not getattr(args, 'hashes', False)" in smd and 'detail_only=detail' in smd
+
+
+# ─── against the image and upstream (rob, 2026-11-11) ─────────────────────────
+
+def _origin_and_clone(tmp_path):
+    """A bare 'origin' with 2 commits, a clone of it, then 3 more upstream."""
+    import subprocess
+    env = {'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@t',
+           'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@t',
+           'GIT_COMMITTER_DATE': '2026-11-10T12:00:00Z', 'PATH': '/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin',
+           'HOME': str(tmp_path)}
+    run = lambda *a, cwd=None: subprocess.run(a, cwd=cwd, check=True, env=env,
+                                              capture_output=True, text=True).stdout.strip()
+    work = tmp_path / 'up'
+    run('git', 'init', '-q', '-b', 'main', str(work))
+    for i in range(2):
+        run('git', 'commit', '-q', '--allow-empty', '-m', f'c{i}', cwd=work)
+    run('git', 'clone', '-q', '--bare', str(work), str(tmp_path / 'origin.git'))
+    clone = tmp_path / 'hf-timestd'
+    run('git', 'clone', '-q', str(tmp_path / 'origin.git'), str(clone))
+    image_sha = run('git', 'rev-parse', '--short', 'HEAD~1', cwd=clone)
+    run('git', 'remote', 'add', 'o', str(tmp_path / 'origin.git'), cwd=work)
+    for i in range(3):
+        run('git', 'commit', '-q', '--allow-empty', '-m', f'u{i}', cwd=work)
+    run('git', 'push', '-q', 'o', 'main', cwd=work)
+    return clone, image_sha, run
+
+
+def test_moved_past_the_image_and_behind_upstream(tmp_path):
+    from sigmond.provenance import standing
+    clone, image_sha, run = _origin_and_clone(tmp_path)
+    st = standing(clone, image_sha, remote=True)
+    assert st['vs_image'] == 'newer'                    # HEAD is the image's child
+    up = st['upstream']
+    assert up['checked'] and up['branch'] == 'main'
+    assert up['behind'] is None                         # tip moved, never fetched here
+    run('git', 'fetch', '-q', cwd=clone)
+    up = standing(clone, image_sha, remote=True)['upstream']
+    assert up['behind'] == 3 and up['date'] == '2026-11-10'
+
+
+def test_offline_uses_the_last_fetch_and_says_so(tmp_path):
+    from sigmond.provenance import standing
+    clone, image_sha, run = _origin_and_clone(tmp_path)
+    up = standing(clone, image_sha, remote=False)['upstream']
+    assert up['checked'] is False and up['behind'] == 0   # stale: last fetch saw nothing
+
+
+def test_a_pinned_checkout_is_marked_and_counted(tmp_path):
+    from sigmond.provenance import standing
+    clone, image_sha, run = _origin_and_clone(tmp_path)
+    run('git', 'fetch', '-q', cwd=clone)
+    run('git', 'checkout', '-q', '--detach', image_sha, cwd=clone)
+    st = standing(clone, image_sha, remote=True)
+    assert st['pinned'] and st['vs_image'] == 'image'
+    assert st['upstream']['behind'] == 4                 # tracked branch found while detached
+
+
+def test_not_in_the_image_and_no_manifest(tmp_path):
+    from sigmond.provenance import standing
+    clone, _, _ = _origin_and_clone(tmp_path)
+    assert standing(clone, '', remote=False)['vs_image'] == 'not in image'
+    assert standing(clone, None, remote=False)['vs_image'] is None
+
+
+def test_image_manifest_reads_build_time_and_components(tmp_path):
+    from sigmond.provenance import image_manifest
+    rows = ''.join(f'    comp{i:02d}          {i:07x}\n' for i in range(12))
+    (tmp_path / 'm').write_text('image_version: v3.90\nbuilt_utc: 2026-11-11T02:49:10+00:00\n'
+                                '\ncomponents (live):\n' + rows)
+    m = image_manifest(tmp_path / 'm')
+    assert m['built'] == '2026-11-11T02:49:10+00:00' and len(m['components']) == 12
+    assert image_manifest(tmp_path / 'absent') == {}
+
+
+def test_terminal_table_columns_and_footer():
+    comps = {'sigmond': 'd8e6f65', 'ka9q-radio': '401992cd', 'onion': 'de8ea93'}
+    commits = {'sigmond': {'date': '2026-11-11', 'summary': 's', 'dirty': False},
+               'ka9q-radio': {'date': '2026-09-19', 'summary': 'k', 'dirty': False},
+               'onion': {'date': '2022-09-05', 'summary': 'o', 'dirty': False}}
+    up = lambda b, chk=True: {'branch': 'main', 'checked': chk, 'behind': b, 'date': None}
+    standing = {'sigmond': {'vs_image': 'newer', 'pinned': False, 'upstream': up(0)},
+                'ka9q-radio': {'vs_image': 'image', 'pinned': True, 'upstream': up(22)},
+                'onion': {'vs_image': 'image', 'pinned': True, 'upstream': up(0, chk=False)}}
+    image = {'built': '2026-11-11T02:49:10+00:00',
+             'components': {'sigmond': '5348589', 'ka9q-radio': '401992cd',
+                            'onion': 'de8ea93', 'old-thing': 'abcdef1'}}
+    out = format_report(lineage={'image': 'v3.90', 'means': 'lineage'}, components=comps,
+                        history=[], commits=commits, detail_only=True,
+                        standing=standing, image=image)
+    assert 'v3.90, built 2026-11-11 02:49 UTC' in out
+    assert 'components (live):' not in out
+    row = next(l for l in out.splitlines() if 'ka9q-radio' in l and '401992cd' in l)
+    assert 'image' in row and '22 newer*' in row
+    assert 'since the image: sigmond; removed: old-thing' in out
+    assert 'newer upstream: ka9q-radio*' in out and '--unpin' in out
+    assert 'from the last fetch: onion' in out
+
+
+def test_an_uncounted_newer_is_explained():
+    comps = {'hs-uploader': 'b0b31c5'}
+    commits = {'hs-uploader': {'date': '2026-11-10', 'summary': 'x', 'dirty': False}}
+    st = {'hs-uploader': {'vs_image': 'image', 'pinned': False,
+                          'upstream': {'branch': 'main', 'checked': True, 'behind': None, 'date': None}}}
+    out = format_report(lineage={'image': 'v3.90', 'means': 'l'}, components=comps, history=[],
+                        commits=commits, detail_only=True, standing=st,
+                        image={'built': None, 'components': {'hs-uploader': 'b0b31c5'}})
+    assert 'newer upstream: hs-uploader' in out and 'never fetched here' in out

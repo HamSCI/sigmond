@@ -27,6 +27,7 @@ units in the field, which is where they matter most.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Callable, Iterable, Optional
@@ -147,6 +148,121 @@ def component_commits(checkouts: Iterable, git: Callable = _git_commit) -> dict:
     return out
 
 
+# ─── where each component stands: against the image, and against upstream ────
+
+MANIFEST_FILE = '/etc/sigmond-appliance/manifest.txt'
+LS_REMOTE_TIMEOUT = 15
+
+
+def image_manifest(path=MANIFEST_FILE) -> dict:
+    """The image's own record: when it was built and the commit of each
+    component it shipped.  {} when there is no manifest (a repo install, or
+    an image older than the manifest)."""
+    try:
+        text = Path(path).read_text()
+    except OSError:
+        return {}
+    from .doctor import _parse_manifest_components
+    built = next((l.split(':', 1)[1].strip() for l in text.splitlines()
+                  if l.startswith('built_utc:')), None)
+    return {'built': built, 'components': _parse_manifest_components(text) or {}}
+
+
+def _g(path, *args, timeout=None):
+    base = ['git', '--no-optional-locks', '-c', f'safe.directory={path}',
+            '-C', str(path)]
+    try:
+        r = subprocess.run(base + list(args), capture_output=True, text=True,
+                           timeout=timeout,
+                           env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'})
+    except (OSError, subprocess.TimeoutExpired):
+        return 1, ''
+    return r.returncode, r.stdout.strip()
+
+
+def _upstream_branch(path) -> Optional[str]:
+    """The branch upstream ships: the one this checkout tracks, else the
+    remote's default (a pinned checkout is detached and tracks nothing)."""
+    rc, out = _g(path, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}')
+    if rc == 0 and out.startswith('origin/'):
+        return out[len('origin/'):]
+    rc, out = _g(path, 'symbolic-ref', '-q', 'refs/remotes/origin/HEAD')
+    if rc == 0 and out.startswith('refs/remotes/origin/'):
+        return out[len('refs/remotes/origin/'):]
+    for b in ('main', 'master'):
+        if _g(path, 'rev-parse', '-q', '--verify', f'refs/remotes/origin/{b}')[0] == 0:
+            return b
+    return None
+
+
+def standing(path, image_sha: Optional[str], remote: bool = True) -> dict:
+    """One component against the image it came in and against upstream.
+
+    vs_image: 'image' (still what the image shipped), 'newer' (moved past
+    it), 'older', 'differs' (neither contains the other), 'not in image', or
+    None when there is no image manifest.
+
+    upstream: commits on upstream's branch that this checkout does not
+    have.  Asked with `git ls-remote`, which writes nothing into the
+    checkout -- so this works as any user, and a component it cannot reach
+    falls back to the last fetch, marked so.  `behind` is None when the tip
+    has moved but its commits were never fetched here.
+    """
+    from .doctor import _sha_equal
+    head = _g(path, 'rev-parse', 'HEAD')[1]
+    out = {'pinned': _g(path, 'symbolic-ref', '-q', 'HEAD')[0] != 0,
+           'vs_image': None, 'upstream': None}
+    if image_sha is not None:
+        if not image_sha:
+            out['vs_image'] = 'not in image'
+        elif _sha_equal(head, image_sha):
+            out['vs_image'] = 'image'
+        elif _g(path, 'merge-base', '--is-ancestor', image_sha, 'HEAD')[0] == 0:
+            out['vs_image'] = 'newer'
+        elif _g(path, 'merge-base', '--is-ancestor', 'HEAD', image_sha)[0] == 0:
+            out['vs_image'] = 'older'
+        else:
+            out['vs_image'] = 'differs'
+    branch = _upstream_branch(path)
+    if not branch:
+        return out
+    tip, checked = None, False
+    if remote:
+        rc, ls = _g(path, 'ls-remote', 'origin', f'refs/heads/{branch}',
+                    timeout=LS_REMOTE_TIMEOUT)
+        if rc == 0 and ls:
+            tip, checked = ls.split()[0], True
+    if not tip:
+        tip = _g(path, 'rev-parse', '-q', '--verify', f'refs/remotes/origin/{branch}')[1] or None
+    if not tip:
+        return out
+    up = {'branch': branch, 'checked': checked, 'behind': None, 'date': None}
+    if _g(path, 'cat-file', '-e', f'{tip}^{{commit}}')[0] == 0:
+        up['behind'] = int(_g(path, 'rev-list', '--count', f'HEAD..{tip}')[1] or 0)
+        up['date'] = _g(path, 'log', '-1', '--format=%cs', tip)[1] or None
+    elif tip != head:
+        up['behind'] = None                  # moved, never fetched here
+    out['upstream'] = up
+    return out
+
+
+def component_standing(checkouts: Iterable, image: dict, remote: bool = True) -> dict:
+    """`standing` for every checkout, in parallel: one ls-remote each, so
+    26 components take about as long as the slowest one, not their sum."""
+    from concurrent.futures import ThreadPoolExecutor
+    comps = image.get('components') if image else None
+    paths = list(checkouts)
+
+    def one(p):
+        sha = None if comps is None else comps.get(Path(p).name, '')
+        try:
+            return Path(p).name, standing(p, sha, remote)
+        except OSError:
+            return Path(p).name, None
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        return {n: s for n, s in ex.map(one, paths) if s}
+
+
 def record_update(path, entry: dict) -> None:
     """Append one line describing an update. Never rewrites the file."""
     path = Path(path)
@@ -180,19 +296,94 @@ def update_history(path=HISTORY_FILE) -> list:
 
 
 SUMMARY_WIDTH = 64
+DETAIL_SUMMARY_WIDTH = 52          # the terminal table has two more columns
+
+
+def _image_col(st: Optional[dict]) -> str:
+    v = (st or {}).get('vs_image')
+    return {'not in image': 'added', None: ''}.get(v, v)
+
+
+def _upstream_col(st: Optional[dict]) -> str:
+    up = (st or {}).get('upstream')
+    if not up:
+        return '?'
+    if up['behind'] == 0:
+        col = 'current'
+    elif up['behind'] is None:
+        col = 'newer'
+    else:
+        col = f'{up["behind"]} newer'
+    if st.get('pinned') and up['behind'] != 0:
+        col += '*'
+    return col
+
+
+def _detail_table(components: dict, commits: dict, standing: dict,
+                  image: Optional[dict]) -> str:
+    """The terminal view: one row per component, newest first, with where it
+    stands against the image and against upstream, then what that adds up
+    to."""
+    have_image = bool(image and image.get('components'))
+    lines = ['components (live), newest first:',
+             f'    {"date":<10}  {"component":<17} {"commit":<9} '
+             + (f'{"vs image":<8}  ' if have_image else '')
+             + f'{"upstream":<10}  what it changed']
+    rows = sorted(((commits[n].get('date') or '?', n) for n in components if n in commits),
+                  reverse=True)
+    for date, name in rows:
+        c, st = commits[name], standing.get(name)
+        summary = c.get('summary') or ''
+        if len(summary) > DETAIL_SUMMARY_WIDTH:
+            summary = summary[:DETAIL_SUMMARY_WIDTH - 1] + '…'
+        local = '  [+ local changes]' if c.get('dirty') else ''
+        lines.append(f'    {date:<10}  {name:<17} {components[name]:<9} '
+                     + (f'{_image_col(st):<8}  ' if have_image else '')
+                     + f'{_upstream_col(st):<10}  {summary}{local}')
+
+    lines.append('')
+    if have_image:
+        moved = sorted(n for n in components
+                       if (standing.get(n) or {}).get('vs_image') in ('newer', 'older', 'differs', 'not in image'))
+        gone = sorted(set(image['components']) - set(components))
+        lines.append(f'since the image: {", ".join(moved) if moved else "nothing has moved"}'
+                     + (f'; removed: {", ".join(gone)}' if gone else ''))
+    newer = sorted(n for n in components
+                   if ((standing.get(n) or {}).get('upstream') or {}).get('behind', 0) != 0
+                   and (standing.get(n) or {}).get('upstream'))
+    held = [n for n in newer if standing[n].get('pinned')]
+    if newer:
+        lines.append(f'newer upstream: {", ".join(n + ("*" if n in held else "") for n in newer)}')
+        if held:
+            lines.append('    * held at a pin: `smd update` leaves it; `smd update --unpin` would take it')
+        if any((standing[n].get('upstream') or {}).get('behind') is None for n in newer):
+            lines.append('    "newer" with no count: upstream has moved, but its commits were '
+                         'never fetched here')
+        lines.append('    `smd update` (a dry run) lists exactly what it would install')
+    else:
+        lines.append('newer upstream: nothing -- every component is at its branch tip')
+    stale = sorted(n for n, st in standing.items()
+                   if st and st.get('upstream') and not st['upstream']['checked'])
+    if stale:
+        lines.append(f'    not reachable just now, so from the last fetch: {", ".join(stale)}')
+    return '\n'.join(lines)
 
 
 def format_report(lineage: dict, components: dict, history: list,
                   radiod: Optional[dict] = None,
                   commits: Optional[dict] = None,
-                  detail_only: bool = False) -> str:
+                  detail_only: bool = False,
+                  standing: Optional[dict] = None,
+                  image: Optional[dict] = None) -> str:
     """Human-readable provenance, with the lineage caveat kept adjacent.
 
     The caveat sits on the same line as the number deliberately: split
     apart, the number travels alone and gets misread — which is how
     "DASI002 is a v3.20 box" became something we believed.
     """
-    lines = [f'image:      {lineage.get("image") or "(unstamped)"}'
+    built = (image or {}).get('built')
+    built = f', built {built[:16].replace("T", " ")} UTC' if built else ''
+    lines = [f'image:      {lineage.get("image") or "(unstamped)"}{built}'
              f'   [{lineage.get("means")}]']
     # On a terminal the dated block alone says everything the hash list does
     # (rob, 2026-11-11: "suppress all that ... just have the second section").
@@ -210,7 +401,9 @@ def format_report(lineage: dict, components: dict, history: list,
     # exactly two fields per row and stops at the first blank line.  A date
     # or a summary on those rows would drop them all and fail the build's
     # 10-row floor.
-    if commits:
+    if commits and detail_only and standing is not None:
+        lines += ['', _detail_table(components, commits, standing, image)]
+    elif commits:
         lines += ['', 'components (live), newest first: date, commit, what it changed'
                       if detail_only else 'what each is at (newest first):']
         rows = [(commits[n].get('date') or '?', n) for n in components if n in commits]

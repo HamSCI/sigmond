@@ -5613,6 +5613,7 @@ def cmd_version(args) -> int:
     from sigmond.provenance import (
         image_lineage, component_versions, component_commits, update_history,
         format_report, IMAGE_VERSION_FILE, HISTORY_FILE,
+        image_manifest, component_standing,
     )
 
     base = Path(getattr(args, 'base', None) or '/opt/git/sigmond')
@@ -5624,6 +5625,14 @@ def cmd_version(args) -> int:
     except Exception:
         pass
 
+    detail = sys.stdout.isatty() and not getattr(args, 'hashes', False)
+    image = image_manifest()
+    # Upstream is asked only on a terminal: the image build, `smd fleet` and
+    # test-update-v3.sh capture this output and need neither the network
+    # nor its wait.
+    standing = (component_standing(checkouts, image,
+                                   remote=not getattr(args, 'offline', False))
+                if detail else None)
     print(format_report(
         lineage=image_lineage(IMAGE_VERSION_FILE),
         components=component_versions(checkouts),
@@ -5634,7 +5643,7 @@ def cmd_version(args) -> int:
         # on a terminal: the image build (build-golden-vm.sh), `smd fleet`
         # and test-update-v3.sh all capture this output and parse that
         # list.  --hashes prints it on a terminal too.
-        detail_only=sys.stdout.isatty() and not getattr(args, 'hashes', False)))
+        detail_only=detail, standing=standing, image=image))
     return 0
 
 
@@ -29117,6 +29126,9 @@ def _build_parser() -> argparse.ArgumentParser:
                    help='also print the plain name + hash list (what the image '
                         'manifest holds); it is always printed when output is '
                         'not a terminal')
+    p.add_argument('--offline', action='store_true',
+                   help='do not ask upstream (git ls-remote); judge "newer '
+                        'upstream" from the last fetch')
 
     p = sub.add_parser('doctor',
                        help='report deploy-tree damage (ownership, git, venv)')
