@@ -6,7 +6,9 @@ a front page can link to it.  Two viewers on one port show up as a conflict.
 smd skips the ports other viewers own when it numbers ka9q-web (the second
 radiod gets 8083, since gmag-webui holds 8082), so none is expected.
 """
+import re
 import subprocess
+from pathlib import Path
 from typing import Callable
 
 from sigmond import gmag_webui
@@ -30,6 +32,30 @@ def systemctl_is_active(unit: str) -> str:
         return UNKNOWN
     lines = (proc.stdout or "").strip().splitlines()
     return lines[0].strip() if lines else UNKNOWN
+
+
+def installed_port(unit: str, port: int, root: Path = Path("/")) -> int:
+    """The port this ka9q-web unit really listens on, as installed.
+
+    `_ka9q_web_targets` recomputes each port from today's numbering rules,
+    but a unit keeps the port it was written with: KFS-OMNI-SW (2026-11-11)
+    ran ka9q-web@KFS-SW on 8084 from its 11-05 env file while this listing
+    said 8083, where Phil's web-monitor listens, so the station page linked
+    to the wrong service.  The templated unit reads KA9Q_WEB_PORT from
+    /etc/sigmond/ka9q-web/<id>.env; the plain one carries `-p N` in its
+    ExecStart.  Falls back to ``port`` when nothing is installed yet.
+    """
+    try:
+        if unit.startswith("ka9q-web@") and unit.endswith(".service"):
+            inst = unit[len("ka9q-web@"):-len(".service")]
+            text = (root / "etc/sigmond/ka9q-web" / f"{inst}.env").read_text()
+            m = re.search(r"^KA9Q_WEB_PORT=(\d+)\s*$", text, re.M)
+        else:
+            text = (root / "etc/systemd/system" / unit).read_text()
+            m = re.search(r"^ExecStart=.*\s-p\s+(\d+)\b", text, re.M)
+    except OSError:
+        return port
+    return int(m.group(1)) if m else port
 
 
 def list_viewers(ka9q_targets: list, gmag_installed: bool,

@@ -109,6 +109,36 @@ class SystemctlActiveTests(unittest.TestCase):
             self.assertEqual(viewers.systemctl_is_active("x.service"), "unknown")
 
 
+class InstalledPortTests(unittest.TestCase):
+    """The listing reports the port each installed unit uses (KFS-OMNI-SW)."""
+
+    def setUp(self):
+        import tempfile
+        self.root = Path(tempfile.mkdtemp())
+        (self.root / "etc/sigmond/ka9q-web").mkdir(parents=True)
+        (self.root / "etc/systemd/system").mkdir(parents=True)
+
+    def test_templated_unit_reads_its_env_file(self):
+        (self.root / "etc/sigmond/ka9q-web/KFS-SW.env").write_text(
+            "# written by smd\nKA9Q_WEB_STATUS=KFS-SW-status.local\n"
+            "KA9Q_WEB_PORT=8084\n")
+        self.assertEqual(viewers.installed_port(
+            "ka9q-web@KFS-SW.service", 8083, self.root), 8084)
+
+    def test_plain_unit_reads_its_execstart(self):
+        (self.root / "etc/systemd/system/ka9q-web.service").write_text(
+            "[Service]\nExecStart=/usr/local/sbin/ka9q-web "
+            "-m a-status.local -p 8091\n")
+        self.assertEqual(viewers.installed_port(
+            "ka9q-web.service", 8081, self.root), 8091)
+
+    def test_nothing_installed_keeps_the_computed_port(self):
+        self.assertEqual(viewers.installed_port(
+            "ka9q-web@b.service", 8083, self.root), 8083)
+        self.assertEqual(viewers.installed_port(
+            "ka9q-web.service", 8081, self.root), 8081)
+
+
 class CliTests(unittest.TestCase):
 
     def test_json_output(self):

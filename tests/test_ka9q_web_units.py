@@ -94,6 +94,16 @@ def test_template_reads_its_env_file(smd):
     assert "-m ${KA9Q_WEB_STATUS} -p ${KA9Q_WEB_PORT}" in t
 
 
+def test_units_need_no_radiod_runtime(smd):
+    """A client host serves pages for a remote radiod (AC0G-B2): no `radio`
+    user, no radiod ReadWritePaths."""
+    for t in (smd._ka9q_web_unit_text("a-status.local", 8081, False),
+              smd._ka9q_web_unit_text("", 0, True)):
+        assert "DynamicUser=yes" in t
+        assert "User=radio" not in t
+        assert "ReadWritePaths" not in t
+
+
 def test_template_is_cpu_fenced():
     from sigmond.cpu import AFFINITY_UNITS
     assert "ka9q-web@.service" in AFFINITY_UNITS

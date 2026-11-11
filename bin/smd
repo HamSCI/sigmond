@@ -13418,7 +13418,15 @@ def _ka9q_web_targets() -> list:
 
 def _ka9q_web_unit_text(status: str, port: int, templated: bool) -> str:
     """The unit body.  The template reads its -m/-p from an env file, so one
-    template serves every extra radiod and AFFINITY_UNITS can fence it."""
+    template serves every extra radiod and AFFINITY_UNITS can fence it.
+
+    DynamicUser: ka9q-web reads its HTML and the status multicast and writes
+    nothing, links no FFTW and opens no device.  The unit once ran as `radio`
+    with radiod's ReadWritePaths (/etc/fftw, /var/lib/ka9q-radio), copied
+    from radiod's unit; on a client host with no radiod (AC0G-B2,
+    2026-11-11) neither the user nor the paths exist, and both pages looped
+    in "activating".  A page for a remote radiod must not need radiod's
+    runtime on the host serving it."""
     if templated:
         desc = 'ka9q-web radiod status web UI for radiod %i'
         env = 'EnvironmentFile=/etc/sigmond/ka9q-web/%i.env\n'
@@ -13443,11 +13451,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=radio
-Group=radio
+DynamicUser=yes
 AmbientCapabilities=CAP_SYS_NICE
-ReadWritePaths=/etc/fftw /var/lib/ka9q-radio
-UMask=002
 {env}ExecStart={cmd}
 Restart=always
 RestartSec=5
@@ -26997,7 +27002,9 @@ def cmd_admin_viewers(args) -> int:
         gmag_installed = compute_state('gmag-webui').installed
     except Exception:
         gmag_installed = False
-    rows = viewers.list_viewers(_ka9q_web_targets(), gmag_installed,
+    targets = [(u, s, viewers.installed_port(u, p))
+               for u, s, p in _ka9q_web_targets()]
+    rows = viewers.list_viewers(targets, gmag_installed,
                                 viewers.systemctl_is_active)
     if getattr(args, 'json', False):
         import json
