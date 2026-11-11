@@ -676,7 +676,7 @@ rac_ka9q_webs(){
     local _q
     _q='d=${SIGMOND_KA9Q_WEB_ENV_DIR:-/etc/sigmond/ka9q-web}
 systemctl show -p ExecStart --value ka9q-web.service 2>/dev/null | sed -n "s/.* -m \([^ ]*\)-status\.local.* -p \([0-9][0-9]*\).*/\1 \2/p" | head -1 | grep . || echo "- 8081"
-for f in "$d"/*.env; do [ -f "$f" ] || continue; p=$(sed -n "s/^KA9Q_WEB_PORT=//p" "$f" | head -1); [ -n "$p" ] && echo "$(basename "$f" .env) $p"; done
+for f in "$d"/*.env; do [ -f "$f" ] || continue; p=$(sed -n "s/^KA9Q_WEB_PORT=//p" "$f" | head -1); [ -n "$p" ] && echo "$(basename "$f" .env | sed "s/-status\.local\$//") $p"; done
 true'
     if [ "${RAC_MODE:-host}" = station ]; then
         ( eval "$_q" ) 2>/dev/null      # a subshell: the caller's variables stay as they are

@@ -440,12 +440,16 @@ def test_station_reads_its_pages_from_ka9q_web_units(tmp_path):
     (envd / "KFS-SE.env").write_text("KA9Q_WEB_STATUS=KFS-SE-status.local\nKA9Q_WEB_PORT=8084\n")
     (envd / "KFS-X.env").write_text("# no port line yet\n")
     (envd / "KFS-Y.env").write_text("KA9Q_WEB_STATUS=KFS-Y-status.local\nKA9Q_WEB_PORT=8085\n")
+    # A coordination that ids its radiod by status name (AC0G-B2, 2026-11-11)
+    # names the env file after it; the label drops the suffix, as the
+    # primary's does, so the dashboard shows "KFS-Z", not "KFS-Z-status.local".
+    (envd / "KFS-Z-status.local.env").write_text("KA9Q_WEB_PORT=8086\n")
     body = (pre(tmp_path, 1, station=True)
             + "systemctl(){ case \"$1\" in show) echo '{ path=/usr/local/sbin/ka9q-web ; "
               "argv[]=/usr/local/sbin/ka9q-web -m KFS-NW-status.local -p 8081 ; ignore_errors=no }' ;; esac; }\n"
             + "rac_ka9q_webs\n")
     r = sh(body, tmp_path, {"SIGMOND_KA9Q_WEB_ENV_DIR": str(envd)})
-    assert r.stdout == "KFS-NW 8081\nKFS-SE 8084\nKFS-Y 8085\n", r.stdout + r.stderr
+    assert r.stdout == "KFS-NW 8081\nKFS-SE 8084\nKFS-Y 8085\nKFS-Z 8086\n", r.stdout + r.stderr
 
 
 def test_station_without_a_ka9q_web_unit_still_names_the_primary_port(tmp_path):
