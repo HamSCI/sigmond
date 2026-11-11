@@ -153,7 +153,8 @@ class TestFrequencyCoverage(unittest.TestCase):
         ))
         r = rule_frequency_coverage(_make_view(coord, {"grape": cv}))
         self.assertEqual(r.severity, "pass")
-        self.assertIn("samprate_hz not declared", r.message)
+        self.assertIn("unknown, not checked", r.message)
+        self.assertIn("k3lr", r.message)
 
     def test_no_local_radiod_skipped(self):
         # Only a remote radiod declared → distinct skip message.
@@ -194,6 +195,90 @@ class TestFrequencyCoverage(unittest.TestCase):
         self.assertEqual(r.severity, "pass")
         self.assertIn("inventory", r.message)
         self.assertIn("CLIENT-CONTRACT", r.message)
+
+
+class TestFrequencyCoverageNyquist(unittest.TestCase):
+    """An RX888 hears up to samprate/2.  At 64.8 Msps that ends at
+    32.4 MHz, so a 6 m channel there receives nothing; the rule says so."""
+
+    def _psk(self, radiod_id, *freqs):
+        cv = ClientView(client_type="psk-recorder", installed=True)
+        cv.instances.append(InstanceView(
+            instance="AC0G-B1", radiod_id=radiod_id,
+            frequencies_hz=list(freqs)))
+        return {"psk-recorder": cv}
+
+    def test_6m_on_64_8_flagged(self):
+        coord = Coordination(radiods={
+            "rx2": Radiod(id="rx2", host="localhost", samprate_hz=64_800_000)})
+        r = rule_frequency_coverage(_make_view(coord, self._psk("rx2", 50_293_000)))
+        self.assertEqual(r.severity, "fail")
+        self.assertIn("radiod rx2 samples at 64.8 Msps", r.message)
+        self.assertIn("hears nothing above 32.4 MHz", r.message)
+        self.assertIn("psk-recorder@AC0G-B1 asks it for 50.293 MHz", r.message)
+        self.assertIn("Fix:", r.message)
+        self.assertEqual(r.affected, ["psk-recorder"])
+
+    def test_fix_names_the_129_6_radiod(self):
+        coord = Coordination(radiods={
+            "rx1": Radiod(id="rx1", host="localhost", samprate_hz=129_600_000),
+            "rx2": Radiod(id="rx2", host="localhost", samprate_hz=64_800_000)})
+        r = rule_frequency_coverage(_make_view(coord, self._psk("rx2", 50_293_000)))
+        self.assertEqual(r.severity, "fail")
+        self.assertIn("Fix: move that channel to radiod rx1 (129.6 Msps)",
+                      r.message)
+
+    def test_6m_on_129_6_passes(self):
+        coord = Coordination(radiods={
+            "rx1": Radiod(id="rx1", host="localhost", samprate_hz=129_600_000)})
+        r = rule_frequency_coverage(_make_view(coord, self._psk("rx1", 50_293_000)))
+        self.assertEqual(r.severity, "pass")
+
+    def test_10m_on_64_8_passes(self):
+        coord = Coordination(radiods={
+            "rx2": Radiod(id="rx2", host="localhost", samprate_hz=64_800_000)})
+        r = rule_frequency_coverage(_make_view(coord, self._psk("rx2", 28_074_000)))
+        self.assertEqual(r.severity, "pass")
+
+    def test_between_nyquist_and_samprate_flagged(self):
+        # 40 MHz < 64.8 MHz but > 32.4 MHz: the old samprate test let it by.
+        coord = Coordination(radiods={
+            "rx2": Radiod(id="rx2", host="localhost", samprate_hz=64_800_000)})
+        r = rule_frequency_coverage(_make_view(coord, self._psk("rx2", 40_000_000)))
+        self.assertEqual(r.severity, "fail")
+
+    def test_unknown_samprate_reports_unchecked(self):
+        coord = Coordination(radiods={
+            "rx2": Radiod(id="rx2", host="localhost", samprate_hz=0)})
+        r = rule_frequency_coverage(_make_view(coord, self._psk("rx2", 50_293_000)))
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("radiod rx2", r.message)
+        self.assertIn("unknown, not checked", r.message)
+
+    def test_unknown_reported_alongside_a_pass(self):
+        coord = Coordination(radiods={
+            "rx1": Radiod(id="rx1", host="localhost", samprate_hz=129_600_000),
+            "rx2": Radiod(id="rx2", host="localhost", samprate_hz=0)})
+        views = self._psk("rx1", 50_293_000)
+        cv = ClientView(client_type="wspr-recorder", installed=True)
+        cv.instances.append(InstanceView(instance="x", radiod_id="rx2",
+                                         frequencies_hz=[14_095_600]))
+        views["wspr-recorder"] = cv
+        r = rule_frequency_coverage(_make_view(coord, views))
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("unknown, not checked", r.message)
+        self.assertIn("rx2", r.message)
+
+    def test_client_bound_by_status_dns(self):
+        # psk-recorder's inventory names its radiod by status DNS, while
+        # coordination may key the radiod by a short id.
+        coord = Coordination(radiods={
+            "rx2": Radiod(id="rx2", host="localhost", samprate_hz=64_800_000,
+                          status_dns="b4-rx2-status.local")})
+        r = rule_frequency_coverage(_make_view(
+            coord, self._psk("b4-rx2-status.local", 50_293_000)))
+        self.assertEqual(r.severity, "fail")
+        self.assertIn("radiod rx2", r.message)
 
 
 class TestTimingChain(unittest.TestCase):

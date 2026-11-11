@@ -71,3 +71,28 @@ def test_raw_value_present_but_unparseable():
     assert sdr_map.conf_samprate_raw(_conf("#samprate = 64m8")) == ""
     assert sdr_map.conf_samprate_raw(
         _conf("samprate = 129.6M ; x")) == "129.6M"
+
+
+# conf_adc_samprate_hz: the rate radiod actually runs its front end at,
+# for the frequency_coverage harmonize rule.
+
+def test_adc_rate_reads_the_hardware_section():
+    text = "[global]\nhardware = rx888\nsamprate = 12000\n[rx888]\nsamprate = 64.8M\n"
+    assert sdr_map.conf_adc_samprate_hz(text) == 64_800_000
+
+
+def test_adc_rate_rx888_without_line_is_radiod_default():
+    text = "[global]\nhardware = rx888\n[rx888]\ndevice = \"rx888\"\n"
+    assert sdr_map.conf_adc_samprate_hz(text) == 64_800_000
+
+
+def test_adc_rate_unreadable_spelling_is_unknown():
+    text = "[global]\nhardware = rx888\n[rx888]\nsamprate = lots\n"
+    assert sdr_map.conf_adc_samprate_hz(text) is None
+
+
+def test_adc_rate_other_frontend():
+    text = "[global]\nhardware = airspy\n[airspy]\nsamprate = 20m\n"
+    assert sdr_map.conf_adc_samprate_hz(text) == 20_000_000
+    text = "[global]\nhardware = airspy\n[airspy]\ndevice = \"airspy\"\n"
+    assert sdr_map.conf_adc_samprate_hz(text) is None

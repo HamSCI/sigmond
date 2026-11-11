@@ -10,7 +10,7 @@ The six rules are the ones documented in tui-configurator.md, adjusted
 for the multi-radiod architecture in coordination.toml:
 
   1. radiod_resolution   — every client instance's radiod_id resolves
-  2. frequency_coverage  — per radiod, consumed freqs within samprate
+  2. frequency_coverage  — per radiod, consumed freqs below samprate/2
   3. cpu_isolation       — local radiod cores disjoint from workers
   4. timing_chain        — hf-timestd <-> consumers on the same radiod
   5. disk_budget         — local disk writes fit the warn threshold
@@ -143,21 +143,29 @@ def rule_radiod_status_configured(view: SystemView) -> RuleResult:
                       "no placeholder radiod addresses", [])
 
 
+def _msps(hz: int) -> str:
+    return f"{hz / 1e6:g} Msps"
+
+
+def _mhz(hz: int) -> str:
+    return f"{hz / 1e6:g} MHz"
+
+
 def rule_frequency_coverage(view: SystemView) -> RuleResult:
-    """Per-radiod: any consumed frequency must fit within samprate/2 of
-    the radiod's tuning range.  Phase 1 uses a coarse heuristic — we just
-    check that requested frequencies are below samprate_hz (Nyquist
-    envelope) since we don't know radiod's RF tuning without a full conf
-    parse.
+    """Per-radiod: every frequency a bound client asks for must sit below
+    the radiod's Nyquist limit, samprate/2.  An RX888 at 64.8 Msps hears
+    nothing above 32.4 MHz, so a 6 m channel there receives nothing, and
+    without this rule nothing says so.  It checks the band edge only, not
+    radiod's RF tuning or a channel's bandwidth.
 
     The rule needs three things to actually check anything:
       1. At least one local radiod declared in coordination.toml
-      2. That radiod has a samprate_hz declared
+      2. That radiod's samprate: build_system_view reads it from the
+         radiod conf, else coordination's samprate_hz.  Unknown (0) is
+         reported as "unknown, not checked", never as a pass or a fail.
       3. At least one bound client publishes frequencies_hz via its
-         client-inventory (today: hf-timestd's `provides_timing_*`
-         block; psk/wspr/hfdl/codar would need to add inventory
-         entries listing the bands they consume — CLIENT-CONTRACT
-         work, not coordination.toml work).
+         client-inventory (hf-timestd, psk-recorder, hfdl-recorder,
+         codar-sounder, ...).
 
     Skip diagnostics differentiate which of the three is missing so
     operators know whether to edit coordination.toml or the client's
@@ -165,46 +173,73 @@ def rule_frequency_coverage(view: SystemView) -> RuleResult:
     """
     coord = view.coordination
     violations = []
+    affected: set = set()
+    unknown = []
     checked = 0
     local_radiods = 0
-    local_radiods_with_samprate = 0
     total_consumers = 0
-    for rid, radiod in coord.radiods.items():
-        if not radiod.is_local:
-            continue    # remote radiod — someone else's problem
+    local = {rid: r for rid, r in coord.radiods.items() if r.is_local}
+    for rid, radiod in local.items():
         local_radiods += 1
-        if not radiod.samprate_hz:
-            continue    # operator hasn't declared coverage info
-        local_radiods_with_samprate += 1
         consumers = _consumers_of(view, rid)
         total_consumers += len(consumers)
+        claims = sum(len(iv.frequencies_hz) for _, iv in consumers)
+        if not radiod.samprate_hz:
+            if claims:
+                unknown.append(f"radiod {rid} ({claims} frequency claim(s))")
+            continue
+        nyquist = radiod.samprate_hz // 2
         for ctype, iv in consumers:
-            for hz in iv.frequencies_hz:
-                checked += 1
-                if hz > radiod.samprate_hz:
-                    violations.append(f"{ctype}@{iv.instance} wants {hz} Hz > samprate {radiod.samprate_hz}")
+            over = sorted(hz for hz in iv.frequencies_hz if hz >= nyquist)
+            checked += len(iv.frequencies_hz)
+            if not over:
+                continue
+            affected.add(ctype)
+            them = "that channel" if len(over) == 1 else "those channels"
+            # A local radiod fast enough for every one of these channels.
+            better = [(oid, o) for oid, o in local.items()
+                      if oid != rid and o.samprate_hz // 2 > over[-1]]
+            if better:
+                oid, o = max(better, key=lambda b: b[1].samprate_hz)
+                fix = (f"move {them} to radiod {oid} "
+                       f"({_msps(o.samprate_hz)}), or drop "
+                       f"{'it' if len(over) == 1 else 'them'} from "
+                       f"{ctype}@{iv.instance}")
+            else:
+                fix = (f"drop {them} from {ctype}@{iv.instance}, or "
+                       f"raise radiod {rid}'s samprate if this CPU can "
+                       f"carry it")
+            violations.append(
+                f"radiod {rid} samples at {_msps(radiod.samprate_hz)}, so "
+                f"it hears nothing above {_mhz(nyquist)}; "
+                f"{ctype}@{iv.instance} asks it for "
+                f"{', '.join(_mhz(hz) for hz in over)}.  Fix: {fix}.")
+    unknown_note = (f"samprate unknown, not checked: {', '.join(unknown)}"
+                    if unknown else "")
     if violations:
         return RuleResult(
             "frequency_coverage", "fail",
-            "; ".join(violations),
-            [],
+            "; ".join(violations + ([unknown_note] if unknown_note else [])),
+            sorted(affected),
         )
     if checked > 0:
-        return RuleResult("frequency_coverage", "pass",
-                          f"{checked} frequency claim(s) within samprate", [])
+        msg = f"{checked} frequency claim(s) below Nyquist (samprate/2)"
+        if unknown_note:
+            msg += f"; {unknown_note}"
+        return RuleResult("frequency_coverage", "pass", msg, [])
+    if unknown_note:
+        return RuleResult("frequency_coverage", "pass", unknown_note, [])
     # checked == 0 — diagnose which of the three preconditions is missing.
     if local_radiods == 0:
         msg = "skipped (no local radiod declared)"
-    elif local_radiods_with_samprate == 0:
-        msg = "skipped (local radiod samprate_hz not declared)"
     elif total_consumers == 0:
         msg = "skipped (no client instances bound to local radiod)"
     else:
         # Consumers exist but none publish frequencies_hz.  This is the
-        # CLIENT-CONTRACT inventory gap: psk/wspr/hfdl/codar daemons
-        # would need to expose their band list via the client-view
-        # inventory mechanism for this check to fire.  Until then the
-        # rule passes-via-skip rather than warning.
+        # CLIENT-CONTRACT inventory gap: a client daemon would need to
+        # expose its band list via the client-view inventory mechanism
+        # for this check to fire.  Until then the rule passes-via-skip
+        # rather than warning.
         msg = ("skipped (no client publishes frequencies_hz via "
                "inventory — CLIENT-CONTRACT enhancement)")
     return RuleResult("frequency_coverage", "pass", msg, [])
@@ -319,11 +354,24 @@ def rule_channel_count(view: SystemView) -> RuleResult:
 # ---------------------------------------------------------------------------
 
 def _consumers_of(view: SystemView, radiod_id: str) -> list:
-    """Return list of (client_type, InstanceView) bound to the given radiod."""
+    """Return list of (client_type, InstanceView) bound to the given radiod.
+
+    A client names its radiod by coordination id or by status DNS (the
+    contract inventories of psk-recorder and others give the status DNS),
+    so either counts, case ignored, with or without `.local`."""
+    def _norm(name) -> str:
+        name = str(name or '').strip().lower()
+        return name[:-len('.local')] if name.endswith('.local') else name
+
+    names = {_norm(radiod_id)}
+    radiod = view.coordination.radiods.get(radiod_id)
+    if radiod is not None:
+        names.add(_norm(radiod.effective_status_dns))
+    names.discard('')
     out = []
     for cv in view.client_views.values():
         for iv in cv.instances:
-            if iv.radiod_id == radiod_id:
+            if _norm(iv.radiod_id) in names:
                 out.append((cv.client_type, iv))
     # Also include any coordination-declared instances whose client_view
     # may not be in topology — skip for now, keep it simple.

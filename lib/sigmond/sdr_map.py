@@ -140,6 +140,27 @@ def conf_samprate_hz(text: str) -> int | None:
     return parse_samprate_hz(conf_samprate_raw(text))
 
 
+# What radiod runs an RX888 at with no `samprate` line (rx888.c
+# DEFAULT_SAMPRATE).
+RX888_DEFAULT_SAMPRATE_HZ = 64_800_000
+
+
+def conf_adc_samprate_hz(text: str) -> int | None:
+    """The rate radiod runs this conf's front end at, in Hz: the
+    `samprate` in the section `[global] hardware` names.  An [rx888]
+    section with no `samprate` line runs at radiod's default, 64.8 Msps.
+    None when sigmond cannot tell: an unreadable spelling, or another
+    front end with no `samprate` line (its driver picks)."""
+    hardware = _unquote(_section_value(text, 'hardware', 'global')).lower()
+    section = hardware or ('rx888' if has_rx888_section(text) else '')
+    if not section:
+        return None
+    raw = _section_value(text, 'samprate', section).split(';', 1)[0].strip()
+    if raw:
+        return parse_samprate_hz(raw)
+    return RX888_DEFAULT_SAMPRATE_HZ if section == 'rx888' else None
+
+
 def conf_description(text: str) -> str:
     """The [rx888] section's `description =` value, "" if none."""
     return _section_value(text, 'description')

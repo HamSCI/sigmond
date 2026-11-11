@@ -204,9 +204,8 @@ def _rx888_samprate_block(rate, comment: list[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
-# What radiod runs an RX888 at with no `samprate` line (rx888.c
-# DEFAULT_SAMPRATE).
-_RX888_DEFAULT_SAMPRATE_HZ = 64_800_000
+# What radiod runs an RX888 at with no `samprate` line.
+_RX888_DEFAULT_SAMPRATE_HZ = sdr_map.RX888_DEFAULT_SAMPRATE_HZ
 
 
 def _mhz(rate) -> str:
@@ -314,6 +313,8 @@ def _choose_rx888_samprates(plans: list[dict], profile,
                 "both FFT threads.  Measured: " + profile.source + ";",
                 "see sigmond lib/sigmond/cpu_profiles.py."]
         rates[plan["instance_id"]] = hz
+        if isinstance(hz, int):
+            plan["samprate_hz"] = hz    # coordination records it too
         if hz == cpu_profiles.FULL_SAMPRATE_HZ:
             continue        # the profile's own 129.6 line, comment and all
         block = _rx888_samprate_block(hz, comment)
@@ -1232,7 +1233,11 @@ def _coord_block(plan: dict) -> str:
         f'[radiod."{plan["instance_id"]}"]',
         'host        = "localhost"',
         f'status_dns  = "{plan["status_dns"]}"',
-        '# samprate_hz = 0           # fill in once a channel fragment lands',
+        # The ADC rate this run chose, so `smd admin validate` can tell a
+        # channel above Nyquist (samprate/2) from one radiod can hear.
+        (f'samprate_hz = {plan["samprate_hz"]}'
+         if isinstance(plan.get("samprate_hz"), int) else
+         '# samprate_hz = 0           # unknown; validate reads radio_conf'),
         '# cores       = ""',
         f'radio_conf  = "/etc/radio/radiod@{plan["instance_id"]}.conf"',
     ]

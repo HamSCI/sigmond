@@ -148,6 +148,15 @@ class RenderTests(unittest.TestCase):
         self.assertIn('status_dns  = "bee1-rx888-status.local"', block)
         self.assertIn('radio_conf  = "/etc/radio/radiod@bee1-rx888.conf"', block)
 
+    def test_coordination_block_carries_the_chosen_samprate(self):
+        block = radiod_config._coord_block(self._plan(samprate_hz=64_800_000))
+        self.assertIn("samprate_hz = 64800000", block)
+        self.assertNotIn("# samprate_hz", block)
+
+    def test_coordination_block_comments_samprate_when_unknown(self):
+        block = radiod_config._coord_block(self._plan())
+        self.assertIn("# samprate_hz", block)
+
 
 # ---------------------------------------------------------------------------
 # Coordination append
@@ -687,6 +696,8 @@ class CpuProfileSamprateTests(unittest.TestCase):
                 rc = radiod_config.cmd_radiod_init(_ns(**ns))
             confs = {p.name: p.read_text()
                      for p in radio_dir.glob("radiod@*.conf")}
+            self.coord_text = (coord_path.read_text()
+                               if coord_path.exists() else "")
         return rc, out.getvalue(), confs
 
     @staticmethod
@@ -710,6 +721,17 @@ class CpuProfileSamprateTests(unittest.TestCase):
         rx = by_serial["BBB"].split("[rx888]", 1)[1]
         self.assertEqual(
             sum(1 for l in rx.splitlines() if l.startswith("samprate")), 1)
+
+    def test_5560u_coordination_records_each_rate(self):
+        # The frequency_coverage rule reads samprate_hz from coordination,
+        # so init writes the rate it chose for each radiod.
+        rc, out, confs = self._run(self.CEZANNE, self._two_cards())
+        self.assertEqual(rc, 0, out)
+        from sigmond.coordination import parse_coordination
+        import tomllib
+        coord = parse_coordination(tomllib.loads(self.coord_text))
+        self.assertEqual(sorted(r.samprate_hz for r in coord.radiods.values()),
+                         [64_800_000, 129_600_000])
 
     def test_unknown_cpu_keeps_129_6_for_both(self):
         rc, out, confs = self._run("Some Unknown CPU", self._two_cards())
