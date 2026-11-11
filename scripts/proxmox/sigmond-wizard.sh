@@ -29,7 +29,9 @@
 #                              the one switch; the decoder VM reaches the
 #                              same script with `smd remote`)
 #              --rac-register  register with the gateway and write the tunnel
-#                              configuration; asks nothing, starts nothing
+#                              configuration; asks nothing, starts nothing.
+#                              On a registered host: re-read the VM's
+#                              ka9q-web pages and rewrite only those channels
 #              --rac-retry     what sigmond-rac-register.timer runs: register a
 #                              station that could not at install, then bring
 #                              the tunnel up if its operator still wants it up
@@ -685,6 +687,158 @@ true'
     return 0
 }
 
+rac_webs_in_config(){
+    # The ka9q-web pages a written configuration ($1) carries, as the lines
+    # rac_ka9q_webs prints: vm-web first (its radiod, else "-"; port 8081, the
+    # page its relay reaches), then vm-web2 and vm-web3 with their own ports.
+    # Nothing when there is no configuration.
+    [ -s "$1" ] || return 0
+    awk '
+        function flush() {
+            if (kind == 1) print name " 8081"
+            else if (kind == 2 && port != "") print name " " port
+            kind = 0
+        }
+        /^\[\[proxies\]\]/ { flush(); name = "-"; port = ""; next }
+        /^name = "/ {
+            n = $0; sub(/^name = "/, "", n); sub(/"$/, "", n)
+            if (n ~ /-vm-web$/) kind = 1; else if (n ~ /-vm-web[23]$/) kind = 2
+            next
+        }
+        /^localPort = / { port = $3; next }
+        /^radiod = "/ { r = $0; sub(/^radiod = "/, "", r); sub(/"$/, "", r); name = r; next }
+        END { flush() }
+    ' "$1"
+}
+
+rac_web_channels(){
+    # The tunnel's share of the decoder's ka9q-web pages, for site $SITE and
+    # RAC number $RACN.  It sets RAC_WEB_META (the primary page's radiod, as
+    # metadata on vm-web), RAC_WEB_EXTRA (a [[proxies]] block per extra page,
+    # each naming its radiod) and RAC_WEB_N (how many extra channels).
+    # A 2nd page has no relay; it dials the VM on the host-only /30 directly
+    # -- the address the relay itself tries first since v3.44
+    # (vm-port-relay.py).  Bare metal dials its own service.  A page on a port
+    # already carried is that page again, not another one, and takes no band.
+    # When the VM cannot be asked, the pages come from the configuration that
+    # stands ($RAC_TOML): a slow guest agent must not drop a channel the
+    # station already has.  Returns 1 then, after saying so.
+    local _webs _wline _wname _wport _wi=1 _wprimary="" _wseen=" " _wip _wbase _wentry _wrc=0
+    RAC_WEB_META=""; RAC_WEB_EXTRA=""; RAC_WEB_N=0
+    _webs=$(rac_ka9q_webs)
+    if [ -z "$_webs" ]; then
+        _wrc=1
+        _webs=$(rac_webs_in_config "$RAC_TOML")
+        if [ -n "$_webs" ]; then
+            say "  WARN: could not ask the VM for its ka9q-web pages; the radiod list is not"
+            say "  WARN: refreshed, and the tunnel keeps the pages $RAC_TOML carries"
+        else
+            say "  WARN: could not ask the VM for its ka9q-web pages; only the first page is"
+            say "  WARN: tunnelled.  Once the VM answers: sigmond-setup --rac-register"
+        fi
+    fi
+    _wip=127.0.0.1
+    [ "${RAC_MODE:-host}" = station ] || _wip=$(mgmt_vm_ip)
+    while IFS= read -r _wline; do
+        _wname=${_wline%% *}; _wport=${_wline#* }
+        [ -n "$_wname" ] && [ "$_wport" != "$_wline" ] || continue
+        case "$_wport" in *[!0-9]*|'') continue ;; esac
+        # the name lands inside a TOML string: anything but a plain radiod id is no name
+        case "$_wname" in *[!A-Za-z0-9_.-]*) _wname="-" ;; esac
+        if [ -z "$_wprimary" ]; then
+            _wprimary=$_wport; _wseen=" $_wport "
+            [ "$_wname" != "-" ] && RAC_WEB_META="
+[proxies.metadatas]
+radiod = \"$_wname\""
+            continue
+        fi
+        case "$_wseen" in *" $_wport "*) continue ;; esac
+        _wseen="$_wseen$_wport "
+        _wi=$((_wi+1))
+        case "$_wi" in
+            2) _wbase=$RAC_BASE_VMWEB2 ;;
+            3) _wbase=$RAC_BASE_VMWEB3 ;;
+            *) say "  no gateway band for a 4th ka9q-web page ($_wname on port $_wport); it is not tunnelled"
+               continue ;;
+        esac
+        _wentry=$(printf '[[proxies]]\nname = "%s-vm-web%s"\ntype = "tcp"\nlocalIP = "%s"\nlocalPort = %s\nremotePort = %s' \
+                  "$SITE" "$_wi" "$_wip" "$_wport" "$((_wbase+RACN))")
+        [ "$_wname" != "-" ] && _wentry="$_wentry
+[proxies.metadatas]
+radiod = \"$_wname\""
+        RAC_WEB_EXTRA="$RAC_WEB_EXTRA
+
+$_wentry"
+        RAC_WEB_N=$((RAC_WEB_N+1))
+    done <<WEBSEOF
+$_webs
+WEBSEOF
+    return $_wrc
+}
+
+rac_refresh_webs(){
+    # A registered host's ka9q-web channels, brought up to date: ask the VM
+    # for its pages again, and rewrite in each gateway's configuration the
+    # radiod name on vm-web and the vm-web2/vm-web3 blocks -- nothing else.
+    # The RAC number, the ports, the token and the keys stay as registered,
+    # and no gateway is asked anything.  `sigmond-setup --rac-register` runs
+    # this once a radiod has been added or removed.  A configuration that
+    # changes is written beside the live one and renamed, and its tunnel, if
+    # running, takes it up; one that does not change is left alone.
+    local _f _gw _unit _files="" _base=6
+    [ "${RAC_MODE:-host}" = station ] && _base=4
+    RACN=$(head -1 "$MARK_DIR/rac-number" 2>/dev/null)
+    case "$RACN" in
+        ''|*[!0-9]*) RAC_FAIL="this host records no RAC number; run: sigmond-setup --reconfigure"
+                     return 1 ;;
+    esac
+    SITE=$(sed -n 's/^name = "\(.*\)-vm-web"$/\1/p' "$RAC_TOML" | head -1)
+    [ -n "$SITE" ] || { RAC_FAIL="$RAC_TOML carries no vm-web channel"; return 1; }
+    if ! rac_web_channels; then
+        say "  the ka9q-web channels stay as they are"
+        return 0
+    fi
+    for _f in "$(dirname "$RAC_TOML")"/frpc-host-*.toml; do
+        [ -f "$_f" ] && [ ! -L "$_f" ] && _files="$_files $_f"
+    done
+    # a host from before one config per gateway holds a single real file
+    [ -n "$_files" ] || { [ -L "$RAC_TOML" ] || _files=" $RAC_TOML"; }
+    for _f in $_files; do
+        ( umask 077
+          RAC_WEB_META="$RAC_WEB_META" RAC_WEB_EXTRA="$RAC_WEB_EXTRA" awk '
+            function out(l) { while (nb > 0) { print ""; nb-- } print l }
+            /^$/ { if (!skip) nb++; next }
+            /^\[\[proxies\]\]$/ { pend = 1; next }
+            pend && /^name = "/ {
+                pend = 0
+                # the old 2nd/3rd page blocks go, and the blank lines before
+                # them stand for the separator that follows
+                if ($0 ~ /-vm-web[23]"$/) { skip = 1; next }
+                skip = 0; out("[[proxies]]"); inweb = ($0 ~ /-vm-web"$/)
+                out($0); next
+            }
+            pend { pend = 0; skip = 0; inweb = 0; out("[[proxies]]") }
+            skip { next }
+            inweb && (/^\[proxies\.metadatas\]$/ || /^radiod = /) { next }
+            inweb && /^remotePort = / { out($0 ENVIRON["RAC_WEB_META"] ENVIRON["RAC_WEB_EXTRA"]); next }
+            { out($0) }
+            END { if (pend) out("[[proxies]]"); if (!skip) while (nb > 0) { print ""; nb-- } }
+          ' "$_f" > "$_f.new" ) || { rm -f "$_f.new"; RAC_FAIL="could not rewrite $_f"; return 1; }
+        if cmp -s "$_f" "$_f.new"; then
+            rm -f "$_f.new"
+            continue
+        fi
+        say "rewriting the ka9q-web channels of $_f ($((_base+RAC_WEB_N)) channels)"
+        mv -f "$_f.new" "$_f" || { rm -f "$_f.new"; RAC_FAIL="could not write $_f"; return 1; }
+        case "$_f" in
+            */frpc-host-*.toml) _gw=${_f##*/frpc-host-}; _unit="sigmond-rac-host@${_gw%.toml}.service" ;;
+            *) _unit=sigmond-rac-host.service ;;
+        esac
+        systemctl try-restart "$_unit" >>"$LOG" 2>&1
+    done
+    return 0
+}
+
 rac_write_config(){
     # Turn one registration ($REG, from rac_ladder) into this host's tunnel
     # configuration and its marks.  It leaves RACN, SRV and the four gateway
@@ -700,48 +854,8 @@ rac_write_config(){
     P_VMSTN=$((RAC_BASE_VMSTN+RACN))
     P_VMGMAG=$((RAC_BASE_VMGMAG+RACN))
     # The decoder's ka9q-web pages, asked ONCE (the guest agent is slow), then
-    # written into every gateway's config: the primary page's radiod as
-    # metadata on vm-web, and one channel per extra page right after it.  A
-    # 2nd page has no relay; it dials the VM on the host-only /30 directly --
-    # the address the relay itself tries first since v3.44 (vm-port-relay.py).
-    # Bare metal dials its own service.  A page on the primary's port is the
-    # primary, not a 2nd page.
-    local _webs _wline _wname _wport _wi=0 _wprimary="" _web_meta="" _web_extra="" _wip _wbase _wentry
-    _webs=$(rac_ka9q_webs)
-    _wip=127.0.0.1
-    [ "${RAC_MODE:-host}" = station ] || _wip=$(mgmt_vm_ip)
-    while IFS= read -r _wline; do
-        _wname=${_wline%% *}; _wport=${_wline#* }
-        [ -n "$_wname" ] && [ "$_wport" != "$_wline" ] || continue
-        case "$_wport" in *[!0-9]*|'') continue ;; esac
-        # the name lands inside a TOML string: anything but a plain radiod id is no name
-        case "$_wname" in *[!A-Za-z0-9_.-]*) _wname="-" ;; esac
-        _wi=$((_wi+1))
-        if [ "$_wi" = 1 ]; then
-            _wprimary=$_wport
-            [ "$_wname" != "-" ] && _web_meta="
-[proxies.metadatas]
-radiod = \"$_wname\""
-            continue
-        fi
-        [ "$_wport" = "$_wprimary" ] && continue
-        case "$_wi" in
-            2) _wbase=$RAC_BASE_VMWEB2 ;;
-            3) _wbase=$RAC_BASE_VMWEB3 ;;
-            *) say "  no gateway band for a 4th ka9q-web page ($_wname on port $_wport); it is not tunnelled"
-               continue ;;
-        esac
-        _wentry=$(printf '[[proxies]]\nname = "%s-vm-web%s"\ntype = "tcp"\nlocalIP = "%s"\nlocalPort = %s\nremotePort = %s' \
-                  "$SITE" "$_wi" "$_wip" "$_wport" "$((_wbase+RACN))")
-        [ "$_wname" != "-" ] && _wentry="$_wentry
-[proxies.metadatas]
-radiod = \"$_wname\""
-        _web_extra="$_web_extra
-
-$_wentry"
-    done <<WEBSEOF
-$_webs
-WEBSEOF
+    # written into every gateway's config (rac_web_channels).
+    rac_web_channels
     # transport follows the tier that actually answered: a secure tier pins
     # the fleet CA, opportunistic (opp) encrypts without pinning (server cert
     # is self-signed — vpn.hamsci.org today), and an unsecured one has no TLS.
@@ -767,9 +881,9 @@ WEBSEOF
         [ -n "$_first" ] || _first="$_toml"
         RAC_UNITS="${RAC_UNITS:+$RAC_UNITS }sigmond-rac-host@$_gwname.service"
         if [ "${RAC_MODE:-host}" = station ]; then
-            say "writing $_toml (4 channels, gateway $_gwname at $_gwhost:$_gwport)"
+            say "writing $_toml ($((4+RAC_WEB_N)) channels, gateway $_gwname at $_gwhost:$_gwport)"
         else
-            say "writing $_toml (6 channels, gateway $_gwname at $_gwhost:$_gwport)"
+            say "writing $_toml ($((6+RAC_WEB_N)) channels, gateway $_gwname at $_gwhost:$_gwport)"
         fi
     # Write beside the live file under a closed umask, then rename: the file
     # holds the station's token, and frpc must never read half of it.
@@ -814,7 +928,7 @@ name = "${SITE}-vm-web"
 type = "tcp"
 localIP = "127.0.0.1"
 localPort = 8081
-remotePort = $P_VMWEB${_web_meta}${_web_extra}
+remotePort = $P_VMWEB${RAC_WEB_META}${RAC_WEB_EXTRA}
 
 [[proxies]]
 name = "${SITE}-vm-station"
@@ -879,7 +993,7 @@ name = "$SITE-vm-web"
 type = "tcp"
 localIP = "127.0.0.1"
 localPort = 12223
-remotePort = $P_VMWEB${_web_meta}${_web_extra}
+remotePort = $P_VMWEB${RAC_WEB_META}${RAC_WEB_EXTRA}
 
 [[proxies]]
 name = "$SITE-vm-station"
@@ -955,6 +1069,10 @@ rac_register_locked(){
     if [ "$mode" = ensure ] && [ -s "$RAC_TOML" ]; then
         return 0
     fi
+    if [ "$mode" = refresh ] && [ -s "$RAC_TOML" ]; then
+        rac_refresh_webs
+        return
+    fi
     SITE=$(rac_site_name)
     if [ -z "$SITE" ]; then
         if [ "${RAC_MODE:-host}" = station ]; then
@@ -993,8 +1111,11 @@ rac_register_locked(){
 }
 
 rac_register(){
-    # rac_register ensure|fresh
+    # rac_register ensure|refresh|fresh
     #   ensure  register only a host that holds no tunnel configuration yet
+    #   refresh as ensure, and on a host that is registered, bring its
+    #           ka9q-web channels up to date with the VM's radiods
+    #           (rac_refresh_webs); nothing else in the configuration changes
     #   fresh   register again even so.  A wizard run does, because the
     #           reporter id may have changed.  A failed fresh run leaves the
     #           old configuration as it stands.
@@ -2311,7 +2432,9 @@ case "${1:-}" in
     --rac-register)
         # Registration alone.  No question, no decoder VM, and no start:
         # this branch exits before the wizard waits for anything.
-        if rac_register ensure; then
+        # On a registered host it also brings the ka9q-web channels up to
+        # date with the VM's radiods, keeping the RAC number and ports.
+        if rac_register refresh; then
             say "registered: RAC #$(cat "$MARK_DIR/rac-number" 2>/dev/null) via $(cat "$MARK_DIR/rac-tier" 2>/dev/null)"
             exit 0
         fi

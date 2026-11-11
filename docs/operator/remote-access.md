@@ -135,10 +135,14 @@ radiod, and the RAC page shows the pages side by side, labelled by radiod.
 | **VM web, 2nd radiod** | the second radiod's ka9q-web page (its own port on the VM) | 46800 + your RAC number |
 | **VM web, 3rd radiod** | the third radiod's ka9q-web page | 47800 + your RAC number |
 
-The host asks the VM for its pages when it registers, so a radiod added later
-is not tunnelled until the registration is redone: run
-`sigmond-setup --rac-register` on the host once the new radiod's ka9q-web is
-up. A fourth page has no band and is left out; the wizard says so.
+The host asks the VM for its pages when it registers. After you add or remove
+a radiod, run `sigmond-setup --rac-register` on the host once the new radiod's
+ka9q-web answers. On a registered host that command asks the VM again and
+rewrites only the ka9q-web channels. The RAC number, the ports and the keys
+stay as they were, and the gateway sees no new registration. When the VM does
+not answer, the command and a wizard rerun both keep the web channels the
+station already has, and say so. A fourth page has no band; the wizard leaves
+it out and says so.
 
 (Source: `sigmond/scripts/proxmox/sigmond-wizard.sh`, the `RAC_BASE_*` values,
 and each station's `/etc/sigmond/frpc-host.toml`. The console panel on the

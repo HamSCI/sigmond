@@ -395,6 +395,10 @@ def test_the_page_says_a_multi_radiod_decoder_adds_a_web_channel_per_radiod():
     assert re.search(r"RAC_BASE_VMWEB2=46800\b", WIZARD) and re.search(r"RAC_BASE_VMWEB3=47800\b", WIZARD)
     assert "46800 + your RAC number" in PAGE and "47800 + your RAC number" in PAGE
     assert "sigmond-setup --rac-register" in PAGE
+    # ... and that, on a registered host, it rewrites the web channels alone
+    flat = " ".join(PAGE.split())
+    assert "rewrites only the ka9q-web channels" in flat
+    assert "rac_register refresh" in WIZARD and "rac_refresh_webs" in WIZARD
     # the wizard tells the operator when a 4th page cannot be carried
     assert "no gateway band for a 4th ka9q-web page" in WIZARD
 

@@ -91,7 +91,9 @@ def write_config(tmp_path, existing):
         REG='RACN=229 RUSER=u RTOKEN=t P_VMSSH=36029 P_VMWEB=46029 P_HSSH=51029 P_HUI=56029 SRV=vpn1.hamsci.org SPORT=35736'
         say(){{ :; }}
         systemctl(){{ echo "SYSTEMCTL $*" >> {tmp_path}/systemctl.calls; }}
+        mgmt_vm_ip(){{ echo 10.99.0.2; }}
     """) + shell_func("rac_gateway_set") + shell_func("rac_write_config") + \
+        shell_func("rac_ka9q_webs") + shell_func("rac_webs_in_config") + shell_func("rac_web_channels") + \
         "\nrac_write_config\nls -1 %s | tr '\\n' ' '\necho\n" % etc
 
 
