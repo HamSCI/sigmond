@@ -186,7 +186,11 @@ class RekeyTests(unittest.TestCase):
         steps = R.apply(self.root, run=sc, units=self.units)
         self.assertTrue((self.root / "etc/psk-recorder/AI6VN=1.toml").exists())
         self.assertTrue(any("already exists" in s for s in steps), steps)
-        self.assertFalse([c for c in sc.calls if c[0] in ("enable", "start")])
+        # nothing touched: the old unit keeps running, nothing renamed
+        self.assertFalse([c for c in sc.calls
+                          if c[0] in ("stop", "disable", "enable", "start")])
+        self.assertTrue((self.root / "etc/psk-recorder/env/AI6VN=1.env").exists())
+        self.assertFalse((self.root / "etc/psk-recorder/env/AI6VN-1.env").exists())
 
     def test_an_existing_reporter_id_is_kept(self):
         (self.root / "etc/psk-recorder/AI6VN=1.toml").write_text(

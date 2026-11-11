@@ -205,6 +205,19 @@ def apply(root: Path = Path("/"), *, dry_run: bool = False,
 
     reload_needed = False
     for r in items:
+        # Look before touching anything: an instance whose move would land on
+        # a different existing file is left exactly as it is -- unit running,
+        # nothing renamed -- rather than stopped and half-moved.
+        clash = [dst for src, dst in r.moves if dst.exists()
+                 and not (src.is_file() and dst.is_file()
+                          and filecmp.cmp(src, dst, shallow=False))]
+        if clash:
+            for dst in clash:
+                steps.append(f"WARN: {dst} already exists and differs; "
+                             f"{r.client}@{display_reporter_id(r.storage)} "
+                             "left untouched (still running under "
+                             f"{r.old_unit}) — resolve by hand")
+            continue
         was_enabled = was_active = False
         old_known = r.storage in {_old_storage(n)
                                   for n in live.get(r.client, ())}
