@@ -205,21 +205,27 @@ Since 2026-11-11 an image is built from the newest commit of every repo's
 default branch, tested as a set, and stations are pinned to that set (rob).
 
 - **`/etc/sigmond/component-pins.toml`** — `[pins] "<component>" = "<sha>"`.
-  For the four sources sigmond pins in code (ka9q-radio, onion, wsjtx,
-  ubersdr_wsprd) an entry here **wins** over the constant in `bin/smd`
-  (`_ONION_COMMIT` …) and over ka9q-python's compat commit.  Every lookup
-  goes through `_native_pin()` / `_ka9q_radio_pin()`, so builds, `smd
-  update` and `smd doctor` agree.  No file or no entry: the constants
-  apply, as before.  Other components keep their `.pin` holds; their
-  entries are the record of the set.
-- **`SIGMOND_TRACK_MAIN=1`** — those four resolve to `git ls-remote <repo>
-  HEAD` instead of their pin, and each successful build records the commit
-  it built in the pin file.  The image build sets it; nothing else should.
+  For onion and ubersdr_wsprd (pinned in code in `bin/smd`) an entry here
+  **wins** over the constant (`_ONION_COMMIT` …); every lookup goes through
+  `_native_pin()`, so builds, `smd update` and `smd doctor` agree.  No file
+  or no entry: the constants apply, as before.  Other components keep their
+  `.pin` holds; their entries are the record of the set.
+- **ka9q-radio has one owner: ka9q-python.**  Its pin is ka9q-python's
+  compat commit (`sync_types.py --apply`), never the pin file and never
+  track-main.  ka9q-python follows main like any component, so an image gets
+  the newest ka9q-radio ka9q-python was validated against.
+- **Pinned on purpose:** wsjtx and ft8_lib (fallback decoders,
+  `provenance.PINNED_ON_PURPOSE`).  Nothing moves them but a hand-bumped pin;
+  `smd version` shows them as `pinned`.
+- **`SIGMOND_TRACK_MAIN=1`** — onion and ubersdr_wsprd resolve to `git
+  ls-remote <repo> HEAD` instead of their pin, and each successful build
+  records the commit it built in the pin file.  The image build sets it;
+  nothing else should.
 - **`smd update --latest [--apply]`** — the test-station verb: every
-  checkout to its default branch tip (holds ignored, `.pin` released),
-  ka9q-radio and the native builds rebuilt there, `smd restart` (radiod
-  first), then every component's commit written to the pin file.  Plain
-  `smd update` is unchanged.
+  checkout to its default branch tip (`.pin` released), ka9q-radio rebuilt at
+  ka9q-python's new compat commit, onion/ubersdr rebuilt at their tips,
+  `smd restart` (radiod first), then the commits written to the pin file.
+  Plain `smd update` is unchanged.
 
 ## The `.provenance` sidecar
 

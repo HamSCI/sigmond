@@ -81,9 +81,16 @@ class PinFilePrecedence(_PinFile):
         self.pins.write_text("[pins\n")
         self.assertEqual(smd._read_component_pins(), {})
 
-    def test_ka9q_radio_entry_wins_over_ka9q_python_compat(self):
+    def test_ka9q_radio_pin_belongs_to_ka9q_python_alone(self):
+        # A ka9q-radio entry in the pin file, and track-main, are both
+        # ignored: ka9q-python's compat commit is the one owner (mjh, 11-11).
         self.pins.write_text(f'[pins]\n"ka9q-radio" = "{D}"\n')
-        self.assertEqual(smd._ka9q_radio_pin(), D)
+        os.environ["SIGMOND_TRACK_MAIN"] = "1"
+        fake = mock.MagicMock(KA9Q_RADIO_COMMIT=C)
+        with mock.patch.dict("sys.modules", {"ka9q.compat": fake}), \
+             mock.patch.object(smd, "_run") as run:
+            self.assertEqual(smd._ka9q_radio_pin(), C)
+        run.assert_not_called()
 
     def test_wsjtx_label_names_the_tag_only_at_the_tagged_commit(self):
         self.assertEqual(smd._wsjtx_ref_label(smd._WSJTX_COMMIT),
@@ -109,19 +116,17 @@ class TrackMain(_PinFile):
         self.write(onion=A)    # the pin file loses to track-main
         calls, p = self._ls_remote({smd._ONION_REPO: B,
                                     smd._WSJTX_REPO: C,
-                                    smd._UBERSDR_REPO: D,
-                                    smd._KA9Q_RADIO_REPO: A})
+                                    smd._UBERSDR_REPO: D})
         with p:
             # wsjtx is pinned on purpose: track-main leaves it at its pin.
             self.assertEqual(smd._native_build_pins(),
                              {"onion": B, "wsjtx": smd._WSJTX_COMMIT,
                               "ubersdr_wsprd": D})
-            self.assertEqual(smd._ka9q_radio_pin(), A)
             smd._native_pin("onion")
         self.assertTrue(all(c[:3] == ["git", "ls-remote", c[2]]
                             and c[3] == "HEAD" for c in calls))
-        # one ls-remote per url per run, and none for wsjtx
-        self.assertEqual(len(calls), 3)
+        # one ls-remote per url per run, none for wsjtx or ka9q-radio
+        self.assertEqual(len(calls), 2)
         self.assertNotIn(smd._WSJTX_REPO, [c[2] for c in calls])
 
     def test_unreachable_remote_falls_back_to_the_pin(self):
@@ -298,6 +303,28 @@ class VersionShowsPinnedOnPurpose(unittest.TestCase):
         src = (REPO / "bin" / "smd").read_text()
         self.assertIn("aliases=['versions']", src)
         self.assertIn("'versions': cmd_version", src)
+
+
+class Ka9qRadioTargetsKa9qPythonMain(unittest.TestCase):
+    """--latest moves ka9q-radio to the compat commit on ka9q-python's main,
+    never to ka9q-radio's own main."""
+
+    def test_reads_compat_from_ka9q_python_default_branch(self):
+        with tempfile.TemporaryDirectory() as t:
+            kp = Path(t) / "ka9q-python"
+            kp.mkdir()
+            g = ["git", "-C", str(kp), "-c", "user.email=t@t", "-c", "user.name=t"]
+            subprocess.run(g[:3] + ["init", "-q"], check=True)
+            (kp / "ka9q_radio_compat").write_text(B + "\n")
+            subprocess.run(g + ["add", "."], check=True)
+            subprocess.run(g + ["commit", "-qm", "x"], check=True)
+            (kp / "ka9q_radio_compat").write_text(C + "\n")   # uncommitted: ignored
+            with mock.patch.object(smd, "_git_default_ref", return_value="HEAD"):
+                self.assertEqual(smd._ka9q_python_main_compat(kp), B)
+
+    def test_unreadable_gives_empty(self):
+        with mock.patch.object(smd, "_git_default_ref", return_value=""):
+            self.assertEqual(smd._ka9q_python_main_compat(Path("/nonexistent")), "")
 
 
 if __name__ == "__main__":

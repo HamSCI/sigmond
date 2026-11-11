@@ -1063,19 +1063,13 @@ def _ka9q_radio_pin() -> Optional[str]:
     ``scripts/sync_types.py --apply``, then rebuild).  Returns None when no pin
     is discoverable (caller falls back to current HEAD).
 
-    SIGMOND_TRACK_MAIN=1 resolves to ka9q-radio's newest main commit, and a
-    `ka9q-radio` entry in the station pin file (_COMPONENT_PINS_FILE) wins
-    over ka9q-python's compat commit — the image's tested set (rob,
-    2026-11-11)."""
-    if _track_main():
-        head = _remote_head(_KA9Q_RADIO_REPO)
-        if head:
-            return head
-        _warn('ka9q-radio: SIGMOND_TRACK_MAIN=1 but its remote is '
-              'unreachable — using the pin')
-    pinned = _read_component_pins().get('ka9q-radio')
-    if pinned:
-        return pinned
+    ka9q-python is the ONE owner of this pin.  Neither SIGMOND_TRACK_MAIN
+    nor the station pin file moves it: radiod's newest main reaches an image
+    by ka9q-python's main moving its compat commit (sync_types --apply) --
+    ka9q-python follows main like every other component, so the image gets
+    the newest ka9q-radio ka9q-python was validated against (mjh, bus
+    2026-11-11T213633Z: a radiod moved past ka9q-python's pin, as `--unpin`
+    did on B4, runs untested wire code)."""
     try:
         from ka9q.compat import KA9Q_RADIO_COMMIT
         if KA9Q_RADIO_COMMIT and KA9Q_RADIO_COMMIT != 'unknown':
@@ -1391,14 +1385,14 @@ def _git_head(repo: Path) -> str:
 # from the image holds exactly it.  `smd update --latest --apply` rewrites
 # it on a station.
 #
-# For the four sources sigmond pins in code — ka9q-radio (ka9q-python's
-# compat commit) and the native builds onion, wsjtx and ubersdr_wsprd — an
-# entry here WINS over the constant: every lookup goes through
-# _native_pin() / _ka9q_radio_pin(), so a build, `smd update` and `smd
-# doctor` agree on one commit and nothing rebuilds a source back to the
-# constant.  With no file, or no entry, the constants apply exactly as
-# before.  The other components' holds stay their `.pin` files; their
-# entries here are the record of the set.
+# For onion and ubersdr_wsprd (pinned in code below) an entry here WINS over
+# the constant: every lookup goes through _native_pin(), so a build, `smd
+# update` and `smd doctor` agree on one commit and nothing rebuilds a source
+# back to the constant.  With no file, or no entry, the constants apply as
+# before.  NOT ka9q-radio: its one owner is ka9q-python's compat commit
+# (_ka9q_radio_pin).  NOT wsjtx/ft8_lib: pinned on purpose
+# (provenance.PINNED_ON_PURPOSE).  Other components' holds stay their `.pin`
+# files; their entries here are the record of the set.
 _COMPONENT_PINS_FILE = Path('/etc/sigmond/component-pins.toml')
 _SHA_RE = re.compile(r'^[0-9a-f]{40}$')
 _REMOTE_HEADS: dict = {}          # url -> sha, one ls-remote per url per run
@@ -5285,8 +5279,8 @@ def _plan_latest(rows: list) -> list:
             continue
         if r['kind'] == 'radiod':
             radiod.append(('radiod', name,
-                           f'{span}; rebuild with the RX888 driver, '
-                           f'make install'))
+                           f"{span} (ka9q-python's compat commit); rebuild "
+                           f'with the RX888 driver, make install'))
         elif r['kind'] == 'native':
             b = r.get('builder') or name
             if b not in seen_builders:
@@ -5306,6 +5300,19 @@ def _plan_latest(rows: list) -> list:
         plan.append(('pins', str(_COMPONENT_PINS_FILE),
                      'record the commit every component now sits at'))
     return plan
+
+
+def _ka9q_python_main_compat(kp: Path) -> str:
+    """The ka9q_radio_compat commit on ka9q-python's default branch (as last
+    fetched), '' when it can't be read."""
+    ref = _git_default_ref(kp) if kp.is_dir() else ''
+    if not ref:
+        return ''
+    r = subprocess.run(['git', '-c', f'safe.directory={kp}', '-C', str(kp),
+                        'show', f'{ref}:ka9q_radio_compat'],
+                       capture_output=True, text=True)
+    v = r.stdout.strip() if r.returncode == 0 else ''
+    return v if _SHA_RE.match(v) else ''
 
 
 def _latest_rows(checkouts) -> list:
@@ -5330,6 +5337,17 @@ def _latest_rows(checkouts) -> list:
             behind = c.stdout.strip()
         kind = ('native' if d.name in natives else
                 'radiod' if d.name == 'ka9q-radio' else 'component')
+        if kind == 'radiod':
+            # ka9q-radio's target is ka9q-python's compat commit on
+            # ka9q-python's main (the pin it will carry once it moves),
+            # not ka9q-radio's own main.
+            compat = _ka9q_python_main_compat(Path(d).parent / 'ka9q-python')
+            tip = compat or _ka9q_radio_pin() or ''
+            if tip:
+                c = subprocess.run(['git', '-c', f'safe.directory={d}', '-C', str(d),
+                                    'rev-list', '--count', f'HEAD..{tip}'],
+                                   capture_output=True, text=True)
+                behind = c.stdout.strip()
         try:
             owner = d.owner()
         except Exception:                               # noqa: BLE001
@@ -5400,7 +5418,7 @@ def _cmd_update_latest(args, base: Path, checkouts) -> int:
                                  '--yes'], 'ka9q-radio', 'install',
                                 track_main=True)
             if rc == 0:
-                _ok('ka9q-radio: built at the tip of main')
+                _ok("ka9q-radio: built at ka9q-python's compat commit")
                 _record_update_step('latest ka9q-radio')
             else:
                 _err(f'ka9q-radio: build exit {rc}')
@@ -5474,7 +5492,8 @@ def _latest_record_pins(rows: list, failed: set) -> None:
     pinned at a commit no binary was built from."""
     pins = {}
     for r in rows:
-        if r['name'] in failed:
+        # ka9q-radio's pin belongs to ka9q-python alone (_ka9q_radio_pin).
+        if r['name'] in failed or r['name'] == 'ka9q-radio':
             continue
         head = _git_head(r['dir'])
         if head:
