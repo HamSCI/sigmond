@@ -949,7 +949,11 @@ def _need_root(cmd_name: str) -> bool:
         # the marker is what distinguishes it from a human typing `sudo smd`.
         # The flag inherits to every child process, so a root smd's sub-smd
         # calls (e.g. bringup's install steps) are covered too.
-        os.execvp(sudo, [sudo, '--', 'env', 'SIGMOND_ALLOW_SUDO=1',
+        # SIGMOND_TRACK_MAIN rides along the same way: the image build sets
+        # it for `smd install`, and env_reset would otherwise drop it here,
+        # silently building the old pins (rob, 2026-11-11).
+        keep = ['SIGMOND_TRACK_MAIN=1'] if _track_main() else []
+        os.execvp(sudo, [sudo, '--', 'env', 'SIGMOND_ALLOW_SUDO=1', *keep,
                          sys.argv[0], *sys.argv[1:]])
         # execvp doesn't return on success; if it does, fall through.
     print(f'smd {cmd_name}: must run as root (sudo not found on PATH)',
@@ -1045,6 +1049,9 @@ def _ensure_venv(venv_dir: Path) -> bool:
     return True
 
 
+_KA9Q_RADIO_REPO = 'https://github.com/ka9q/ka9q-radio'
+
+
 def _ka9q_radio_pin() -> Optional[str]:
     """The ka9q-radio commit ka9q-python was validated against — the same pin
     ``rule_ka9q_python_compat`` checks (``ka9q.compat.KA9Q_RADIO_COMMIT``, with
@@ -1054,7 +1061,21 @@ def _ka9q_radio_pin() -> Optional[str]:
     against the wire-protocol headers the Python clients decode against;
     advancing ka9q-radio is a deliberate step (bump the pin via
     ``scripts/sync_types.py --apply``, then rebuild).  Returns None when no pin
-    is discoverable (caller falls back to current HEAD)."""
+    is discoverable (caller falls back to current HEAD).
+
+    SIGMOND_TRACK_MAIN=1 resolves to ka9q-radio's newest main commit, and a
+    `ka9q-radio` entry in the station pin file (_COMPONENT_PINS_FILE) wins
+    over ka9q-python's compat commit — the image's tested set (rob,
+    2026-11-11)."""
+    if _track_main():
+        head = _remote_head(_KA9Q_RADIO_REPO)
+        if head:
+            return head
+        _warn('ka9q-radio: SIGMOND_TRACK_MAIN=1 but its remote is '
+              'unreachable — using the pin')
+    pinned = _read_component_pins().get('ka9q-radio')
+    if pinned:
+        return pinned
     try:
         from ka9q.compat import KA9Q_RADIO_COMMIT
         if KA9Q_RADIO_COMMIT and KA9Q_RADIO_COMMIT != 'unknown':
@@ -1159,6 +1180,7 @@ def _build_ka9q_radio(src_dir: Path, force: bool = False) -> bool:
          'url': _git_remote_url(src_dir) or 'https://github.com/ka9q/ka9q-radio',
          'sha': _git_head(src_dir)},
     ], builder='_build_ka9q_radio')
+    _pin_if_tracking('ka9q-radio', _git_head(src_dir))
     return True
 
 
@@ -1360,6 +1382,143 @@ def _git_head(repo: Path) -> str:
     return r.stdout.strip() if r.returncode == 0 else ''
 
 
+# ── the station's pin set: /etc/sigmond/component-pins.toml ─────────────
+#
+# rob, 2026-11-11: "each image file [has] a pinned set of commits off the
+# main trunk of the associated git repo."  An image build takes the newest
+# commit of every repo's default branch (SIGMOND_TRACK_MAIN=1), the ladder
+# tests that set, and the set is written here so every station installed
+# from the image holds exactly it.  `smd update --latest --apply` rewrites
+# it on a station.
+#
+# For the four sources sigmond pins in code — ka9q-radio (ka9q-python's
+# compat commit) and the native builds onion, wsjtx and ubersdr_wsprd — an
+# entry here WINS over the constant: every lookup goes through
+# _native_pin() / _ka9q_radio_pin(), so a build, `smd update` and `smd
+# doctor` agree on one commit and nothing rebuilds a source back to the
+# constant.  With no file, or no entry, the constants apply exactly as
+# before.  The other components' holds stay their `.pin` files; their
+# entries here are the record of the set.
+_COMPONENT_PINS_FILE = Path('/etc/sigmond/component-pins.toml')
+_SHA_RE = re.compile(r'^[0-9a-f]{40}$')
+_REMOTE_HEADS: dict = {}          # url -> sha, one ls-remote per url per run
+
+
+def _track_main() -> bool:
+    """SIGMOND_TRACK_MAIN=1: resolve the code-pinned sources to their
+    remote default branch's newest commit instead of their pin (the image
+    build, and `smd update --latest`)."""
+    return os.environ.get('SIGMOND_TRACK_MAIN', '') == '1'
+
+
+def _read_component_pins() -> dict:
+    """{component: full sha} from the pin file; {} when absent/unreadable.
+    An entry that is not a full 40-hex sha is ignored, not trusted."""
+    try:
+        import tomllib
+        data = tomllib.loads(_COMPONENT_PINS_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+    pins = data.get('pins') if isinstance(data, dict) else None
+    if not isinstance(pins, dict):
+        return {}
+    return {str(k): v.strip().lower() for k, v in pins.items()
+            if isinstance(v, str) and _SHA_RE.match(v.strip().lower())}
+
+
+def _render_component_pins(pins: dict) -> str:
+    from datetime import datetime, timezone
+    at = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    lines = ['# Written by smd; the commit every component is pinned to.',
+             '# See _COMPONENT_PINS_FILE in bin/smd.',
+             f'# updated {at}', '', '[pins]']
+    for k in sorted(pins):
+        lines.append(f'"{k}" = "{pins[k]}"')
+    return '\n'.join(lines) + '\n'
+
+
+def _record_component_pins(updates: dict) -> bool:
+    """Merge {component: sha} into the pin file (root-owned, 0644)."""
+    good = {k: v for k, v in updates.items() if v and _SHA_RE.match(v)}
+    if not good:
+        return False
+    pins = _read_component_pins()
+    pins.update(good)
+    text = _render_component_pins(pins)
+    try:
+        if os.geteuid() == 0:
+            _COMPONENT_PINS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = _COMPONENT_PINS_FILE.with_suffix('.toml.tmp')
+            tmp.write_text(text)
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, _COMPONENT_PINS_FILE)
+        else:
+            _install_root_text(text, _COMPONENT_PINS_FILE)
+    except OSError as exc:
+        _warn(f'component pins: could not write {_COMPONENT_PINS_FILE}: {exc}')
+        return False
+    return True
+
+
+def _remote_head(url: str) -> str:
+    """The newest commit of `url`'s default branch (`git ls-remote url
+    HEAD`), '' when unreachable.  Cached per run so a build and its checks
+    see one answer."""
+    if url in _REMOTE_HEADS:
+        return _REMOTE_HEADS[url]
+    r = _run(['git', 'ls-remote', url, 'HEAD'])
+    sha = ''
+    if r.returncode == 0:
+        first = (r.stdout or '').split()
+        if first and _SHA_RE.match(first[0]):
+            sha = first[0]
+    _REMOTE_HEADS[url] = sha
+    return sha
+
+
+# Keyed by the component's NAME (the pin file's key), not by the checkout
+# directory, which tests and odd layouts may point elsewhere.
+def _native_repos() -> dict:
+    return {'onion': _ONION_REPO, 'wsjtx': _WSJTX_REPO,
+            'ubersdr_wsprd': _UBERSDR_REPO}
+
+
+def _native_constants() -> dict:
+    return {'onion': _ONION_COMMIT, 'wsjtx': _WSJTX_COMMIT,
+            'ubersdr_wsprd': _UBERSDR_COMMIT}
+
+
+def _native_pin(name: str) -> str:
+    """The commit a native source (onion, wsjtx, ubersdr_wsprd) is built
+    from.  SIGMOND_TRACK_MAIN=1: its remote default branch's newest commit.
+    Else the station pin file's entry.  Else sigmond's constant.  Reads the
+    constants at call time, so patching one still moves the answer."""
+    const = _native_constants()[name]
+    if _track_main():
+        head = _remote_head(_native_repos()[name])
+        if head:
+            return head
+        _warn(f'{name}: SIGMOND_TRACK_MAIN=1 but its remote is unreachable '
+              f'— using the pin {const[:12]}')
+    return _read_component_pins().get(name) or const
+
+
+def _pin_if_tracking(name: str, sha: str) -> None:
+    """After a successful build under SIGMOND_TRACK_MAIN=1, record the
+    commit it was built from in the station pin file, so the next build,
+    `smd update` and `smd doctor` hold it there rather than returning it to
+    sigmond's constant.  Outside track-main the file is left alone: a
+    sigmond that moves a constant still moves the station."""
+    if _track_main() and sha:
+        if _record_component_pins({name: sha}):
+            _info(f'{name}: pinned at {sha[:12]} in {_COMPONENT_PINS_FILE}')
+
+
+def _wsjtx_ref_label(pin: str) -> str:
+    """`v3.0.2` at the tagged pin; `main@<sha9>` anywhere else."""
+    return _WSJTX_TAG if pin.startswith(_WSJTX_COMMIT) else f'main@{pin[:9]}'
+
+
 def _native_build_pins() -> dict:
     """Upstream sources sigmond's own native builds pin: checkout directory
     name -> the commit the build checks out.
@@ -1379,11 +1538,9 @@ def _native_build_pins() -> dict:
     /opt/git/sigmond and checks a commit out.  jt9-decode does not belong:
     it lives vendored inside psk-recorder's checkout, which has its own state.
     """
-    return {
-        _ONION_SRC.name: _ONION_COMMIT,
-        _WSJTX_SRC.name: _WSJTX_COMMIT,
-        _UBERSDR_SRC.name: _UBERSDR_COMMIT,
-    }
+    return {_ONION_SRC.name: _native_pin('onion'),
+            _WSJTX_SRC.name: _native_pin('wsjtx'),
+            _UBERSDR_SRC.name: _native_pin('ubersdr_wsprd')}
 
 
 # The build that returns each pinned source to its pin, for the off-pin
@@ -1851,7 +2008,8 @@ def cmd_admin_native_build(args) -> int:
 
 
 def _run_native_build_step(builder: str, base: Path, *,
-                           tail_lines: int = 15) -> int:
+                           tail_lines: int = 15,
+                           track_main: bool = False) -> int:
     """`smd update`'s native-build step: run `smd admin native-build
     --apply <builder>` as the smd ON DISK.
 
@@ -1859,19 +2017,33 @@ def _run_native_build_step(builder: str, base: Path, *,
     pin constants may be the old ones; the file on disk carries the pins
     the pulled sigmond names.  The full output goes to UPDATE_LOG_DIR, as
     install.sh's does."""
+    return _run_smd_child(['admin', 'native-build', '--apply',
+                           '--base', str(base), builder],
+                          builder, 'native-build', tail_lines=tail_lines,
+                          track_main=track_main)
+
+
+def _run_smd_child(argv_tail: list, log_target: str, what: str, *,
+                   tail_lines: int = 15, track_main: bool = False) -> int:
+    """Run the smd ON DISK as root with `argv_tail`; full output to
+    UPDATE_LOG_DIR, the tail printed.  `track_main` carries
+    SIGMOND_TRACK_MAIN=1 into the child — sudo resets the environment, so
+    it has to be named on the `env` line."""
     smd_path = str(Path(__file__).resolve())
-    argv = [sys.executable, smd_path, 'admin', 'native-build', '--apply',
-            '--base', str(base), builder]
+    argv = [sys.executable, smd_path, *argv_tail]
     # As root, like install.sh's step beside it: the ownership repair, the
     # history line and the failure record all need it, and a builder's own
     # `sudo` would otherwise prompt inside this captured child.  `-n`: a
     # password prompt here hangs the update instead of failing it.
     # SIGMOND_ALLOW_SUDO=1 is smd's own elevation marker (_need_root).
+    env = ['SIGMOND_TRACK_MAIN=1'] if track_main else []
     if os.geteuid() != 0:
-        argv = ['sudo', '-n', 'env', 'SIGMOND_ALLOW_SUDO=1'] + argv
+        argv = ['sudo', '-n', 'env', 'SIGMOND_ALLOW_SUDO=1', *env] + argv
+    elif env:
+        argv = ['env', *env] + argv
     r = subprocess.run(argv, capture_output=True, text=True,
                        stdin=subprocess.DEVNULL)
-    logpath = _write_update_log(builder, r, what='native-build')
+    logpath = _write_update_log(log_target, r, what=what)
     lines = ((r.stdout or '') + (r.stderr or '')).strip().splitlines()
     for line in lines[-(tail_lines if r.returncode else 3):]:
         print(f'  | {line}')
@@ -1988,9 +2160,9 @@ def _expected_build_pins() -> dict:
     drift-checked.  Extend as more upstream-built deps adopt the pin+manifest
     pattern (docs/native-binaries.md)."""
     return {
-        'ka9q-web': {'onion': _ONION_COMMIT},
-        'wsjtx-decoders': {'wsjtx': _WSJTX_COMMIT},
-        'ubersdr-decoders': {'ubersdr_wsprd': _UBERSDR_COMMIT},
+        'ka9q-web': {'onion': _native_pin('onion')},
+        'wsjtx-decoders': {'wsjtx': _native_pin('wsjtx')},
+        'ubersdr-decoders': {'ubersdr_wsprd': _native_pin('ubersdr_wsprd')},
     }
 
 
@@ -2196,7 +2368,7 @@ def _build_ka9q_web_with_onion(src_dir: Path, *, force: bool = False) -> bool:
         if not _install_radiod_deps():
             return False
         onion_url    = _ONION_REPO
-        onion_commit = _ONION_COMMIT
+        onion_commit = _native_pin('onion')
 
         if not onion_src.exists():
             _info(f'Cloning onion → {onion_src} ...')
@@ -2234,8 +2406,9 @@ def _build_ka9q_web_with_onion(src_dir: Path, *, force: bool = False) -> bool:
          'url': _git_remote_url(src_dir) or 'https://github.com/ka9q/ka9q-web',
          'sha': _git_head(src_dir)},
         {'name': 'onion', 'url': _ONION_REPO, 'ref': 'master',
-         'pin': _ONION_COMMIT, 'sha': _git_head(onion_src)},
+         'pin': _native_pin('onion'), 'sha': _git_head(onion_src)},
     ], builder='_build_ka9q_web_with_onion')
+    _pin_if_tracking('onion', _git_head(onion_src))
     return True
 
 
@@ -2275,6 +2448,7 @@ def _build_wsjtx_decoders() -> bool:
     marker.  Measured gain (2026-07-22): ~1.5x on jt9 DEEP decode only; the case
     is reproducibility / current-version (3.0.2 vs Debian 2.7.0) / licensing.
     """
+    pin = _native_pin('wsjtx')
     prefix = Path('/usr/local')
     # Installed into its own slot, NOT /usr/local/bin: the two implementations
     # sit side by side and /usr/local/bin/{wsprd,jt9} are symlinks into one of
@@ -2288,8 +2462,8 @@ def _build_wsjtx_decoders() -> bool:
     # Idempotency: the installed build already matches this pin.
     if jt9.exists() and wsprd.exists():
         try:
-            if _WSJTX_COMMIT in marker.read_text():
-                _ok(f'wsjtx-decoders: already installed from {_WSJTX_TAG}')
+            if pin in marker.read_text():
+                _ok(f'wsjtx-decoders: already installed from {_wsjtx_ref_label(pin)}')
                 _build_jt9_decode()   # best-effort; own idempotency + logging
                 return True
         except OSError:
@@ -2322,11 +2496,11 @@ def _build_wsjtx_decoders() -> bool:
         if r.returncode != 0:
             _err(f'git clone wsjtx failed: {r.stderr.strip()}')
             return False
-    if not _git_head(src).startswith(_WSJTX_COMMIT):
+    if not _git_head(src).startswith(pin):
         _native_git(src, 'fetch', '--quiet', '--tags', 'origin')
-        r = _native_git(src, 'checkout', '--quiet', _WSJTX_COMMIT)
+        r = _native_git(src, 'checkout', '--quiet', pin)
         if r.returncode != 0:
-            _err(f'wsjtx: checkout {_WSJTX_COMMIT[:12]} failed: {r.stderr.strip()}')
+            _err(f'wsjtx: checkout {pin[:12]} failed: {r.stderr.strip()}')
             return False
 
     # NO source modification.  We deliberately KEEP upstream's -fbounds-check in
@@ -2336,7 +2510,7 @@ def _build_wsjtx_decoders() -> bool:
     # live 20m audio 2026-07-22 (jt9's FT8 path was unaffected, but wsprd broke).
     # -fbounds-check inhibits the offending vectorization at ~no cost (native +
     # bounds-check decoded a real window in 0.73s vs Debian 2.7.0's 2.71s).
-    mods = (f'Sigmond build note for WSJT-X {_WSJTX_TAG} ({_WSJTX_COMMIT}):\n'
+    mods = (f'Sigmond build note for WSJT-X {_wsjtx_ref_label(pin)} ({pin}):\n'
             '  - configured with -march=native -mtune=native -O3.\n'
             '  - upstream -fbounds-check RETAINED (required: stripping it '
             'miscompiles wsprd under -O3/native).\n'
@@ -2373,12 +2547,13 @@ def _build_wsjtx_decoders() -> bool:
     _run(['install', '-m644', str(src / 'COPYING'), str(docdir / 'COPYING')], sudo=True)
     _run(['install', '-m644', str(src / 'MODIFICATIONS.sigmond.txt'),
           str(docdir / 'MODIFICATIONS.txt')], sudo=True)
-    _install_root_text(f'wsjtx-decoders {_WSJTX_TAG} {_WSJTX_COMMIT} '
+    _install_root_text(f'wsjtx-decoders {_wsjtx_ref_label(pin)} {pin} '
                   'flags=-march=native -O3 (-fbounds-check retained)\n', marker)
     _write_build_manifest('wsjtx-decoders', [
-        {'name': 'wsjtx', 'url': _WSJTX_REPO, 'ref': _WSJTX_TAG,
-         'pin': _WSJTX_COMMIT, 'sha': _git_head(src)},
+        {'name': 'wsjtx', 'url': _WSJTX_REPO, 'ref': _wsjtx_ref_label(pin),
+         'pin': pin, 'sha': _git_head(src)},
     ], builder='_build_wsjtx_decoders')
+    _pin_if_tracking('wsjtx', _git_head(src))
     _ok(f'wsjtx-decoders: built and installed (jt9, wsprd → {dest})')
     # jt9_decode wrapper (psk-recorder's resident FT8/FT4 driver): a cheap C++
     # add-on to the toolchain we just built.  Best-effort — a wrapper failure
@@ -2471,13 +2646,14 @@ def _build_ubersdr_decoders(*, check: bool = True) -> bool:
     provenance marker, which also records the arch actually used and whether
     the parity check passed — a build that did not pass must not be selected.
     """
+    pin = _native_pin('ubersdr_wsprd')
     dest   = _DECODER_DIR / 'ubersdr'
     marker = dest / '.provenance'
     if all((dest / b).exists() for b in _DECODER_BINS):
         try:
-            if _UBERSDR_COMMIT in marker.read_text():
+            if pin in marker.read_text():
                 _ok(f'ubersdr-decoders: already built from '
-                    f'{_UBERSDR_COMMIT[:12]}')
+                    f'{pin[:12]}')
                 return True
         except OSError:
             pass
@@ -2515,18 +2691,18 @@ def _build_ubersdr_decoders(*, check: bool = True) -> bool:
         if r.returncode != 0:
             _err(f'git clone ubersdr_wsprd failed: {r.stderr.strip()}')
             return False
-    if not _git_head(src).startswith(_UBERSDR_COMMIT):
+    if not _git_head(src).startswith(pin):
         _native_git(src, 'fetch', '--quiet', 'origin')
-        r = _native_git(src, 'checkout', '--quiet', _UBERSDR_COMMIT)
+        r = _native_git(src, 'checkout', '--quiet', pin)
         if r.returncode != 0:
-            _err(f'ubersdr_wsprd: checkout {_UBERSDR_COMMIT[:12]} failed: '
+            _err(f'ubersdr_wsprd: checkout {pin[:12]} failed: '
                  f'{r.stderr.strip()}')
             return False
 
     arch  = _decoder_x86_arch()
     build = src / 'build-sigmond'
     _run(['rm', '-rf', str(build)], sudo=True)
-    version = f'sigmond-{_UBERSDR_COMMIT[:9]}'
+    version = f'sigmond-{pin[:9]}'
     _info(f'ubersdr-decoders: configure (Release, '
           f'-march={arch or "<baseline>"}) ...')
     r = _run(['cmake', '-S', str(src), '-B', str(build),
@@ -2557,13 +2733,14 @@ def _build_ubersdr_decoders(*, check: bool = True) -> bool:
     _run(['install', '-m644', str(src / 'LICENSE'), str(docdir / 'LICENSE')],
          sudo=True)
     _install_root_text(
-        f'ubersdr-decoders {_UBERSDR_COMMIT} version={version} '
+        f'ubersdr-decoders {pin} version={version} '
         f'march={arch or "baseline"} '
         f'parity={"verified" if passed else "SKIPPED"}\n', marker)
     _write_build_manifest('ubersdr-decoders', [
         {'name': 'ubersdr_wsprd', 'url': _UBERSDR_REPO, 'ref': 'main',
-         'pin': _UBERSDR_COMMIT, 'sha': _git_head(src)},
+         'pin': pin, 'sha': _git_head(src)},
     ], builder='_build_ubersdr_decoders')
+    _pin_if_tracking('ubersdr_wsprd', _git_head(src))
     _ok(f'ubersdr-decoders: built and installed → {dest}')
     return True
 
@@ -5061,6 +5238,249 @@ def _say_locally_managed(checkouts, local, say=None) -> list:
     return keep
 
 
+# ── smd update --latest: every component to its default branch's tip ─────
+#
+# rob, 2026-11-11: "why can't I just do smd update everything to the latest
+# commit off of the main trunks?"  Plain `smd update` respects every hold —
+# `.pin`, sigmond's native-build pins, ka9q-python's ka9q-radio commit.
+# `--latest` is the test-station verb that ignores all of them: each
+# checkout goes to the tip of its remote's default branch, the natively
+# built sources (ka9q-radio, onion, wsjtx, ubersdr_wsprd) rebuild there
+# under SIGMOND_TRACK_MAIN=1, services restart radiod-first, and the
+# resulting commits are written to the station pin file so the station
+# then HOLDS that set.  Dry run unless --apply.
+
+def _plan_latest(rows: list) -> list:
+    """Pure planner for `smd update --latest`.
+
+    rows: one dict per checkout — name, head, tip ('' when the default
+    branch can't be read), behind (int), kind ('component' | 'radiod' |
+    'native'), builder (natives), installer, build, dirty (bool).
+
+    Returns [(kind, target, detail)] in run order: every `move` (with its
+    `install`/`build` right after it), then `radiod`, then each
+    `native-build` once per builder, then `restart` and `pins`.  `held`
+    and `unknown` rows explain what is left alone."""
+    moves, radiod, natives, notes = [], [], [], []
+    seen_builders = set()
+    for r in sorted(rows, key=lambda r: r['name']):
+        name, head, tip = r['name'], r.get('head') or '', r.get('tip') or ''
+        if not tip:
+            notes.append(('unknown', name, "cannot read its remote's "
+                          'default branch — left where it is'))
+            continue
+        if head == tip:
+            continue
+        span = f'{head[:8] or "?"} → {tip[:8]}'
+        if r.get('behind'):
+            span += f' ({r["behind"]} commit(s))'
+        if r.get('dirty'):
+            notes.append(('held', name, f'local edits — not moved ({span})'))
+            continue
+        if r['kind'] == 'radiod':
+            radiod.append(('radiod', name,
+                           f'{span}; rebuild with the RX888 driver, '
+                           f'make install'))
+        elif r['kind'] == 'native':
+            b = r.get('builder') or name
+            if b not in seen_builders:
+                seen_builders.add(b)
+                natives.append(('native-build', b, f'{name} {span}'))
+        else:
+            moves.append(('move', name, f'{span}; .pin released'))
+            if r.get('installer'):
+                moves.append(('install', name, 'scripts/install.sh'))
+            elif r.get('build'):
+                moves.append(('build', name, 'deploy.toml [build]'))
+    plan = notes + moves + radiod + natives
+    if moves or radiod or natives:
+        plan.append(('restart', 'services',
+                     'radiod first, then the recorders (smd restart)'))
+    if moves or radiod or natives or any(n[0] == 'unknown' for n in notes):
+        plan.append(('pins', str(_COMPONENT_PINS_FILE),
+                     'record the commit every component now sits at'))
+    return plan
+
+
+def _latest_rows(checkouts) -> list:
+    from sigmond.doctor import git_state
+    from sigmond import build_stamp
+    natives = _native_constants()
+    rows = []
+    for d in checkouts:
+        d = Path(d)
+        st = git_state(d)
+        if st['error']:
+            continue
+        ref = _git_default_ref(d)
+        tip = behind = ''
+        if ref:
+            r = subprocess.run(['git', '-c', f'safe.directory={d}', '-C', str(d),
+                                'rev-parse', ref], capture_output=True, text=True)
+            tip = r.stdout.strip() if r.returncode == 0 else ''
+            c = subprocess.run(['git', '-c', f'safe.directory={d}', '-C', str(d),
+                                'rev-list', '--count', f'HEAD..{ref}'],
+                               capture_output=True, text=True)
+            behind = c.stdout.strip()
+        kind = ('native' if d.name in natives else
+                'radiod' if d.name == 'ka9q-radio' else 'component')
+        try:
+            owner = d.owner()
+        except Exception:                               # noqa: BLE001
+            owner = None
+        rows.append({
+            'name': d.name, 'dir': d, 'ref': ref, 'head': st['head'] or '',
+            'tip': tip, 'behind': int(behind) if behind.isdigit() else 0,
+            'kind': kind, 'builder': _NATIVE_BUILD_OF.get(d.name, d.name),
+            'installer': ((d / 'scripts' / 'install.sh').exists()
+                          or (d / 'install.sh').exists()),
+            'build': build_stamp.declares_build(d),
+            'dirty': bool([f for f in (st['dirty'] or []) if f != '.pin']),
+            'owner': owner, 'detached': st['detached']})
+    return rows
+
+
+def _cmd_update_latest(args, base: Path, checkouts) -> int:
+    _refresh_upstreams(checkouts, fetch=not getattr(args, 'no_fetch', False))
+    rows = _latest_rows(checkouts)
+    by_name = {r['name']: r for r in rows}
+    plan = _plan_latest(rows)
+    apply_ = getattr(args, 'apply', False)
+    if not [s for s in plan if s[0] not in ('held', 'unknown', 'pins')]:
+        for kind, target, detail in plan:
+            if kind in ('held', 'unknown'):
+                _warn(f'{target}: {detail}')
+        _ok('every component is at the tip of its default branch')
+        if apply_:
+            _latest_record_pins(rows, failed=set())
+        return 0
+    print('(--latest: every component to its default branch tip, holds '
+          'ignored)')
+    print('' if apply_ else '(dry run — re-run with --apply)')
+    if apply_:
+        os.environ['SIGMOND_TRACK_MAIN'] = '1'
+    failed_n = 0
+    failed = set()
+    for kind, target, detail in plan:
+        if kind in ('held', 'unknown'):
+            _warn(f'{target}: {detail}')
+            continue
+        print(f'\n  [{kind}] {target}')
+        _info(detail)
+        if not apply_:
+            continue
+        if kind == 'move':
+            row = by_name[target]
+            if not _latest_move(row):
+                failed.add(target)
+                failed_n += 1
+        elif kind in ('install', 'build'):
+            if target in failed:
+                _warn(f'{target}: {kind} skipped — its move failed above')
+                continue
+            d = by_name[target]['dir']
+            rc = (_align_run_install(d, log_target=target, tail_lines=15)
+                  if kind == 'install' else
+                  _run_update_build(d, target, tail_lines=15))
+            if rc == 0:
+                _ok(f'{target}: {kind} exit 0')
+                _record_update_step(f'{kind} {target}')
+            else:
+                _err(f'{target}: {kind} exit {rc}')
+                failed.add(target)
+                failed_n += 1
+        elif kind == 'radiod':
+            rc = _run_smd_child(['install', '--components', 'ka9q-radio',
+                                 '--yes'], 'ka9q-radio', 'install',
+                                track_main=True)
+            if rc == 0:
+                _ok('ka9q-radio: built at the tip of main')
+                _record_update_step('latest ka9q-radio')
+            else:
+                _err(f'ka9q-radio: build exit {rc}')
+                failed.add('ka9q-radio')
+                failed_n += 1
+        elif kind == 'native-build':
+            rc = _run_native_build_step(target, base, track_main=True)
+            if rc == 0:
+                _ok(f'{target}: native build exit 0')
+                _record_update_step(f'latest native-build {target}')
+            else:
+                _err(f'{target}: native build exit {rc}')
+                failed.update(n for n, b in _NATIVE_BUILD_OF.items()
+                              if b == target)
+                failed_n += 1
+        elif kind == 'restart':
+            rc = _run_smd_child(['restart'], 'restart', 'restart')
+            (_ok if rc == 0 else _err)(f'restart: exit {rc}')
+            if rc:
+                failed_n += 1
+        elif kind == 'pins':
+            _latest_record_pins(rows, failed)
+    if apply_:
+        from sigmond.provenance import HISTORY_FILE
+        _info(f'recorded in {HISTORY_FILE} (see: smd version)')
+        if 'ka9q-radio' not in failed and any(s[0] == 'radiod' for s in plan):
+            _info('smd doctor will flag ka9q-radio as off ka9q-python\'s '
+                  'compat commit until ka9q-python is synced to it')
+    return _update_exit(0, failed_n)
+
+
+def _latest_move(row: dict) -> bool:
+    """Put one checkout on its default branch's tip, as its owner, and drop
+    its `.pin`.  False (and an error line) when any step fails."""
+    d, owner = row['dir'], row.get('owner') or 'root'
+    branch = row['ref'].split('/', 1)[-1] if row.get('ref') else 'main'
+    cur = subprocess.run(['git', '-c', f'safe.directory={d}', '-C', str(d),
+                          'symbolic-ref', '-q', '--short', 'HEAD'],
+                         capture_output=True, text=True).stdout.strip()
+    if cur != branch:
+        co = _git_checkout_branch_as_owner(d, owner, branch)
+        if co.returncode != 0:
+            last = ((co.stdout + co.stderr).strip().splitlines()
+                    or ['(no output)'])[-1]
+            _err(f'{row["name"]}: checkout {branch}: {last}')
+            return False
+    # A local ref move after the fetch above, not a network call.
+    r = subprocess.run(_runuser(owner, ['git', '-C', str(d), 'merge',
+                                        '--ff-only', row['ref'] or
+                                        f'origin/{branch}']),
+                       capture_output=True, text=True,
+                       stdin=subprocess.DEVNULL)
+    last = ((r.stdout + r.stderr).strip().splitlines() or ['(no output)'])[-1]
+    if r.returncode != 0:
+        _err(f'{row["name"]}: {last}')
+        return False
+    _ok(f'{row["name"]}: at {branch} {_git_head(d)[:8]}')
+    _record_update_step(f'latest {row["name"]}')
+    pin = d / '.pin'
+    if pin.exists():
+        try:
+            pin.unlink()
+        except OSError as exc:
+            _warn(f'{row["name"]}: could not remove .pin: {exc}')
+    return True
+
+
+def _latest_record_pins(rows: list, failed: set) -> None:
+    """Write every component's HEAD to the pin file, except one whose move
+    or build failed: a native source whose build failed would otherwise be
+    pinned at a commit no binary was built from."""
+    pins = {}
+    for r in rows:
+        if r['name'] in failed:
+            continue
+        head = _git_head(r['dir'])
+        if head:
+            pins[r['name']] = head
+    if _record_component_pins(pins):
+        _ok(f'{len(pins)} component pin(s) written to {_COMPONENT_PINS_FILE}')
+    skipped = sorted(n for n in failed if n in {r['name'] for r in rows})
+    if skipped:
+        _warn('not pinned (failed above): ' + ', '.join(skipped))
+
+
+
 def cmd_update(args) -> int:
     """Plan (and optionally apply) a component update.  Safe to re-run.
 
@@ -5094,6 +5514,8 @@ def cmd_update(args) -> int:
     local = _locally_managed()
     checkouts = _say_locally_managed(component_checkouts(base), local)
     unpin = getattr(args, 'unpin', False)
+    if getattr(args, 'latest', False):
+        return _cmd_update_latest(args, base, checkouts)
 
     # Fetch by default so "nothing to do" means something. Without this
     # the counts below are taken against whatever origin/* happened to
@@ -12154,8 +12576,8 @@ def _install_single_client_run(args) -> int:
     if dry_run:
         if entry.name == 'wspr-recorder':
             _info(f'(dry-run) would build the WSJT-X decoders (jt9, wsprd) '
-                  f'from {_WSJTX_TAG} source and UberSDR\'s rewrites of the '
-                  f'same two from {_UBERSDR_COMMIT[:9]}, then select '
+                  f'from {_wsjtx_ref_label(_native_pin("wsjtx"))} source and UberSDR\'s rewrites of the '
+                  f'same two from {_native_pin("ubersdr_wsprd")[:9]}, then select '
                   f'{_decoder_preference()}')
         _info('(dry-run) would clone repo and run install.sh')
         if getattr(args, 'no_enable', False):
@@ -29090,6 +29512,15 @@ def _build_parser() -> argparse.ArgumentParser:
                         'from an image holds every component at its '
                         'blessed pin by default — the exact combination '
                         'the nested test has seen — until this is given')
+    p.add_argument('--latest', action='store_true',
+                   help='move EVERY component, held ones included (.pin, '
+                        'sigmond\'s native-build pins, ka9q-radio\'s '
+                        'ka9q-python commit), to the tip of its default '
+                        'branch; rebuild ka9q-radio, onion, wsjtx and '
+                        'ubersdr_wsprd there; restart radiod first; and pin '
+                        'the station to the result in '
+                        '/etc/sigmond/component-pins.toml. For test '
+                        'stations. Dry run unless --apply')
 
     p = sub.add_parser('align',
         help='how far this station sits from the latest blessed appliance '

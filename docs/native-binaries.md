@@ -199,6 +199,28 @@ A build running as root now clones as `sigmond`. Before it fetches, it gives
 a root-owned or split-owned tree back to `sigmond:sigmond`, the owner
 `install.sh` gives `/opt/git/sigmond`.
 
+## The station pin set and `smd update --latest`
+
+Since 2026-11-11 an image is built from the newest commit of every repo's
+default branch, tested as a set, and stations are pinned to that set (rob).
+
+- **`/etc/sigmond/component-pins.toml`** — `[pins] "<component>" = "<sha>"`.
+  For the four sources sigmond pins in code (ka9q-radio, onion, wsjtx,
+  ubersdr_wsprd) an entry here **wins** over the constant in `bin/smd`
+  (`_ONION_COMMIT` …) and over ka9q-python's compat commit.  Every lookup
+  goes through `_native_pin()` / `_ka9q_radio_pin()`, so builds, `smd
+  update` and `smd doctor` agree.  No file or no entry: the constants
+  apply, as before.  Other components keep their `.pin` holds; their
+  entries are the record of the set.
+- **`SIGMOND_TRACK_MAIN=1`** — those four resolve to `git ls-remote <repo>
+  HEAD` instead of their pin, and each successful build records the commit
+  it built in the pin file.  The image build sets it; nothing else should.
+- **`smd update --latest [--apply]`** — the test-station verb: every
+  checkout to its default branch tip (holds ignored, `.pin` released),
+  ka9q-radio and the native builds rebuilt there, `smd restart` (radiod
+  first), then every component's commit written to the pin file.  Plain
+  `smd update` is unchanged.
+
 ## The `.provenance` sidecar
 
 Every committed binary under `<repo>/bin/` MUST have a matching
