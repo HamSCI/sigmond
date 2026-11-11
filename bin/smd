@@ -4145,6 +4145,13 @@ def _install_loopback_multicast_route(sigmond_dir: Path,
         _info('loopback-multicast: no local radiod on this host — skipping '
               'the 239/8→lo route (radiods are found on the LAN by mDNS)')
         return True
+    # A site radio network routes 239/8 on its own NIC (`smd radionet apply`).
+    # Putting the lo route back would split the station: its recorders join on
+    # lo while radiod sends on the radio NIC.
+    if Path('/etc/systemd/network/05-sigmond-radio.network').exists():
+        _info('loopback-multicast: this VM is on a site radio network — '
+              'skipping the 239/8→lo route (smd radionet status)')
+        return True
     coord = Path('/etc/sigmond/coordination.toml')
     if coord.exists():
         try:
@@ -30876,6 +30883,25 @@ def _build_parser() -> argparse.ArgumentParser:
     remote_sub.add_parser('motd',
         help='login-banner hook (invoked from /etc/update-motd.d)')
 
+    p_radionet = sub.add_parser('radionet',
+        help='site radio network (decoder VMs of several stations on one '
+             'multicast segment): status | apply.  The Proxmox host runs '
+             '`apply` for you from `sigmond-radionet setup`')
+    radionet_sub = p_radionet.add_subparsers(dest='radionet_command')
+    radionet_sub.add_parser('status',
+        help="show this VM's radio NIC, the 239/8 route and each radiod's ttl/iface")
+    p_rn_apply = radionet_sub.add_parser('apply',
+        help='configure the radio NIC, point every radiod at it (ttl 1) and '
+             'restart the station')
+    p_rn_apply.add_argument('--address', required=True,
+        help='this VM\'s radio-network address, e.g. 10.98.0.101/24')
+    p_rn_apply.add_argument('--mac', required=True,
+        help='MAC of the radio NIC the host added (qm config: net1)')
+    p_rn_apply.add_argument('--mtu', type=int, default=1430,
+        help='the radio network\'s MTU (1430 over an IPv6 tunnel, 1450 over IPv4)')
+    p_rn_apply.add_argument('--no-restart', action='store_true',
+        help='write the configuration but do not restart the station')
+
     p_psws = sub.add_parser('psws',
         help='PSWS enrollment: status | enroll (print key + portal steps) | '
              'verify (live SFTP login test) | save-keys / restore-keys '
@@ -31151,6 +31177,13 @@ def main() -> int:
             return 1
         from sigmond.commands.sink import cmd_sink
         return cmd_sink(args)
+
+    if args.command == 'radionet':
+        verb = getattr(args, 'radionet_command', None) or 'status'
+        if verb == 'apply' and _need_root('radionet apply'):
+            return 1
+        from sigmond.commands.radionet import cmd_radionet
+        return cmd_radionet(args)
 
     if args.command == 'remote':
         verb = getattr(args, 'remote_command', None) or 'status'

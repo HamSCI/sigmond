@@ -67,6 +67,7 @@ Front door for each audience: [docs/README.md](README.md).
 | [MULTI-INSTANCE-ARCHITECTURE.md](MULTI-INSTANCE-ARCHITECTURE.md) ★ | Per-reporter-instance shape all recorder clients and the sigmond substrate must converge on |
 | [RADIOD-IDENTIFICATION.md](RADIOD-IDENTIFICATION.md) ★ | Canonical radiod multicast-naming model every sigmond-suite client relies on |
 | [networking.md](networking.md) ★ | Diagnoses the IGMP-querier silent-failure mode that kills multi-host multicast |
+| [radionet.md](radionet.md) | Joining several stations' decoder VMs into one site radio network (VXLAN between the hosts, streams cross only when joined): `sigmond-radionet setup` on each host, `smd radionet status` in the VM |
 | [ports.md](ports.md) | Every port a station's decoder VM and Proxmox host listen on, which ones the host forwards to the LAN, and the 8090–8099 range reserved for ka9q-radio's own services |
 | [native-binaries.md](native-binaries.md) | Convention for how a client ships/builds native (C/C++/Fortran) deps it depends on (dumphfdl, mag-usb, wsprd/jt9, PHaRLAP) |
 | [greenfield-runbook.md](greenfield-runbook.md) ★ | End-to-end bare-host-to-recording-station operational walkthrough: order of operations + host tuning |
