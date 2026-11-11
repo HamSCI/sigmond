@@ -50,7 +50,7 @@ class KnownHub:
 
 KNOWN_HUBS: Tuple[KnownHub, ...] = (
     KnownHub(
-        name="Lenovo USB-C to 4-port USB-A hub",
+        name="Lenovo USB-C to 4-port USB-A hub (4X90X21427)",
         chip="VIA VL817",
         ids=("17ef:1039", "17ef:103a"),
         vbus=CUTS_VBUS,
