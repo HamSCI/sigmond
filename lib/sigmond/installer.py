@@ -425,6 +425,9 @@ def run_install_script(
         'SIGMOND_INSTANCE', 'SIGMOND_RADIOD_COUNT',
         'SIGMOND_RADIOD_INDEX', 'SIGMOND_RADIOD_STATUS',
         'SIGMOND_TIME_SOURCE', 'SIGMOND_GNSS_VTEC',
+        # The image build's track-main mode reaches pins a client installer
+        # owns (psk-recorder's ft8_lib) the same way it reaches smd's own.
+        'SIGMOND_TRACK_MAIN',
     ])
 
     cmd = ['sudo', f'--preserve-env={preserve}', 'bash', str(script)]

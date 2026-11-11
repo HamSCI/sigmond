@@ -129,7 +129,8 @@ class PreserveList(unittest.TestCase):
         names, _ = self._preserve()
         for k in ("SIGMOND_INSTANCE", "SIGMOND_RADIOD_COUNT",
                   "SIGMOND_RADIOD_INDEX", "SIGMOND_RADIOD_STATUS",
-                  "SIGMOND_TIME_SOURCE", "SIGMOND_GNSS_VTEC"):
+                  "SIGMOND_TIME_SOURCE", "SIGMOND_GNSS_VTEC",
+                  "SIGMOND_TRACK_MAIN"):
             self.assertIn(k, names)
 
     def test_unrelated_shell_state_is_not_forwarded(self):

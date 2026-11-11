@@ -44,6 +44,15 @@ HISTORY_FILE = '/var/lib/sigmond/update-history.jsonl'
 # as a repo install's.
 GOLDEN_IMAGE_MARKER = '/etc/sigmond-appliance/golden-image'
 
+# Held at one commit on purpose: neither an image build (SIGMOND_TRACK_MAIN)
+# nor `smd update --latest` moves them, and `smd version` shows them as
+# "pinned" rather than "N newer".  rob, 2026-11-11: both are fallback FT8/WSPR
+# decoders now that UberSDR's wsprd/jt9 are the default -- WSJT-X is held at
+# what we run (3.0.2), and its upstream changes are not ours to follow;
+# ft8_lib (decode_ft8, still the most CPU-frugal FT8 decoder) moves only when
+# we bump its pin by hand.
+PINNED_ON_PURPOSE = frozenset({'wsjtx', 'ft8_lib'})
+
 _LINEAGE_MEANS = ('image installed on this host — lineage only; '
                   'components may have moved since (see below)')
 _LINEAGE_UNKNOWN = ('no image stamp on this host — predates the stamp, '
@@ -304,7 +313,9 @@ def _image_col(st: Optional[dict]) -> str:
     return {'not in image': 'added', None: ''}.get(v, v)
 
 
-def _upstream_col(st: Optional[dict]) -> str:
+def _upstream_col(st: Optional[dict], name: str = '') -> str:
+    if name in PINNED_ON_PURPOSE:
+        return 'pinned'
     up = (st or {}).get('upstream')
     if not up:
         return '?'
@@ -339,7 +350,7 @@ def _detail_table(components: dict, commits: dict, standing: dict,
         local = '  [+ local changes]' if c.get('dirty') else ''
         lines.append(f'    {date:<10}  {name:<17} {components[name]:<9} '
                      + (f'{_image_col(st):<8}  ' if have_image else '')
-                     + f'{_upstream_col(st):<10}  {summary}{local}')
+                     + f'{_upstream_col(st, name):<10}  {summary}{local}')
 
     lines.append('')
     if have_image:
@@ -349,7 +360,8 @@ def _detail_table(components: dict, commits: dict, standing: dict,
         lines.append(f'since the image: {", ".join(moved) if moved else "nothing has moved"}'
                      + (f'; removed: {", ".join(gone)}' if gone else ''))
     newer = sorted(n for n in components
-                   if ((standing.get(n) or {}).get('upstream') or {}).get('behind', 0) != 0
+                   if n not in PINNED_ON_PURPOSE
+                   and ((standing.get(n) or {}).get('upstream') or {}).get('behind', 0) != 0
                    and (standing.get(n) or {}).get('upstream'))
     held = [n for n in newer if standing[n].get('pinned')]
     if newer:
@@ -362,6 +374,10 @@ def _detail_table(components: dict, commits: dict, standing: dict,
         lines.append('    `smd update` (a dry run) lists exactly what it would install')
     else:
         lines.append('newer upstream: nothing -- every component is at its branch tip')
+    frozen = sorted(n for n in components if n in PINNED_ON_PURPOSE)
+    if frozen:
+        lines.append(f'pinned on purpose: {", ".join(frozen)} -- fallback decoders, '
+                     'held at one commit; no image or update moves them')
     stale = sorted(n for n, st in standing.items()
                    if st and st.get('upstream') and not st['upstream']['checked'])
     if stale:

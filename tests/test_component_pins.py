@@ -112,14 +112,17 @@ class TrackMain(_PinFile):
                                     smd._UBERSDR_REPO: D,
                                     smd._KA9Q_RADIO_REPO: A})
         with p:
+            # wsjtx is pinned on purpose: track-main leaves it at its pin.
             self.assertEqual(smd._native_build_pins(),
-                             {"onion": B, "wsjtx": C, "ubersdr_wsprd": D})
+                             {"onion": B, "wsjtx": smd._WSJTX_COMMIT,
+                              "ubersdr_wsprd": D})
             self.assertEqual(smd._ka9q_radio_pin(), A)
             smd._native_pin("onion")
         self.assertTrue(all(c[:3] == ["git", "ls-remote", c[2]]
                             and c[3] == "HEAD" for c in calls))
-        # one ls-remote per url per run
-        self.assertEqual(len(calls), 4)
+        # one ls-remote per url per run, and none for wsjtx
+        self.assertEqual(len(calls), 3)
+        self.assertNotIn(smd._WSJTX_REPO, [c[2] for c in calls])
 
     def test_unreachable_remote_falls_back_to_the_pin(self):
         os.environ["SIGMOND_TRACK_MAIN"] = "1"
@@ -128,6 +131,7 @@ class TrackMain(_PinFile):
         with p, mock.patch.object(smd, "_warn") as warn:
             self.assertEqual(smd._native_pin("wsjtx"), B)
             self.assertEqual(smd._native_pin("onion"), smd._ONION_COMMIT)
+            self.assertEqual(smd._native_pin("ubersdr_wsprd"), smd._UBERSDR_COMMIT)
         self.assertTrue(warn.called)
 
     def test_without_the_env_ls_remote_is_never_called(self):
@@ -177,12 +181,12 @@ class PlanLatest(unittest.TestCase):
         ]
         plan = smd._plan_latest(rows)
         self.assertEqual([(k, t) for k, t, _ in plan], [
+            ("held", "wsjtx"),
             ("move", "hamsci-physics"), ("build", "hamsci-physics"),
             ("move", "hf-timestd"), ("install", "hf-timestd"),
             ("radiod", "ka9q-radio"),
             ("native-build", "ka9q-web"),
             ("native-build", "ubersdr-decoders"),
-            ("native-build", "wsjtx-decoders"),
             ("restart", "services"),
             ("pins", str(smd._COMPONENT_PINS_FILE)),
         ])
@@ -198,13 +202,19 @@ class PlanLatest(unittest.TestCase):
         self.assertNotIn("restart", [s[0] for s in plan])
 
     def test_one_native_build_per_builder(self):
+        plan = smd._plan_latest([_row("onion", A, B, "native",
+                                      builder="ka9q-web"),
+                                 _row("onion2", A, B, "native",
+                                      builder="ka9q-web")])
+        self.assertEqual([s for s in plan if s[0] == "native-build"],
+                         [("native-build", "ka9q-web", mock.ANY)])
+
+    def test_pinned_on_purpose_is_held_not_moved(self):
         plan = smd._plan_latest([_row("wsjtx", A, B, "native",
                                       builder="wsjtx-decoders"),
-                                 _row("wsjtx2", A, B, "native",
-                                      builder="wsjtx-decoders")])
-        self.assertEqual([s for s in plan if s[0] == "native-build"],
-                         [("native-build", "wsjtx-decoders",
-                           mock.ANY)])
+                                 _row("ft8_lib", A, B)])
+        self.assertEqual(sorted(s[:2] for s in plan),
+                         [("held", "ft8_lib"), ("held", "wsjtx")])
 
 
 class ChildCarriesTrackMain(unittest.TestCase):
@@ -267,6 +277,27 @@ class TrackMainSurvivesSelfElevation(unittest.TestCase):
 
     def test_not_added_when_unset(self):
         self.assertNotIn("SIGMOND_TRACK_MAIN=1", self._argv({"SIGMOND_TRACK_MAIN": ""}))
+
+
+class VersionShowsPinnedOnPurpose(unittest.TestCase):
+    def test_upstream_column_and_footer(self):
+        from sigmond import provenance as pv
+        st = {"pinned": True,
+              "upstream": {"behind": 3, "checked": True}}
+        self.assertEqual(pv._upstream_col(st, "wsjtx"), "pinned")
+        self.assertEqual(pv._upstream_col(st, "ft8_lib"), "pinned")
+        self.assertEqual(pv._upstream_col(st, "onion"), "3 newer*")
+        comps = {"wsjtx": "ccdfaf3", "onion": "de8ea93"}
+        commits = {n: {"date": "2026-01-01", "summary": "x"} for n in comps}
+        out = pv._detail_table(comps, commits, {"wsjtx": st, "onion": st}, None)
+        self.assertIn("newer upstream: onion*", out)
+        self.assertNotIn("wsjtx*", out)
+        self.assertIn("pinned on purpose: wsjtx", out)
+
+    def test_versions_is_an_alias(self):
+        src = (REPO / "bin" / "smd").read_text()
+        self.assertIn("aliases=['versions']", src)
+        self.assertIn("'versions': cmd_version", src)
 
 
 if __name__ == "__main__":

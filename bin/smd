@@ -1494,7 +1494,8 @@ def _native_pin(name: str) -> str:
     Else the station pin file's entry.  Else sigmond's constant.  Reads the
     constants at call time, so patching one still moves the answer."""
     const = _native_constants()[name]
-    if _track_main():
+    from sigmond.provenance import PINNED_ON_PURPOSE
+    if _track_main() and name not in PINNED_ON_PURPOSE:
         head = _remote_head(_native_repos()[name])
         if head:
             return head
@@ -5263,8 +5264,13 @@ def _plan_latest(rows: list) -> list:
     and `unknown` rows explain what is left alone."""
     moves, radiod, natives, notes = [], [], [], []
     seen_builders = set()
+    from sigmond.provenance import PINNED_ON_PURPOSE
     for r in sorted(rows, key=lambda r: r['name']):
         name, head, tip = r['name'], r.get('head') or '', r.get('tip') or ''
+        if name in PINNED_ON_PURPOSE:
+            notes.append(('held', name, 'pinned on purpose (a fallback '
+                          'decoder) — --latest leaves it'))
+            continue
         if not tip:
             notes.append(('unknown', name, "cannot read its remote's "
                           'default branch — left where it is'))
@@ -19017,7 +19023,7 @@ _smd_complete() {
     # verbs had accumulated here unoffered (adopt, align, check, doctor,
     # fleet, notify, psws, remote, sink, timing, update, upload, version),
     # which tells an operator a subcommand does not exist.
-    local top_cmds="install apply enable disable start stop restart reload status config tui watch bringup component admin adopt align archive check doctor fleet notify psws remote sink storage timing update upload version"
+    local top_cmds="install apply enable disable start stop restart reload status config tui watch bringup component admin adopt align archive check doctor fleet notify psws radionet remote sink storage timing update upload version versions"
     local admin_cmds="diag validate verifier wisdom storage environment sources receiver public-ip log rac timing uploader radiod instance uninstall completion"
     local components="ka9q-radio radiod ka9q-web hf-timestd wspr-recorder psk-recorder mag-recorder codar-sounder hf-tec hfdl-recorder meteor-scatter gpsdo-monitor igmp-querier rac"
     local log_clients="wspr-recorder hf-timestd psk-recorder mag-recorder codar-sounder hf-tec hfdl-recorder meteor-scatter"
@@ -29550,7 +29556,7 @@ def _build_parser() -> argparse.ArgumentParser:
                         'transferred (plain integer, or a suffix like 500K, '
                         '20M, 1G; only with --apply)')
 
-    p = sub.add_parser('version',
+    p = sub.add_parser('version', aliases=['versions'],
                        help='what is actually installed (image lineage + live commits)')
     p.add_argument('--base', help='component checkout root (default /opt/git/sigmond)')
     p.add_argument('--hashes', action='store_true',
@@ -31569,6 +31575,7 @@ def main() -> int:
 
     dispatch = {
         'version': cmd_version,
+        'versions': cmd_version,     # alias (rob, 2026-11-11)
         'doctor':  cmd_doctor,
         'update':  cmd_update,
         'align':   cmd_align,
