@@ -104,6 +104,49 @@ def component_versions(checkouts: Iterable, git: Callable = _git_head) -> dict:
     return out
 
 
+def _git_commit(path) -> Optional[dict]:
+    """Date, summary and local-change state of a checkout's HEAD.
+
+    The summary is the commit's subject, except for a GitHub merge commit
+    ("Merge pull request #109 from HamSCI/fix/...") whose subject names a
+    branch, not a change: there the first body line is the PR's title,
+    which is what changed.  Same --no-optional-locks rule as `_git_head`.
+    """
+    base = ['git', '--no-optional-locks', '-c', f'safe.directory={path}',
+            '-C', str(path)]
+    log = subprocess.run(base + ['log', '-1', '--format=%cs%x00%s%x00%b', 'HEAD'],
+                         capture_output=True, text=True)
+    if log.returncode != 0 or '\0' not in log.stdout:
+        return None
+    date, subject, body = (log.stdout.split('\0', 2) + ['', ''])[:3]
+    summary = subject.strip()
+    if summary.startswith('Merge pull request'):
+        title = next((l.strip() for l in body.splitlines() if l.strip()), '')
+        pr = summary.split(' from ')[0].replace('Merge pull request ', 'PR ')
+        if title:
+            summary = f'{title} ({pr})'
+    # Tracked files only: an editor's or a Mac copy's stray files are not a
+    # change to what runs, a hand-edited tracked file is.
+    st = subprocess.run(base + ['status', '--porcelain', '--untracked-files=no'],
+                        capture_output=True, text=True)
+    return {'date': date.strip(), 'summary': summary,
+            'dirty': st.returncode == 0 and bool(st.stdout.strip())}
+
+
+def component_commits(checkouts: Iterable, git: Callable = _git_commit) -> dict:
+    """Date, summary and local-change flag of each checkout's HEAD, keyed by
+    component name; read live, like `component_versions`."""
+    out = {}
+    for path in checkouts:
+        try:
+            info = git(path)
+        except OSError:
+            info = None
+        if info:
+            out[Path(path).name] = info
+    return out
+
+
 def record_update(path, entry: dict) -> None:
     """Append one line describing an update. Never rewrites the file."""
     path = Path(path)
@@ -136,8 +179,12 @@ def update_history(path=HISTORY_FILE) -> list:
     return out
 
 
+SUMMARY_WIDTH = 64
+
+
 def format_report(lineage: dict, components: dict, history: list,
-                  radiod: Optional[dict] = None) -> str:
+                  radiod: Optional[dict] = None,
+                  commits: Optional[dict] = None) -> str:
     """Human-readable provenance, with the lineage caveat kept adjacent.
 
     The caveat sits on the same line as the number deliberately: split
@@ -150,6 +197,23 @@ def format_report(lineage: dict, components: dict, history: list,
         lines.append(f'    {name:<16} {components[name]}')
     if not components:
         lines.append('    (no component checkouts found)')
+
+    # ⛔ A SEPARATE block, after a blank line.  The image build captures this
+    # output as the image's manifest, and every reader of `components (live):`
+    # (doctor._parse_manifest_components: drift, align, adopt, fleet) takes
+    # exactly two fields per row and stops at the first blank line.  A date
+    # or a summary on those rows would drop them all and fail the build's
+    # 10-row floor.
+    if commits:
+        lines += ['', 'what each is at (newest first):']
+        rows = [(commits[n].get('date') or '?', n) for n in components if n in commits]
+        for date, name in sorted(rows, key=lambda r: (r[0], r[1]), reverse=True):
+            c = commits[name]
+            summary = c.get('summary') or ''
+            if len(summary) > SUMMARY_WIDTH:
+                summary = summary[:SUMMARY_WIDTH - 1] + '…'
+            local = '  [+ local changes]' if c.get('dirty') else ''
+            lines.append(f'    {date}  {name:<17} {components[name]:<9} {summary}{local}')
 
     if radiod:
         running, pin = radiod.get('running'), radiod.get('pin')

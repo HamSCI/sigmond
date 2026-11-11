@@ -5611,11 +5611,12 @@ def cmd_version(args) -> int:
     from pathlib import Path
     from sigmond.doctor import component_checkouts
     from sigmond.provenance import (
-        image_lineage, component_versions, update_history, format_report,
-        IMAGE_VERSION_FILE, HISTORY_FILE,
+        image_lineage, component_versions, component_commits, update_history,
+        format_report, IMAGE_VERSION_FILE, HISTORY_FILE,
     )
 
     base = Path(getattr(args, 'base', None) or '/opt/git/sigmond')
+    checkouts = list(component_checkouts(base))
     radiod = None
     try:
         from sigmond.compat_pin import read_pin       # optional helper
@@ -5625,9 +5626,10 @@ def cmd_version(args) -> int:
 
     print(format_report(
         lineage=image_lineage(IMAGE_VERSION_FILE),
-        components=component_versions(component_checkouts(base)),
+        components=component_versions(checkouts),
         history=update_history(HISTORY_FILE),
-        radiod=radiod))
+        radiod=radiod,
+        commits=component_commits(checkouts)))
     return 0
 
 

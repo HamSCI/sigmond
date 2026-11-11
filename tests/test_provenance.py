@@ -101,3 +101,62 @@ def _version_file(text):
     with os.fdopen(fd, 'w') as fh:
         fh.write(text + '\n')
     return path
+
+
+# ─── dates and summaries (rob, 2026-11-11) ────────────────────────────────────
+
+def _repo(tmp_path, name):
+    import subprocess
+    r = tmp_path / name
+    r.mkdir()
+    g = ['git', '-C', str(r), '-c', 'user.name=t', '-c', 'user.email=t@t']
+    subprocess.run(g[:3] + ['init', '-q'], check=True)
+    (r / 'a').write_text('1\n')
+    subprocess.run(g + ['add', 'a'], check=True)
+    env = {'GIT_COMMITTER_DATE': '2026-11-10T12:00:00Z', 'PATH': '/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin'}
+    subprocess.run(g + ['commit', '-q', '-m', 'radiod: fix the thing'], check=True, env=env)
+    return r, g, env
+
+
+def test_commit_date_and_summary_are_read_from_the_checkout(tmp_path):
+    from sigmond.provenance import component_commits
+    r, _, _ = _repo(tmp_path, 'ka9q-radio')
+    c = component_commits([r])['ka9q-radio']
+    assert c == {'date': '2026-11-10', 'summary': 'radiod: fix the thing', 'dirty': False}
+
+
+def test_a_github_merge_is_summarised_by_its_pr_title(tmp_path):
+    import subprocess
+    from sigmond.provenance import component_commits
+    r, g, env = _repo(tmp_path, 'sigmond')
+    subprocess.run(g + ['commit', '-q', '--allow-empty', '-m',
+                        'Merge pull request #109 from HamSCI/fix/wizard-ntp-stratum1',
+                        '-m', 'wizard: accept a stratum-1 NTP server on the LAN'],
+                   check=True, env=env)
+    s = component_commits([r])['sigmond']['summary']
+    assert s == 'wizard: accept a stratum-1 NTP server on the LAN (PR #109)'
+
+
+def test_a_hand_edited_tracked_file_is_flagged_but_stray_files_are_not(tmp_path):
+    from sigmond.provenance import component_commits
+    r, _, _ = _repo(tmp_path, 'sigmond')
+    (r / '._a').write_text('mac junk')                 # untracked: ignored
+    assert component_commits([r])['sigmond']['dirty'] is False
+    (r / 'a').write_text('copied in by hand\n')
+    assert component_commits([r])['sigmond']['dirty'] is True
+
+
+def test_the_dated_block_leaves_the_manifest_block_parseable():
+    """The image build captures `smd version` as the manifest; every reader
+    takes exactly name + sha per row.  Dates must not reach those rows."""
+    from sigmond.doctor import _parse_manifest_components, MIN_COMPONENT_ROWS
+    comps = {f'comp{i:02d}': f'{i:07x}' for i in range(MIN_COMPONENT_ROWS + 2)}
+    commits = {n: {'date': f'2026-11-{i + 1:02d}', 'summary': 'x ' * 50,
+                   'dirty': i == 3} for i, n in enumerate(comps)}
+    report = format_report(lineage={'image': 'v3.90', 'means': 'lineage'},
+                           components=comps, history=[], commits=commits)
+    assert _parse_manifest_components(report) == comps
+    tail = report.split('what each is at (newest first):')[1].splitlines()[1:]
+    assert tail[0].split()[:3] == ['2026-11-12', 'comp11', '000000b']   # newest first
+    assert any('[+ local changes]' in l and 'comp03' in l for l in tail)
+    assert all(len(l) < 140 for l in tail)                              # summary cut
