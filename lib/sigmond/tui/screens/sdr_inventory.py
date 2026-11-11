@@ -36,6 +36,8 @@ from textual.worker import Worker, WorkerState
 import re
 
 from ... import cpu_profiles, sdr_map
+from ...coordination import load_coordination
+from ...paths import COORDINATION_PATH, HF_TIMESTD_CONF
 from ...sdr_labels import SdrDeviceMeta, get_device, load_devices, set_device
 
 _GRID_RE = re.compile(r'^[A-Ra-r]{2}[0-9]{2}([A-Xa-x]{2})?$')
@@ -620,34 +622,57 @@ def _config_name(label: str) -> str:
 
 
 def _rx888_samprate_for(dest: Path, conf_dir: Optional[Path] = None,
-                        profile=None) -> int:
+                        profile=None, coord=None,
+                        timestd_conf: Optional[Path] = None):
     """ADC rate for the conf about to be written at ``dest``, by the same
     rule as `smd config init radiod`: a conf being replaced keeps its own
-    samprate; otherwise the host's cpu_profiles entry decides from how many
-    other RX888 confs are already on disk (on a 5560U the first runs 129.6
-    Msps, every other 64.8 Msps)."""
+    samprate, as a string when it is in no form we read; otherwise the
+    host's cpu_profiles entry decides.  The radiod hf-timestd is bound to
+    comes first, then the other RX888 confs already on disk (on a 5560U
+    the first runs 129.6 Msps, every other 64.8 Msps)."""
     conf_dir = _RADIOD_CONF_DIR if conf_dir is None else conf_dir
     try:
-        kept = sdr_map.conf_samprate_hz(dest.read_text()) if dest.exists() else None
+        text = dest.read_text() if dest.exists() else ''
     except OSError:
-        kept = None
+        text = ''
+    kept = sdr_map.conf_samprate_hz(text)
     if kept is not None:
         return kept
-    others = 0
+    if sdr_map.conf_samprate_raw(text):
+        return sdr_map.conf_samprate_raw(text)
+    inst = dest.name[len('radiod@'):-len('.conf')]
+    names = [sdr_map.RadiodName(inst, inst)]
     for conf in conf_dir.glob('radiod@*.conf'):
         if conf == dest:
             continue
         try:
-            others += sdr_map.has_rx888_section(conf.read_text())
+            other = conf.read_text()
         except OSError:
             continue
+        if sdr_map.has_rx888_section(other):
+            names.append(sdr_map.RadiodName(
+                conf.name[len('radiod@'):-len('.conf')],
+                sdr_map.conf_status(other), sdr_map.conf_serial(other)))
+    if coord is None:
+        try:
+            coord = load_coordination(COORDINATION_PATH)
+        except Exception:
+            coord = None
+    timing = None
+    for key in sdr_map.timestd_radiod_keys(
+            coord, HF_TIMESTD_CONF if timestd_conf is None else timestd_conf):
+        timing = sdr_map.find_radiod(key, names, coord)
+        if timing is not None:
+            break
+    ordinal = 0 if timing is not None and timing.instance == inst \
+        else len(names) - 1
     if profile is None:
         profile = cpu_profiles.host_profile()
-    return cpu_profiles.rx888_samprate_hz(others, profile)
+    return cpu_profiles.rx888_samprate_hz(ordinal, profile)
 
 
 def _build_rx888_conf(config_name: str, device_index: int, ttl: int = 0,
-                      samprate_hz: int = cpu_profiles.FULL_SAMPRATE_HZ) -> str:
+                      samprate_hz: int | str = cpu_profiles.FULL_SAMPRATE_HZ) -> str:
     """Generate a minimal two-section radiod config for an RX-888.
 
     ``config_name`` is the radiod status multicast name *verbatim* — radiod
@@ -660,6 +685,9 @@ def _build_rx888_conf(config_name: str, device_index: int, ttl: int = 0,
     data_base = config_name.removesuffix("-status")
     if samprate_hz == cpu_profiles.FULL_SAMPRATE_HZ:
         rate_lines = "samprate = 129m600000\n#samprate = 64m800000\n"
+    elif isinstance(samprate_hz, str):
+        rate_lines = (f"samprate = {samprate_hz}   # kept as written from "
+                      f"the conf this one replaced\n")
     else:
         rate_lines = (f"samprate = {samprate_hz}   # per this CPU's profile "
                       f"(lib/sigmond/cpu_profiles.py)\n"

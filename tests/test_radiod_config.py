@@ -645,7 +645,8 @@ class CpuProfileSamprateTests(unittest.TestCase):
 
     CEZANNE = "AMD Ryzen 5 5560U with Radeon Graphics"
 
-    def _run(self, model, sdrs, existing=None, coord_text="", **ns):
+    def _run(self, model, sdrs, existing=None, coord_text="",
+             timestd_text="", **ns):
         import contextlib
         import io
         from sigmond import cpu_profiles
@@ -658,6 +659,10 @@ class CpuProfileSamprateTests(unittest.TestCase):
             coord_path = Path(d) / "coordination.toml"
             if coord_text:
                 coord_path.write_text(coord_text.replace("@DIR@", str(radio_dir)))
+            # Never the dev box's own /etc/hf-timestd.
+            timestd_conf = Path(d) / "timestd-config.toml"
+            if timestd_text:
+                timestd_conf.write_text(timestd_text)
             with mock.patch.object(radiod_config, "_discover_sdrs",
                                    return_value=sdrs), \
                  mock.patch.object(radiod_config, "RADIOD_CONFIG_DIR",
@@ -674,6 +679,8 @@ class CpuProfileSamprateTests(unittest.TestCase):
                                    return_value={}), \
                  mock.patch.object(radiod_config, "_host_cpu_profile",
                                    return_value=cpu_profiles.profile_for(model)), \
+                 mock.patch.object(radiod_config, "HF_TIMESTD_CONF",
+                                   timestd_conf), \
                  mock.patch("socket.gethostname", return_value="omni"), \
                  contextlib.redirect_stdout(out), \
                  contextlib.redirect_stderr(out):
@@ -757,3 +764,172 @@ class CpuProfileSamprateTests(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertEqual([self._rate(t) for t in confs.values()],
                          [129_600_000])
+
+    def test_reconfig_keeps_a_ka9q_spelled_samprate(self):
+        # `64.8M ; hand-set` is how radiod's parse_frequency reads 64.8 MHz
+        # after iniparser cuts the comment.  It must survive --reconfig,
+        # though the profile would give a sole card 129.6.
+        old = ('[global]\nstatus = omni-status.local\n\n[rx888]\n'
+               'device = "rx888"\nsamprate = 64.8M ; hand-set\n')
+        rc, out, confs = self._run(
+            self.CEZANNE,
+            [_sdr("RX-888 Mk2", serial="AAA", index=0, device="005")],
+            existing={"radiod@omni.conf": old}, reconfig=True)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self._rate(confs["radiod@omni.conf"]), 64_800_000)
+
+    def test_reconfig_keeps_an_unparseable_samprate_verbatim(self):
+        # A samprate sigmond cannot read is still the operator's: keep the
+        # value as written and say so, never recompute it.
+        old = ('[global]\nstatus = omni-status.local\n\n[rx888]\n'
+               'device = "rx888"\nsamprate = $RATE\n')
+        rc, out, confs = self._run(
+            self.CEZANNE,
+            [_sdr("RX-888 Mk2", serial="AAA", index=0, device="005")],
+            existing={"radiod@omni.conf": old}, reconfig=True)
+        self.assertEqual(rc, 0, out)
+        from sigmond import sdr_map
+        self.assertEqual(sdr_map.conf_samprate_raw(confs["radiod@omni.conf"]),
+                         "$RATE")
+        self.assertIn("$RATE", out)
+        self.assertIn("cannot read", out)
+
+
+class FullRateRadiodChoiceTests(unittest.TestCase):
+    """Which RX888 radiod keeps 129.6 Msps on a 5560U.  hf-timestd needs it
+    (the TS-1 T6 pilot's alias plan is built for 129.6 Msps), so the
+    radiod hf-timestd is bound to wins, then one the operator names; bus
+    order decides only when neither is known, and then says so loudly."""
+
+    CEZANNE = CpuProfileSamprateTests.CEZANNE
+    _run = CpuProfileSamprateTests._run
+    _rate = staticmethod(CpuProfileSamprateTests._rate)
+    _two_cards = CpuProfileSamprateTests._two_cards
+
+    # Non-interactive ids for _two_cards(): AAA is index 0, BBB index 1.
+    AAA_ID, BBB_ID = "omni-rx888mk2", "omni-rx888mk2-1"
+    OLD = ('[global]\nstatus = omni-status.local\n\n[rx888]\n'
+           'device = "rx888"\nserial = "AAA"\nsamprate = 129600000\n')
+    OLD_COORD = ('[radiod."omni"]\nhost        = "localhost"\n'
+                 'status_dns  = "omni-status.local"\n'
+                 'radio_conf  = "@DIR@/radiod@omni.conf"\n'
+                 'sdr_serial  = "AAA"\n')
+
+    def _by_serial(self, confs):
+        out = {}
+        for t in confs.values():
+            for s in ("AAA", "BBB"):
+                if f'serial      = "{s}"' in t or f'serial = "{s}"' in t:
+                    out[s] = t
+        return out
+
+    @staticmethod
+    def _timestd_binding(radiod_id):
+        return ('[[clients.hf-timestd]]\ninstance = "default"\n'
+                f'radiod_id = "{radiod_id}"\n')
+
+    def test_hf_timestd_binding_gives_the_second_card_full_rate(self):
+        rc, out, confs = self._run(
+            self.CEZANNE, self._two_cards(),
+            coord_text=self._timestd_binding(self.BBB_ID))
+        self.assertEqual(rc, 0, out)
+        by = self._by_serial(confs)
+        self.assertEqual(self._rate(by["BBB"]), 129_600_000)
+        self.assertEqual(self._rate(by["AAA"]), 64_800_000)
+        self.assertNotIn("bus order", out)
+
+    def test_hf_timestd_binding_by_status_name(self):
+        rc, out, confs = self._run(
+            self.CEZANNE, self._two_cards(),
+            coord_text=self._timestd_binding(f"{self.BBB_ID}-status.local"))
+        self.assertEqual(rc, 0, out)
+        by = self._by_serial(confs)
+        self.assertEqual(self._rate(by["BBB"]), 129_600_000)
+        self.assertEqual(self._rate(by["AAA"]), 64_800_000)
+
+    def test_hf_timestd_config_status_address(self):
+        rc, out, confs = self._run(
+            self.CEZANNE, self._two_cards(),
+            timestd_text=('[ka9q]\nstatus_address = '
+                          f'"{self.BBB_ID}-status.local"\n'))
+        self.assertEqual(rc, 0, out)
+        by = self._by_serial(confs)
+        self.assertEqual(self._rate(by["BBB"]), 129_600_000)
+        self.assertEqual(self._rate(by["AAA"]), 64_800_000)
+
+    def test_operator_names_the_full_rate_card_by_serial(self):
+        rc, out, confs = self._run(self.CEZANNE, self._two_cards(),
+                                   full_rate="bbb")
+        self.assertEqual(rc, 0, out)
+        by = self._by_serial(confs)
+        self.assertEqual(self._rate(by["BBB"]), 129_600_000)
+        self.assertEqual(self._rate(by["AAA"]), 64_800_000)
+
+    def test_operator_names_the_full_rate_radiod_by_id(self):
+        rc, out, confs = self._run(self.CEZANNE, self._two_cards(),
+                                   full_rate=self.BBB_ID)
+        self.assertEqual(rc, 0, out)
+        by = self._by_serial(confs)
+        self.assertEqual(self._rate(by["BBB"]), 129_600_000)
+        self.assertEqual(self._rate(by["AAA"]), 64_800_000)
+
+    def test_operator_name_beats_the_hf_timestd_binding_and_says_so(self):
+        rc, out, confs = self._run(
+            self.CEZANNE, self._two_cards(), full_rate="AAA",
+            coord_text=self._timestd_binding(self.BBB_ID))
+        self.assertEqual(rc, 0, out)
+        by = self._by_serial(confs)
+        self.assertEqual(self._rate(by["AAA"]), 129_600_000)
+        self.assertEqual(self._rate(by["BBB"]), 64_800_000)
+        self.assertIn("hf-timestd", out)
+
+    def test_fallback_to_bus_order_warns_naming_both(self):
+        rc, out, confs = self._run(self.CEZANNE, self._two_cards())
+        self.assertEqual(rc, 0, out)
+        by = self._by_serial(confs)
+        self.assertEqual(self._rate(by["AAA"]), 129_600_000)
+        self.assertEqual(self._rate(by["BBB"]), 64_800_000)
+        self.assertIn("bus order", out)
+        self.assertIn(f"radiod@{self.AAA_ID}", out)
+        self.assertIn(f"radiod@{self.BBB_ID}", out)
+        self.assertIn("--full-rate", out)
+
+    def test_no_warning_on_unknown_cpu(self):
+        rc, out, confs = self._run("Some Unknown CPU", self._two_cards())
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("bus order", out)
+
+    def test_unknown_operator_name_warns_and_falls_back(self):
+        rc, out, confs = self._run(self.CEZANNE, self._two_cards(),
+                                   full_rate="ZZZ")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ZZZ", out)
+        self.assertIn("bus order", out)
+        by = self._by_serial(confs)
+        self.assertEqual(self._rate(by["AAA"]), 129_600_000)
+
+    def test_new_card_bound_to_hf_timestd_beats_an_existing_conf(self):
+        # The existing radiod@omni keeps its 129.6 (never rewritten), the
+        # new card hf-timestd uses gets 129.6 too, and the operator hears
+        # that two full-rate radiods now share this CPU.
+        rc, out, confs = self._run(
+            self.CEZANNE, self._two_cards(),
+            existing={"radiod@omni.conf": self.OLD},
+            coord_text=self.OLD_COORD + self._timestd_binding(self.BBB_ID))
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(confs["radiod@omni.conf"], self.OLD)
+        new = [t for n, t in confs.items() if n != "radiod@omni.conf"]
+        self.assertEqual(len(new), 1)
+        self.assertEqual(self._rate(new[0]), 129_600_000)
+        self.assertIn("radiod@omni", out)
+        self.assertIn("two", out.lower())
+
+    def test_existing_conf_bound_to_hf_timestd_keeps_full_rate(self):
+        rc, out, confs = self._run(
+            self.CEZANNE, self._two_cards(),
+            existing={"radiod@omni.conf": self.OLD},
+            coord_text=self.OLD_COORD + self._timestd_binding("omni"))
+        self.assertEqual(rc, 0, out)
+        new = [t for n, t in confs.items() if n != "radiod@omni.conf"]
+        self.assertEqual(self._rate(new[0]), 64_800_000)
+        self.assertNotIn("bus order", out)
