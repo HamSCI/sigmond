@@ -135,6 +135,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)),
                                 "..", "lib"))
 from sigmond.paths import LIFECYCLE_LOCK  # noqa: E402
 from sigmond import sdr_events  # noqa: E402
+from sigmond import usb_hubs  # noqa: E402
 from sigmond.radiod_ready import READY_SETTLE_S  # noqa: E402
 
 # The card blips off the bus for a second or two whenever it re-enumerates —
@@ -510,6 +511,18 @@ def port_claim(cfg: dict) -> str:
         return "ppps reported, switching verified (a cut was watched)"
     return ("ppps reported, switching unverified (a port reset only; "
             "the hub may not cut VBUS)")
+
+
+def known_hub_note(loc: Optional["Located"], root: Path = SYSFS_USB) -> Optional[str]:
+    """The inventory's verdict on the hub this card hangs off, or None.
+
+    Reporting only: what a reset is allowed to try still comes from
+    port_power and the station's own [radiod] flags.  See lib/sigmond/usb_hubs.py
+    for what each entry measured and why a chip match is not a product match."""
+    if loc is None:
+        return None
+    hub = usb_hubs.lookup(usb_hubs.hub_ids([loc.hub, loc.peer_hub], root))
+    return usb_hubs.describe(hub) if hub else None
 
 
 def hub_speed(hub: str, root: Path = SYSFS_USB) -> Optional[str]:
@@ -1455,7 +1468,8 @@ def manual_off(serial: Optional[str], cfg: dict) -> int:
 def wait_for_running_card(locations: Sequence[Tuple[str, str, bool]],
                           serial: Optional[str],
                           timeout_s: int = 120,
-                          blip_seconds: int = LINK_BLIP_S
+                          blip_seconds: int = LINK_BLIP_S,
+                          first_seen: Optional[list] = None
                           ) -> Tuple[Optional[Located], str]:
     """Wait for the card to be READY — 04b4:00f1 at SuperSpeed — not merely
     on the bus.  Returns (card, why): card is None if it never got there.
@@ -1480,6 +1494,10 @@ def wait_for_running_card(locations: Sequence[Tuple[str, str, bool]],
     switched, and by serial.  The hub/port test is what carries the match
     through the bootloader phase, where the FX3 need not present the serial
     the running firmware does.
+
+    ``first_seen``, when given, receives the product of the card's FIRST
+    sighting ("00f1" or "00f3"): the one reliable software tell of whether
+    the port cut VBUS (usb_hubs.first_return_verdict).
     """
     jacks = {(h, p) for h, p, _ in locations}
 
@@ -1498,6 +1516,8 @@ def wait_for_running_card(locations: Sequence[Tuple[str, str, bool]],
     while time.monotonic() < deadline:
         card = candidate()
         if card is not None:
+            if seen is None and first_seen is not None:
+                first_seen.append(card.product)
             seen = card
             if card.product == "00f1" and (card.speed or "") == SS_SPEED:
                 return card, "ready"
@@ -1570,8 +1590,13 @@ def manual_on(serial: Optional[str], cfg: dict,
     # ⛔ WAIT FOR A RUNNING CARD, NOT A PRESENT ONE.  After a real VBUS cut
     # the card's FIRST appearance is its bootloader at 480 Mb/s; starting
     # radiod there gets status=66/NOINPUT.  See wait_for_running_card.
+    first: list = []
     card, why = wait_for_running_card(locations, hold.get("serial") or None,
-                                      timeout_s=wait_seconds)
+                                      timeout_s=wait_seconds, first_seen=first)
+    # ⛔ THE FIRST SIGHTING, NOT ANY 00f3, ANSWERS "WAS VBUS CUT?".  A card
+    # behind a data-only hub returns as 00f1 with its firmware intact, then
+    # often resets itself to 00f3 seconds later (RSHTECH, 2026-11-11).
+    _log(f"power check: {usb_hubs.first_return_verdict(first[0] if first else None)}")
     if card is None:
         _log(f"⛔ {why}.  The hold STAYS, so the watchdogs will not fight you "
              f"while you look at it; radiod was NOT started.  Run --on again "
@@ -1606,6 +1631,9 @@ def manual_status(cfg: dict) -> int:
     for card in cards:
         _log(f"card {card.serial or '(no serial)'}: {card.devpath} "
              f"04b4:{card.product} at {card.speed} Mb/s")
+        note = known_hub_note(card)
+        if note:
+            _log(f"  {note}")
     if not holds:
         _log("no manual hold is in force — automatic recovery is active")
         return 0
@@ -1785,6 +1813,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                        if ctl else "")
                 _log(f"RX-888 {loc.serial} at {loc.devpath} ({loc.speed} Mb/s) "
                      f"on hub {loc.hub} port {loc.port}: {verdict[sw]}{via}")
+                note = known_hub_note(loc)
+                if note:
+                    _log(note)
         hub, port = state.get("hub"), state.get("port")
         source = "discovered" if hub else "nothing learned yet"
     locations = [tuple(l) for l in state.get("locations") or []] \
@@ -1796,6 +1827,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
              f"power={_power_now(state, cfg)[0]} "
              f"control={locations or 'none'} serial={state.get('serial')} "
              f"radiod_unit={radiod_unit} consumers={patterns or 'NONE DECLARED'}")
+        note = known_hub_note(locate_rx888()) if present else None
+        if note:
+            _log(note)
         save_state(state)
         return 0
 
