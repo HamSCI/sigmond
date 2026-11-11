@@ -1274,6 +1274,37 @@ if [[ -L "$LEGACY_INSTALL_SMD" ]]; then
     $SUDO rm -f "$LEGACY_INSTALL_SMD"
 fi
 
+# ─── smd tab completion, regenerated on every install/update ─────────────────
+# The completion is generated from the running smd (`smd admin completion
+# bash`), so a copy written once goes stale the moment smd gains a verb (rob,
+# 2026-11-11: `smd versions` did not complete).  install.sh runs on every
+# `smd update` that pulls sigmond, so writing it here keeps it current.
+# /usr/share/bash-completion/completions/smd is lazy-loaded by bash-completion
+# on the first <TAB> after `smd`, in every new shell.  A per-user copy from
+# `smd admin completion bash --install` would shadow it, so refresh that too.
+_install_smd_completion() {
+    local dest=/usr/share/bash-completion/completions/smd tmp
+    if [[ ! -r /usr/share/bash-completion/bash_completion ]] && [[ -n "${_PKG_MGR:-}" ]]; then
+        case "$_PKG_MGR" in
+            apt) $SUDO apt-get install -y -q bash-completion >/dev/null 2>&1 || true ;;
+        esac
+    fi
+    tmp=$(mktemp) || return 0
+    if "$INSTALL_SMD" admin completion bash > "$tmp" 2>/dev/null && grep -q 'complete -F _smd_complete smd' "$tmp"; then
+        $SUDO install -D -m 0644 "$tmp" "$dest"
+        ok "smd tab completion written to $dest (new shells; this one: smdrefresh)"
+        local home
+        home="$(getent passwd "${INVOKER:-}" 2>/dev/null | cut -d: -f6)"
+        if [[ -n "$home" && -f "$home/.local/share/bash-completion/completions/smd" ]]; then
+            $SUDO install -m 0644 -o "$INVOKER" "$tmp" "$home/.local/share/bash-completion/completions/smd"
+        fi
+    else
+        warn "could not generate smd tab completion (smd admin completion bash failed)"
+    fi
+    rm -f "$tmp"
+}
+_install_smd_completion
+
 # ─── operator shell aliases ───────────────────────────────────────────────────
 # Ensure the invoking user's ~/.bash_aliases sources sigmond's curated alias
 # file (ll / lrt / cds / tm).  Sourcing — not copying — keeps the repo file the
