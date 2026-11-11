@@ -674,7 +674,10 @@ def _adopt_instances(root: Path):
     bad: set = set()         # reporters with an unreadable sources file
     for f in sorted(Path(root).glob('*@*.sources.toml')):
         client, _, rest = f.name[:-len('.sources.toml')].partition('@')
-        rid = display_reporter_id(rest)
+        # The file carries the instance key (AC0G-B4); the id is in the
+        # instance's config ([instance] reporter_id = "AC0G/B4").
+        from ..instance import identity_for_key
+        rid = display_reporter_id(identity_for_key(client, rest))
         label = f'{client}@{rid}'
         if client not in _REPORTER_KEYED:
             left_out.append((label, f'{client} takes no per-reporter '
@@ -2080,7 +2083,8 @@ def cmd_config_upload(args) -> int:
                 dkey = delivery_knob[0]
                 dval = upload.read_flag(e, dkey)
                 extra = f"  [{dkey}={dval if dval is not None else 'unset (default server-merge)'}]"
-            print(f"    {state}  {display_reporter_id(e.stem)}    "
+            from ..instance import identity_for_key
+            print(f"    {state}  {display_reporter_id(identity_for_key(client, e.stem))}    "
                   f"({flag}={val if val is not None else 'unset'}){extra}")
         info(f"enable:  smd config upload {client} <instance> --on")
         return 0
@@ -2097,7 +2101,13 @@ def cmd_config_upload(args) -> int:
         if delivery_knob:
             info(f"valid --via choices: {', '.join(delivery_knob[2])}")
         return 1
-    rid = path.stem     # what apply_enable resolved: the storage form, or a legacy name
+    # What apply_enable resolved: the instance key (AC0G-S) or a legacy name.
+    # The person reads the id as typed (AC0G/S) whenever it is one.
+    try:
+        from ..instance import parse_user_reporter_id
+        rid = parse_user_reporter_id(instance)
+    except ValueError:
+        rid = path.stem
     ok(f"{'enabled' if on else 'disabled'} upload for {client}@{display_reporter_id(rid)}  "
        f"({flag}={'1' if on else '0'})  ->  {', '.join(dests)}")
     if delivery_set:
@@ -2109,8 +2119,8 @@ def cmd_config_upload(args) -> int:
     if on:
         info("identity: `smd config render` (site-profile)  ·  "
              "credentials: `smd admin secrets`")
-    # A printed command in the form systemctl accepts: the slash form would
-    # name a different unit (AC0G/S -> AC0G-S).
+    # A printed command in the form systemctl accepts: the instance key.
+    from ..instance import unit_instance
     info(f"restart to apply:  sudo systemctl restart "
-         f"'{client}@{systemd_escape(rid)}.service'")
+         f"'{client}@{unit_instance(rid)}.service'")
     return 0

@@ -984,7 +984,9 @@ def rule_wspr_decode_enabled(view: SystemView) -> RuleResult:
             "wspr-recorder", unit[len("wspr-recorder@"):-len(".service")])
         return env.get("WD_DECODE_VIA_DB", "").strip() not in ("", "0")
 
-    recorder_only = [display_reporter_id(u[len("wspr-recorder@"):-len(".service")])
+    from .instance import identity_for_key
+    recorder_only = [display_reporter_id(identity_for_key(
+                         "wspr-recorder", u[len("wspr-recorder@"):-len(".service")]))
                      for u in active if not _decode_on(u)]
     if recorder_only:
         return RuleResult(
@@ -1245,10 +1247,11 @@ def _read_env_file(path: Path) -> dict:
 
 
 def _resolve_instance_env(client: str, inst: str) -> dict:
-    """Per-instance env for `<client>@<inst>`.  `inst` may come straight
-    from a unit name (AC0G\\x3dS); the env file carries the storage form
-    (AC0G=S.env)."""
-    f = Path(f"/etc/{client}/env") / f"{unescape_systemd_instance(inst)}.env"
+    """Per-instance env for `<client>@<inst>`.  `inst` may be any spelling
+    (AC0G-S off a unit, AC0G=S, AC0G\\x3dS); the env file carries the
+    instance key (AC0G-S.env)."""
+    from .instance import instance_stem
+    f = Path(f"/etc/{client}/env") / f"{instance_stem(inst)}.env"
     return _read_env_file(f) if f.exists() else {}
 
 
@@ -1329,7 +1332,9 @@ def rule_upload_enabled(view: SystemView) -> RuleResult:
                     below, asked = _sink_below_upload(), True
                 if below is not None and client in below:
                     continue
-                off.append(f"{client}@{display_reporter_id(inst)} -> {' / '.join(dest)}")
+                from .instance import identity_for_key
+                off.append(f"{client}@{display_reporter_id(identity_for_key(client, inst))}"
+                           f" -> {' / '.join(dest)}")
     if not off:
         return RuleResult("upload_enabled", "pass",
                           "active recorder instances have upload enabled "

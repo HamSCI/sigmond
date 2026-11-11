@@ -101,11 +101,11 @@ def _instance_options_for_component(component: str) -> list:
 
 
 def _instance_unit(component: str, instance: str) -> str:
-    """The unit for one dropdown choice: a storage-form reporter id
-    (AC0G=B4) or a legacy radiod-keyed name, spelled as systemd spells it
-    (psk-recorder@AC0G\\x3dB4.service)."""
-    from ...instance import systemd_escape
-    return f"{component}@{systemd_escape(instance)}.service"
+    """The unit for one dropdown choice: a reporter id (AC0G=B4 -> its key,
+    psk-recorder@AC0G-B4.service) or a legacy radiod-keyed name, spelled as
+    systemd spells it."""
+    from ...instance import unit_instance
+    return f"{component}@{unit_instance(instance)}.service"
 
 
 def _resolve_unit_names(component: str) -> list:

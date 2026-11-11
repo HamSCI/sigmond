@@ -121,13 +121,13 @@ class DoubleEscapedMigrationTests(unittest.TestCase):
         root = Path(tmp)
         pairs = {
             "env": (root / "etc/psk-recorder/env" / f"{self.OLD}.env",
-                    root / "etc/psk-recorder/env/AC0G=B4.env"),
+                    root / "etc/psk-recorder/env/AC0G-B4.env"),
             "state": (root / "var/lib/psk-recorder" / self.OLD,
-                      root / "var/lib/psk-recorder/AC0G=B4"),
+                      root / "var/lib/psk-recorder/AC0G-B4"),
             "log": (root / "var/log/psk-recorder" / self.OLD,
-                    root / "var/log/psk-recorder/AC0G=B4"),
+                    root / "var/log/psk-recorder/AC0G-B4"),
             "dropin": (root / "etc/systemd/system/psk-recorder@AC0G\\x5cx3dB4.service.d",
-                       root / "etc/systemd/system/psk-recorder@AC0G\\x3dB4.service.d"),
+                       root / "etc/systemd/system/psk-recorder@AC0G-B4.service.d"),
         }
         for kind, (src, dst) in pairs.items():
             if kind == "env":
@@ -138,7 +138,7 @@ class DoubleEscapedMigrationTests(unittest.TestCase):
                 for d, body in ((src, "shadow\n"), (dst, "live\n")):
                     d.mkdir(parents=True)
                     (d / "f").write_text(body)
-        cfg = root / "etc/psk-recorder/AC0G=B4.toml"
+        cfg = root / "etc/psk-recorder/AC0G-B4.toml"
         cfg.write_text("live\n")
         return pairs
 
@@ -178,8 +178,8 @@ class DoubleEscapedMigrationTests(unittest.TestCase):
         warns = [s for s in steps if s.startswith("WARN")]
         self.assertEqual(len(warns), 4, steps)
         for w in warns:
-            self.assertIn(self.OLD, w)
-            self.assertIn("AC0G", w)
+            self.assertIn("already exists", w)
+            self.assertIn("AC0G-B4", w)     # the instance-key target
         self.assertFalse([s for s in steps if s.startswith("mv ")], steps)
 
     def test_a_dry_run_shows_the_refusal_too(self):
@@ -200,7 +200,7 @@ class HarmonizeInboundTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             env = Path(tmp) / "etc" / "wspr-recorder" / "env"
             env.mkdir(parents=True)
-            (env / "AC0G=B4.env").write_text("WD_DECODE_VIA_DB=1\n")
+            (env / "AC0G-B4.env").write_text("WD_DECODE_VIA_DB=1\n")
             with mock.patch.object(H, "Path", _rooted(tmp)):
                 for inst in ("AC0G\\x3dB4", "AC0G=B4"):
                     with self.subTest(inst=inst):
@@ -212,7 +212,7 @@ class HarmonizeInboundTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             env = Path(tmp) / "etc" / "wspr-recorder" / "env"
             env.mkdir(parents=True)
-            (env / "AC0G=B4.env").write_text("WD_DECODE_VIA_DB=1\n")
+            (env / "AC0G-B4.env").write_text("WD_DECODE_VIA_DB=1\n")
             out = "wspr-recorder@AC0G\\x3dB4.service loaded active running WSPR\n"
             with mock.patch.object(H, "Path", _rooted(tmp)), \
                  mock.patch("subprocess.run", _completed(out)):
@@ -229,7 +229,7 @@ class WatchConfigLookupTests(unittest.TestCase):
 
     def test_config_lookup_unescapes_the_unit_instance(self):
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = Path(tmp) / "etc" / "hfdl-recorder" / "AC0G=B4.toml"
+            cfg = Path(tmp) / "etc" / "hfdl-recorder" / "AC0G-B4.toml"
             cfg.parent.mkdir(parents=True)
             cfg.write_text('[[radiod]]\nstatus = "b4-status.local"\n')
             with mock.patch.object(smd, "Path", _rooted(tmp)):

@@ -39,11 +39,14 @@ def _rooted(tmp):
 class InstancePathsTests(unittest.TestCase):
     """S4: the one unit name sigmond builds for an instance."""
 
-    def test_unit_name_is_in_systemd_spelling_and_files_keep_storage(self):
+    def test_unit_and_files_use_the_instance_key(self):
+        # rob, 2026-11-11: '/' reads as '-' in unit and file names, like
+        # radiod's; the identity (reporter_id) stays the storage form.
         p = I.instance_paths("psk-recorder", "AC0G=B4")
-        self.assertEqual(p.unit_name, "psk-recorder@AC0G\\x3dB4.service")
-        self.assertEqual(p.config, Path("/etc/psk-recorder/AC0G=B4.toml"))
-        self.assertEqual(p.env, Path("/etc/psk-recorder/env/AC0G=B4.env"))
+        self.assertEqual(p.reporter_id, "AC0G=B4")
+        self.assertEqual(p.unit_name, "psk-recorder@AC0G-B4.service")
+        self.assertEqual(p.config, Path("/etc/psk-recorder/AC0G-B4.toml"))
+        self.assertEqual(p.env, Path("/etc/psk-recorder/env/AC0G-B4.env"))
 
 
 class MigrateUnitNamesTests(unittest.TestCase):
@@ -53,7 +56,7 @@ class MigrateUnitNamesTests(unittest.TestCase):
         steps = I.migrate_one_instance("wspr-recorder", "my-rx888", "AC0G=B4",
                                        dry_run=True)
         self.assertIn("would systemctl stop wspr-recorder@my-rx888.service", steps)
-        self.assertIn("would systemctl enable --now wspr-recorder@AC0G\\x3dB4.service",
+        self.assertIn("would systemctl enable --now wspr-recorder@AC0G-B4.service",
                       steps)
 
 
@@ -150,7 +153,7 @@ class TuiUnitNameTests(unittest.TestCase):
     def test_logs_instance_unit_is_spelled_for_systemd(self):
         from sigmond.tui.screens import logs
         self.assertEqual(logs._instance_unit("psk-recorder", "AC0G=B4"),
-                         "psk-recorder@AC0G\\x3dB4.service")
+                         "psk-recorder@AC0G-B4.service")
         self.assertEqual(logs._instance_unit("psk-recorder", "my-rx888"),
                          "psk-recorder@my-rx888.service")
 

@@ -83,7 +83,8 @@ def _client_config_path(feature: ReceiverChannelsFeature,
     if not feature.per_instance:
         p = Path(feature.config_path)
         return p if p.exists() else None
-    per_instance = Path(f"/etc/{feature.client}/{instance}.toml")
+    from ...instance import instance_stem
+    per_instance = Path(f"/etc/{feature.client}/{instance_stem(instance)}.toml")
     return per_instance if per_instance.exists() else None
 
 

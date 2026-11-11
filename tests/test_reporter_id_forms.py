@@ -2,8 +2,9 @@
 (tasks/spec-reporter-id-v372.md §2-§3).
 
     display   AC0G/B4      what a person types and reads
-    storage   AC0G=B4      file names, directory names, config keys
-    systemd   AC0G\\x3dB4  unit names, *.wants links, %i
+    storage   AC0G=B4      the identity: coordination, config keys, uploads
+    systemd   AC0G-B4      the instance key: unit names, %i, per-instance files
+                           (before 2026-11-11: AC0G\\x3dB4, still read on input)
 
 tests/data/reporter_id_vectors.json holds the cases every copy of these
 rules must agree on.  psk-recorder, meteor-scatter and wspr-recorder each
@@ -21,6 +22,7 @@ from sigmond.instance import (  # noqa: E402
     InvalidReporterId,
     display_reporter_id,
     display_unit_name,
+    instance_key,
     legacy_instance_hint,
     parse_user_reporter_id,
     systemd_escape,
@@ -40,12 +42,17 @@ class VectorTableTests(unittest.TestCase):
         for v in VECTORS["reporter_ids"]:
             with self.subTest(input=v["input"]):
                 self.assertEqual(parse_user_reporter_id(v["input"]), v["storage"])
+                # The unit carries the instance key (AC0G-B4), not \x3d.
                 self.assertEqual(systemd_instance(v["storage"]), v["systemd"])
+                self.assertEqual(instance_key(v["input"]), v["systemd"])
                 self.assertEqual(unit_name("psk-recorder", v["storage"]),
                                  f"psk-recorder@{v['systemd']}.service")
-                self.assertEqual(unescape_systemd_instance(v["systemd"]), v["storage"])
+                # The old unit spelling is still understood on input.
+                self.assertEqual(unescape_systemd_instance(v["legacy_systemd"]), v["storage"])
+                self.assertEqual(parse_user_reporter_id(v["legacy_systemd"]), v["storage"])
+                self.assertEqual(instance_key(v["legacy_systemd"]), v["systemd"])
                 self.assertEqual(display_reporter_id(v["storage"]), v["display"])
-                self.assertEqual(display_reporter_id(v["systemd"]), v["display"])
+                self.assertEqual(display_reporter_id(v["legacy_systemd"]), v["display"])
 
     def test_unit_names_escape_only_what_systemd_must(self):
         for v in VECTORS["escape_only"]:
@@ -87,7 +94,7 @@ class HelperTests(unittest.TestCase):
 
     def test_unit_name_takes_a_suffix(self):
         self.assertEqual(unit_name("wspr-recorder", "AC0G=B4", suffix=".timer"),
-                         "wspr-recorder@AC0G\\x3dB4.timer")
+                         "wspr-recorder@AC0G-B4.timer")
 
     def test_display_unit_name(self):
         cases = {
@@ -112,7 +119,7 @@ class HelperTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(parse_user_reporter_id(text), "W1ABC-5")
         self.assertEqual(unit_name("psk-recorder", parse_user_reporter_id("ac0g/b4")),
-                         "psk-recorder@AC0G\\x3dB4.service")
+                         "psk-recorder@AC0G-B4.service")
 
     def test_legacy_instance_hint(self):
         self.assertEqual(legacy_instance_hint("my-rx888"),

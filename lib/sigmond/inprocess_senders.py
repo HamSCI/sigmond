@@ -148,7 +148,8 @@ def _ms_config_path(env: dict, unit: str) -> Path:
     if instance.endswith(".service"):
         instance = instance[:-len(".service")]
     if instance:
-        per_instance = MS_CONFIG_DIR / f"{unescape_systemd_instance(instance)}.toml"
+        from .instance import instance_stem
+        per_instance = MS_CONFIG_DIR / f"{instance_stem(instance)}.toml"
         if per_instance.exists():
             return per_instance
     return MS_CONFIG_DIR / "meteor-scatter-config.toml"

@@ -15,7 +15,7 @@ from typing import List, Tuple
 
 from .safe_write import rewrite_owned
 from .instance import (
-    InvalidReporterId, legacy_instance_hint, parse_user_reporter_id,
+    InvalidReporterId, instance_key, legacy_instance_hint, parse_user_reporter_id,
     unescape_systemd_instance,
 )
 
@@ -67,7 +67,10 @@ def env_path_for(client: str, instance: str, base: str = "/etc") -> Path:
             print(legacy_instance_hint(exact), file=sys.stderr)
             return legacy
         raise
-    canonical = env_dir / f"{storage}.env"
+    canonical = env_dir / f"{instance_key(storage)}.env"     # files carry the key
+    pre_key = env_dir / f"{storage}.env"     # AC0G=S.env, not yet migrated
+    if not canonical.exists() and pre_key != canonical and pre_key.exists():
+        return pre_key
     if (not canonical.exists() and exact != storage
             and legacy is not None and legacy.exists()):
         print(legacy_instance_hint(exact), file=sys.stderr)

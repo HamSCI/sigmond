@@ -158,15 +158,15 @@ def test_bind_renders_each_instance_config_to_its_radiod(tmp_path, monkeypatch):
                                inventory_rows=[])
         assert rc == 0
 
-    psk = (etc / 'psk-recorder' / 'AC0G=B1B.toml').read_text()
+    psk = (etc / 'psk-recorder' / 'AC0G-B1B.toml').read_text()
     import tomllib
     assert tomllib.loads(psk)['radiod'][0]['status'] == B
-    assert tomllib.loads((etc / 'psk-recorder' / 'AC0G=B1A.toml').read_text()
+    assert tomllib.loads((etc / 'psk-recorder' / 'AC0G-B1A.toml').read_text()
                          )['radiod'][0]['status'] == A
-    wspr = tomllib.loads((etc / 'wspr-recorder' / 'AC0G=B1B.toml').read_text())
+    wspr = tomllib.loads((etc / 'wspr-recorder' / 'AC0G-B1B.toml').read_text())
     assert [s['status'] for s in wspr['source']] == [B]
 
-    sel = (etc / 'sigmond' / 'clients' / 'psk-recorder@AC0G=B1B.sources.toml')
+    sel = (etc / 'sigmond' / 'clients' / 'psk-recorder@AC0G-B1B.sources.toml')
     assert tomllib.loads(sel.read_text())['selected'] == [f'radiod:{B}']
 
     c = load_coordination(coord)
@@ -199,9 +199,9 @@ def test_bind_waits_for_a_client_that_is_not_installed(tmp_path):
     rc = smd._sources_bind(A, 'AC0G/B1A', ['psk-recorder'], host='ac0g-b1',
                            etc_root=etc, coord_path=coord, inventory_rows=[])
     assert rc == 0
-    assert not (etc / 'psk-recorder' / 'AC0G=B1A.toml').exists()
+    assert not (etc / 'psk-recorder' / 'AC0G-B1A.toml').exists()
     assert (etc / 'sigmond' / 'clients' /
-            'psk-recorder@AC0G=B1A.sources.toml').exists()
+            'psk-recorder@AC0G-B1A.sources.toml').exists()
     c = load_coordination(coord)
     assert [x.radiod_id for x in c.clients] == [A]
 
@@ -553,14 +553,14 @@ def _bound_etc(tmp_path, psk_status, wspr_sources):
     (etc / 'psk-recorder').mkdir()
     (etc / 'wspr-recorder').mkdir()
     for c in ('psk-recorder', 'wspr-recorder'):
-        (clients / f'{c}@AC0G=B1B.sources.toml').write_text(
+        (clients / f'{c}@AC0G-B1B.sources.toml').write_text(
             f'selected = ["radiod:{B}"]\n')
-    (etc / 'psk-recorder' / 'AC0G=B1B.toml').write_text(
+    (etc / 'psk-recorder' / 'AC0G-B1B.toml').write_text(
         f'[[radiod]]\nstatus = "{psk_status}"\n')
     body = '[radiod]\nstatus = "my-rx888-status.local"\n'
     for st in wspr_sources:
         body += f'\n[[source]]\nkey = "radiod:{st}"\nstatus = "{st}"\n'
-    (etc / 'wspr-recorder' / 'AC0G=B1B.toml').write_text(body)
+    (etc / 'wspr-recorder' / 'AC0G-B1B.toml').write_text(body)
     return etc
 
 

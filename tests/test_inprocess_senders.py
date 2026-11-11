@@ -124,10 +124,11 @@ class Senders(unittest.TestCase):
         (self.cfg / "a.toml").write_text(_STATION)
         self.assertNotIn(MS, self.run_(None, {"METEOR_SCATTER_CONFIG": str(other)}))
 
-    def test_ms_escaped_instance_reads_its_storage_named_config(self):
+    def test_ms_escaped_instance_reads_its_key_named_config(self):
+        # A pre-key unit (AC0G\\x3dB4) and a key unit both read AC0G-B4.toml.
         self.units["meteor-scatter"] = ["meteor-scatter@AC0G\\x3dB4.service"]
         (self.cfg / "meteor-scatter-config.toml").write_text("[paths]\n")
-        (self.cfg / "AC0G=B4.toml").write_text(_STATION)
+        (self.cfg / "AC0G-B4.toml").write_text(_STATION)
         got = ips.inprocess_senders(
             _Topo(["meteor-scatter"]),
             show=_fake_show({"meteor-scatter@AC0G\\x3dB4.service": {}}))

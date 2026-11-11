@@ -19,11 +19,12 @@ class TestUploadEnable(unittest.TestCase):
     def _env(self, client, inst):
         return self.base / client / "env" / f"{inst}.env"
 
-    def test_storage_form_slash_to_equals(self):
+    def test_every_spelling_names_the_key_file(self):
+        # rob, 2026-11-11: env files carry the instance key, AC0G-S.env.
         base = str(self.base)
-        for typed in ("AC0G/S", "ac0g/s", "AC0G=S"):
+        for typed in ("AC0G/S", "ac0g/s", "AC0G=S", "AC0G\\x3dS"):
             with self.subTest(typed=typed):
-                self.assertEqual(upload.env_path_for("x", typed, base=base).name, "AC0G=S.env")
+                self.assertEqual(upload.env_path_for("x", typed, base=base).name, "AC0G-S.env")
 
     def test_escaped_instance_finds_the_storage_env_file(self):
         # S19: systemd's spelling must reach AC0G=B4.env, not AC0G\x3dB4.env.
@@ -36,8 +37,8 @@ class TestUploadEnable(unittest.TestCase):
     def test_escaped_instance_writes_no_shadow_file(self):
         path, *_ = upload.apply_enable(
             "wspr-recorder", "AC0G\\x3dB4", True, base=str(self.base))
-        self.assertEqual(path.name, "AC0G=B4.env")
-        self.assertEqual([p.name for p in path.parent.iterdir()], ["AC0G=B4.env"])
+        self.assertEqual(path.name, "AC0G-B4.env")
+        self.assertEqual([p.name for p in path.parent.iterdir()], ["AC0G-B4.env"])
 
     def test_lower_case_reaches_the_upper_case_file(self):
         # Review Focus 1: reporter ids are upper case only.
@@ -77,7 +78,7 @@ class TestUploadEnable(unittest.TestCase):
         path, flag, dests, delivery = upload.apply_enable(
             "wspr-recorder", "AC0G/S", True, base=str(self.base))
         self.assertEqual(flag, "WSPR_USE_HS_UPLOADER")
-        self.assertEqual(path, self._env("wspr-recorder", "AC0G=S"))
+        self.assertEqual(path, self._env("wspr-recorder", "AC0G-S"))
         self.assertIn("WSPR_USE_HS_UPLOADER=1", path.read_text())
         self.assertIn("wsprdaemon.org", dests)
         self.assertIsNone(delivery)  # wspr has no delivery-pipeline knob
@@ -113,7 +114,7 @@ class TestUploadEnable(unittest.TestCase):
     def test_disable_leaves_pipeline_untouched(self):
         upload.apply_enable("psk-recorder", "AC0G/S", True, base=str(self.base))
         upload.apply_enable("psk-recorder", "AC0G/S", False, base=str(self.base))
-        body = self._env("psk-recorder", "AC0G=S").read_text()
+        body = self._env("psk-recorder", "AC0G-S").read_text()
         self.assertIn("PSK_USE_HS_UPLOADER=0", body)
         self.assertIn("PSK_DELIVERY_PIPELINES=direct", body)  # not reverted
 
@@ -130,7 +131,7 @@ class TestUploadEnable(unittest.TestCase):
     def test_off_sets_zero_and_updates_in_place(self):
         upload.apply_enable("psk-recorder", "AC0G/S", True, base=str(self.base))
         upload.apply_enable("psk-recorder", "AC0G/S", False, base=str(self.base))
-        body = self._env("psk-recorder", "AC0G=S").read_text()
+        body = self._env("psk-recorder", "AC0G-S").read_text()
         self.assertIn("PSK_USE_HS_UPLOADER=0", body)
         self.assertEqual(body.count("PSK_USE_HS_UPLOADER"), 1)  # updated, not appended
 

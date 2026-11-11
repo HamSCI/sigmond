@@ -49,7 +49,7 @@ class WatchInstanceArgTests(unittest.TestCase):
         for text in ("AC0G/B4", "AC0G=B4", "AC0G\\x3dB4", "ac0g/b4"):
             with self.subTest(text=text):
                 self.assertEqual(self._watch(text, "psk-recorder")[0],
-                                 ("AC0G=B4", "psk-recorder@AC0G\\x3dB4.service"))
+                                 ("AC0G=B4", "psk-recorder@AC0G-B4.service"))
 
     def test_lower_and_mixed_case_reach_the_upper_case_instance(self):
         # Review Focus 1.
@@ -105,11 +105,16 @@ class WatchInstanceArgTests(unittest.TestCase):
 
 
 class SuperdarnInstanceDirTests(unittest.TestCase):
-    """superdarn-sounder spools under --instance %i, systemd's spelling
-    (/var/lib/superdarn-sounder/AC0G\\x3dB4/); a storage-form directory
-    (AC0G=B4) is the second choice."""
+    """superdarn-sounder spools under --instance %i, the instance key
+    (/var/lib/superdarn-sounder/AC0G-B4/); a not-yet-migrated station's
+    AC0G\\x3dB4/ and a storage-form AC0G=B4/ are the fallbacks."""
 
-    ESCAPED = "AC0G\\x3dB4"
+    ESCAPED = "AC0G-B4"        # the unit's %i: the instance key
+
+    def test_a_pre_key_escaped_directory_is_still_found(self):
+        (self.root / "AC0G\\x3dB4").mkdir()
+        self.assertEqual(self._dir("AC0G/B4")[0],
+                         ("AC0G=B4", self.root / "AC0G\\x3dB4"))
 
     def setUp(self):
         import tempfile
@@ -218,7 +223,7 @@ class SpoolWatchInstanceTests(unittest.TestCase):
 
     def test_every_spelling_finds_the_storage_config(self):
         for client, cmd in self.CMDS:
-            self._config(client, "AC0G=B4")
+            self._config(client, "AC0G-B4")      # files carry the key
             for text in ("AC0G/B4", "AC0G=B4", "AC0G\\x3dB4"):
                 with self.subTest(client=client, text=text):
                     said = self._run(getattr(smd, cmd), text)
@@ -229,7 +234,7 @@ class SpoolWatchInstanceTests(unittest.TestCase):
             for text in ("AC0G/B4", "AC0G=B4", "AC0G\\x3dB4"):
                 with self.subTest(client=client, text=text):
                     said = self._run(getattr(smd, cmd), text)
-                    self.assertIn(f"/var/lib/{client}/AC0G\\x3dB4 ", said)
+                    self.assertIn(f"/var/lib/{client}/AC0G-B4 ", said)
 
     def test_a_legacy_unit_named_as_typed_is_reached_with_a_hint(self):
         for client, cmd in self.CMDS:
@@ -267,19 +272,19 @@ class WatchCommandUnitTests(unittest.TestCase):
 
     def test_psk_watch(self):
         self.assertEqual(self._patterns(smd.cmd_psk_watch),
-                         ["psk-recorder@AC0G\\x3dB4.service"])
+                         ["psk-recorder@AC0G-B4.service"])
 
     def test_wspr_watch(self):
         self.assertEqual(self._patterns(smd.cmd_wspr_watch),
-                         ["wspr-recorder@AC0G\\x3dB4.service"])
+                         ["wspr-recorder@AC0G-B4.service"])
 
     def test_verifier_watch(self):
         self.assertEqual(self._patterns(smd.cmd_verifier_watch),
-                         ["wspr-recorder@AC0G\\x3dB4.service"])
+                         ["wspr-recorder@AC0G-B4.service"])
 
     def test_meteor_watch(self):
         self.assertEqual(self._patterns(smd.cmd_meteor_watch),
-                         ["meteor-scatter@AC0G\\x3dB4.service"])
+                         ["meteor-scatter@AC0G-B4.service"])
 
     def test_a_bad_instance_never_reaches_systemd(self):
         for cmd in (smd.cmd_psk_watch, smd.cmd_wspr_watch,
@@ -335,7 +340,7 @@ class SourcesKeyTests(unittest.TestCase):
         self.assertEqual(
             smd._restart_hint("wspr-recorder", "AC0G=B4"),
             "wspr-recorder@AC0G/B4  "
-            "(sudo systemctl restart 'wspr-recorder@AC0G\\x3dB4.service')")
+            "(sudo systemctl restart 'wspr-recorder@AC0G-B4.service')")
 
 
 class SshHostTests(unittest.TestCase):

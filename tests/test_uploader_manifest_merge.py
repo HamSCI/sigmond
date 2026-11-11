@@ -194,8 +194,8 @@ def test_station_merge_alone_is_fine(units):
 
 
 def test_an_empty_station_merge_is_fine(units):
-    units["units"]["wspr-recorder"] = ["wspr-recorder@KFS\\x3dSE.service"]
-    units["env"]["wspr-recorder@KFS\\x3dSE.service"] = {
+    units["units"]["wspr-recorder"] = ["wspr-recorder@KFS-SE.service"]
+    units["env"]["wspr-recorder@KFS-SE.service"] = {
         "WD_MERGE_REPORTERS": " "}
     assert um.two_merges_problems([_rx("KFS/SE", merge_into="KFS")],
                                   _Topo(["wspr-recorder"])) == []
@@ -258,8 +258,8 @@ def test_collect_pipelines_reads_the_site_profile(monkeypatch, tmp_path,
 # ---- delivery env ----------------------------------------------------------
 
 def test_delivery_mismatch_names_psk_and_meteor(units):
-    psk = "psk-recorder@KFS\\x3dSE.service"
-    ms = "meteor-scatter@KFS\\x3dSE.service"
+    psk = "psk-recorder@KFS-SE.service"
+    ms = "meteor-scatter@KFS-SE.service"
     units["units"] = {"psk-recorder": [psk], "meteor-scatter": [ms]}
     units["env"] = {psk: {"PSK_DELIVERY_PIPELINES": "direct"},
                     ms: {"METEOR_SCATTER_DELIVERY_MODE": "direct"}}
@@ -271,8 +271,8 @@ def test_delivery_mismatch_names_psk_and_meteor(units):
 
 
 def test_delivery_that_agrees_is_quiet(units):
-    psk = "psk-recorder@KFS\\x3dSE.service"
-    ms = "meteor-scatter@KFS\\x3dSE.service"
+    psk = "psk-recorder@KFS-SE.service"
+    ms = "meteor-scatter@KFS-SE.service"
     units["units"] = {"psk-recorder": [psk], "meteor-scatter": [ms]}
     units["env"] = {psk: {"PSK_DELIVERY_PIPELINES": "server-merge"},
                     ms: {"METEOR_SCATTER_DELIVERY_MODE": "deposit"}}
@@ -282,7 +282,7 @@ def test_delivery_that_agrees_is_quiet(units):
 
 
 def test_delivery_of_an_unmerged_receiver_is_not_checked(units):
-    psk = "psk-recorder@KFS\\x3dSE.service"
+    psk = "psk-recorder@KFS-SE.service"
     units["units"] = {"psk-recorder": [psk]}
     units["env"] = {psk: {"PSK_DELIVERY_PIPELINES": "direct"}}
     assert um.delivery_mismatches([_rx("KFS/SE")],
@@ -469,7 +469,7 @@ def test_render_refuses_two_merges(tmp_path, monkeypatch, units, capsys):
 
 def test_render_warns_on_delivery_and_goes_on(tmp_path, monkeypatch, units,
                                               capsys):
-    psk = "psk-recorder@KFS\\x3dSE.service"
+    psk = "psk-recorder@KFS-SE.service"
     units["units"]["psk-recorder"] = [psk]
     units["env"][psk] = {"PSK_DELIVERY_PIPELINES": "direct"}
     rc, env = _render(tmp_path, monkeypatch,

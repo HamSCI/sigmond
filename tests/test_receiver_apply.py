@@ -95,8 +95,9 @@ def test_dropping_a_client_keeps_its_instance(box):
     both = [Receiver(reporter_id='AC0G/B1A', radiod=A,
                      clients=('wspr-recorder', 'psk-recorder'))]
     _apply(smd, box, both)
-    inst = box.etc / 'psk-recorder' / 'AC0G=B1A.toml'
-    sel = box.etc / 'sigmond' / 'clients' / 'psk-recorder@AC0G=B1A.sources.toml'
+    # Per-instance files carry the instance key (rob, 2026-11-11).
+    inst = box.etc / 'psk-recorder' / 'AC0G-B1A.toml'
+    sel = box.etc / 'sigmond' / 'clients' / 'psk-recorder@AC0G-B1A.sources.toml'
     assert inst.exists() and sel.exists()
     before = (inst.read_bytes(), sel.read_bytes())
     _apply(smd, box, [Receiver(reporter_id='AC0G/B1A', radiod=A,
@@ -113,7 +114,7 @@ def test_a_shared_radiod_receiver_does_not_upload(box):
     # decides its flag, the other leaves it to the operator.
     (box.etc / 'psk-recorder').mkdir()
     for rid in ('AC0G=B1A', 'AC0G=B1S'):
-        (box.etc / 'psk-recorder' / f'{rid}.toml').write_text(PSK_SHARED)
+        (box.etc / 'psk-recorder' / f"{rid.replace('=', '-')}.toml").write_text(PSK_SHARED)
     with mock.patch.object(smd, '_sources_bind', return_value=0), \
             mock.patch('sigmond.upload.apply_enable') as ae:
         assert _apply(smd, box, rs) == 0
@@ -225,7 +226,7 @@ def _psk_installed(box):
 
 
 def _env(box, rid='AC0G=B1A', client='psk-recorder'):
-    return box.etc / client / 'env' / f'{rid}.env'
+    return box.etc / client / 'env' / f"{rid.replace('=', '-')}.env"   # the key
 
 
 def test_apply_before_install_leaves_the_env_stub_to_instance_add(box):
@@ -284,7 +285,7 @@ def test_an_explicit_upload_with_a_config_sets_the_flag(box):
 def test_a_failed_bind_writes_no_upload_flag(box):
     smd = _load_smd()
     _psk_installed(box)
-    (box.etc / 'psk-recorder' / 'AC0G=B1A.toml').write_text(PSK_SHARED)
+    (box.etc / 'psk-recorder' / 'AC0G-B1A.toml').write_text(PSK_SHARED)
     r = [Receiver(reporter_id='AC0G/B1A', radiod=A, clients=('psk-recorder',),
                   upload=True)]
     with mock.patch.object(smd, '_sources_bind', return_value=1), \

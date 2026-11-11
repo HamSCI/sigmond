@@ -46,8 +46,8 @@ class InstanceVerbTests(unittest.TestCase):
             rc = smd.cmd_instance_disable(
                 argparse.Namespace(client="psk-recorder", reporter_id="AC0G/B4"))
         self.assertEqual(rc, 0)
-        self.assertIn(["systemctl", "stop", "psk-recorder@AC0G\\x3dB4.service"], calls)
-        self.assertIn(["systemctl", "disable", "psk-recorder@AC0G\\x3dB4.service"], calls)
+        self.assertIn(["systemctl", "stop", "psk-recorder@AC0G-B4.service"], calls)
+        self.assertIn(["systemctl", "disable", "psk-recorder@AC0G-B4.service"], calls)
         self.assertIn("psk-recorder@AC0G/B4 stopped and disabled", out.getvalue())
         self.assertNotIn("\\x3d", out.getvalue())
 
@@ -66,7 +66,7 @@ class InstanceVerbTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("unit:     psk-recorder@AC0G/B4", text)
         # A printed command uses the form that command accepts (spec §4).
-        self.assertIn("journal:  journalctl -u 'psk-recorder@AC0G\\x3dB4.service'", text)
+        self.assertIn("journal:  journalctl -u 'psk-recorder@AC0G-B4.service'", text)
 
 
 class LifecycleVerbOutputTests(unittest.TestCase):

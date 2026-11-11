@@ -190,6 +190,44 @@ def systemd_escape(name: str) -> str:
     return "".join(out)
 
 
+# ---------------------------------------------------------------------------
+# Instance key — unit names and per-instance file names (rob, 2026-11-11)
+# ---------------------------------------------------------------------------
+#
+# The storage form above (AC0G=B4) stays the reporter's IDENTITY: it is what
+# coordination.toml holds and what display_reporter_id() turns back into
+# AC0G/B4 for uploads.  But as a unit name it reads as AC0G\x3dB4, which no
+# one can type.  So units and the files a unit reads by %i use the INSTANCE
+# KEY: '/' (and '=') become '-', the way radiod's instances already read
+# (radiod@AI6VN-1, psk-recorder@AI6VN-1).
+#
+#   identity (storage)   instance key   unit
+#   AC0G=B4              AC0G-B4        psk-recorder@AC0G-B4.service
+#   W1ABC-5              W1ABC-5        psk-recorder@W1ABC-5.service
+#
+# The key is lossy -- AC0G/B4 and a real AC0G-B4 share it -- which is why
+# Michael kept '='.  Two things make that safe: each per-instance config
+# carries the true id ([instance] reporter_id = "AC0G/B4"), which is what
+# list_instances() reports and what every client uploads; and
+# create_instance() refuses a second id with the same key on one station.
+# Old "=" names are migrated by instance_rekey.py.
+
+def instance_key(reporter_id: str) -> str:
+    """Any spelling of a reporter id -> its instance key.
+
+    ``AC0G=B4``, ``AC0G/B4``, ``AC0G\\x3dB4`` and ``AC0G-B4`` all give
+    ``AC0G-B4``; ``W1ABC-5`` stays ``W1ABC-5``.  Raises InvalidReporterId
+    when the result is not a valid id."""
+    if not isinstance(reporter_id, str):
+        raise InvalidReporterId("reporter ID must be a string")
+    prev, name = None, reporter_id.strip()
+    while name != prev:
+        prev, name = name, unescape_systemd_instance(name)
+    key = name.upper().replace("/", "-").replace("=", "-")
+    validate_reporter_id(key)
+    return key
+
+
 def systemd_instance(reporter_id: str) -> str:
     """The instance part of a unit name, for a storage-form reporter ID.
 
@@ -198,11 +236,21 @@ def systemd_instance(reporter_id: str) -> str:
     a unit nobody enabled.  ``AC0G=B4`` -> ``AC0G\\x3dB4``.
     """
     validate_reporter_id(reporter_id)
-    return systemd_escape(reporter_id)
+    return systemd_escape(instance_key(reporter_id))
+
+
+def unit_instance(name: str) -> str:
+    """The instance part of a unit for any name: a reporter id (any
+    spelling) gives its key (``AC0G=B4`` -> ``AC0G-B4``); anything else (a
+    legacy radiod-keyed ``my-rx888``) is escaped as systemd spells it."""
+    try:
+        return systemd_instance(name)
+    except InvalidReporterId:
+        return systemd_escape(name)
 
 
 def unit_name(client: str, reporter_id: str, suffix: str = ".service") -> str:
-    """``unit_name('psk-recorder', 'AC0G=B4')`` -> ``psk-recorder@AC0G\\x3dB4.service``."""
+    """``unit_name('psk-recorder', 'AC0G=B4')`` -> ``psk-recorder@AC0G-B4.service``."""
     return f"{client}@{systemd_instance(reporter_id)}{suffix}"
 
 
@@ -266,15 +314,16 @@ def instance_paths(client: str, reporter_id: str, *,
     etc = Path("/etc") if etc_root is None else Path(etc_root)
     conf = SIGMOND_CONF if etc_root is None else etc / "sigmond"
     etc_client = etc / client
+    key = instance_key(reporter_id)     # files and the unit use the key
     return InstancePaths(
         client=client,
         reporter_id=reporter_id,
-        config=etc_client / f"{reporter_id}.toml",
-        env=etc_client / "env" / f"{reporter_id}.env",
-        sources=conf / "clients" / f"{client}@{reporter_id}.sources.toml",
-        state_dir=Path("/var/lib") / client / reporter_id,
-        log_dir=Path("/var/log") / client / reporter_id,
-        run_dir=Path("/run") / client / reporter_id,
+        config=etc_client / f"{key}.toml",
+        env=etc_client / "env" / f"{key}.env",
+        sources=conf / "clients" / f"{client}@{key}.sources.toml",
+        state_dir=Path("/var/lib") / client / key,
+        log_dir=Path("/var/log") / client / key,
+        run_dir=Path("/run") / client / key,
         unit_name=unit_name(client, reporter_id),
         unit_template=f"{client}@.service",
     )
@@ -418,8 +467,11 @@ def list_instances(catalog_clients: Optional[list[str]] = None) -> list[Instance
                 validate_reporter_id(stem)
             except InvalidReporterId:
                 continue
-            rids_seen.add(stem)
-            paths = instance_paths(client, stem)
+            # The file is named by the instance key (AC0G-B4); the id it
+            # stands for is the [instance] reporter_id inside it (AC0G/B4).
+            rid = config_reporter_id(cfg) or stem
+            rids_seen.add(instance_key(rid))
+            paths = instance_paths(client, rid)
             results.append(Instance(
                 paths=paths,
                 has_config=_safe_exists(paths.config),
@@ -432,7 +484,7 @@ def list_instances(catalog_clients: Optional[list[str]] = None) -> list[Instance
         # systemd step).  systemctl works without /etc read access.
         if not cfg_files:
             for rid in _list_units_for_client(client):
-                if rid in rids_seen:
+                if instance_key(rid) in rids_seen:
                     continue
                 paths = instance_paths(client, rid)
                 results.append(Instance(
@@ -444,6 +496,54 @@ def list_instances(catalog_clients: Optional[list[str]] = None) -> list[Instance
 
     results.sort(key=lambda i: (i.client, i.reporter_id))
     return results
+
+
+def config_reporter_id(cfg: Path) -> Optional[str]:
+    """The storage-form id a per-instance config names in ``[instance]
+    reporter_id`` (``"AC0G/B4"`` -> ``AC0G=B4``), or None when the file is
+    unreadable or carries none."""
+    try:
+        data = tomllib.loads(Path(cfg).read_text())
+    except (OSError, ValueError):
+        return None
+    inst = data.get("instance") if isinstance(data, dict) else None
+    rid = inst.get("reporter_id") if isinstance(inst, dict) else None
+    if not isinstance(rid, str) or not rid.strip():
+        return None
+    try:
+        return parse_user_reporter_id(rid)
+    except InvalidReporterId:
+        return None
+
+
+def instance_stem(name: str) -> str:
+    """The per-instance file stem for any name: a reporter id (any
+    spelling) gives its key (``AC0G=B4`` -> ``AC0G-B4``); anything else (a
+    legacy radiod-keyed ``my-rx888``) comes back unescaped, as it is."""
+    try:
+        return instance_key(name)
+    except InvalidReporterId:
+        return unescape_systemd_instance(name.strip())
+
+
+def identity_for_key(client: str, name: str,
+                     etc_root: Optional[Path] = None) -> str:
+    """The storage-form id behind an instance key read off a unit or file
+    name.  ``AC0G-B4`` -> ``AC0G=B4`` when /etc/<client>/AC0G-B4.toml says
+    ``reporter_id = "AC0G/B4"``; a legacy ``AC0G=B4`` / ``AC0G\\x3dB4``
+    decodes by itself; otherwise the name, unescaped (W1ABC-5, my-rx888)."""
+    raw = unescape_systemd_instance(name.strip())
+    if "=" in raw:
+        try:
+            return parse_user_reporter_id(raw)
+        except InvalidReporterId:
+            return raw
+    etc = Path("/etc") if etc_root is None else Path(etc_root)
+    try:
+        rid = config_reporter_id(etc / client / f"{instance_stem(raw)}.toml")
+    except PermissionError:
+        rid = None
+    return rid or raw
 
 
 def get_instance(client: str, reporter_id: str) -> Optional[Instance]:
@@ -636,6 +736,18 @@ def create_instance(
     """
     paths = (instance_paths(client, reporter_id) if etc_root is None
              else instance_paths(client, reporter_id, etc_root=etc_root))
+
+    # Two ids, one key (AC0G/B4 and AC0G-B4): refuse, even with --force,
+    # rather than let the second instance take over the first one's files.
+    if paths.config.exists():
+        owner = config_reporter_id(paths.config)
+        if owner and owner != parse_user_reporter_id(reporter_id):
+            raise InvalidReporterId(
+                f"{display_reporter_id(reporter_id)} and "
+                f"{display_reporter_id(owner)} would both be "
+                f"{client}@{instance_key(reporter_id)} on this station "
+                f"({paths.config} belongs to {display_reporter_id(owner)}); "
+                "rename one of them")
 
     existing = [
         p for p in (paths.config, paths.env, paths.sources)

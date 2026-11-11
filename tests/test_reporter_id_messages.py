@@ -108,7 +108,7 @@ class ConfigCommandTests(unittest.TestCase):
 
     def test_upload_change_names_the_instance_and_a_working_restart(self):
         fake = (lambda c, i, on, base="/etc", delivery=None:
-                (Path("/etc/wspr-recorder/env/AC0G=S.env"), "WSPR_USE_HS_UPLOADER",
+                (Path("/etc/wspr-recorder/env/AC0G-S.env"), "WSPR_USE_HS_UPLOADER",
                  ["wsprnet.org"], None))
         for typed in ("AC0G/S", "AC0G\\x3dS"):
             with self.subTest(typed=typed):
@@ -119,7 +119,7 @@ class ConfigCommandTests(unittest.TestCase):
                         client="wspr-recorder", instance=typed, on=True, off=False, via=None))
                 self.assertEqual(rc, 0)
                 self.assertIn("upload for wspr-recorder@AC0G/S", err.getvalue())
-                self.assertIn("sudo systemctl restart 'wspr-recorder@AC0G\\x3dS.service'",
+                self.assertIn("sudo systemctl restart 'wspr-recorder@AC0G-S.service'",
                               err.getvalue())
 
 

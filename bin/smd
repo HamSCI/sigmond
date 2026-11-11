@@ -163,15 +163,27 @@ try:
         has_failure as _diag_drop_in_has_failure,
     )
     # Reporter-id spellings (tasks/spec-reporter-id-v372.md): a person sees
-    # AC0G/B4, files hold AC0G=B4, unit names carry AC0G\x3dB4.
+    # AC0G/B4, coordination holds AC0G=B4, and unit and per-instance file
+    # names carry the instance key AC0G-B4 (rob, 2026-11-11; before that
+    # AC0G\x3dB4, still understood on input).
     from sigmond.instance import (
         display_reporter_id       as _display_rid,
         display_unit_name         as _display_unit,
+        instance_key              as _instance_key,
         legacy_instance_hint      as _legacy_hint,
         parse_user_reporter_id    as _parse_reporter_id,
         systemd_escape            as _systemd_escape,
+        systemd_instance          as _systemd_instance,
         unescape_systemd_instance as _unescape_instance,
     )
+
+    def _unit_instance(name: str) -> str:
+        """A reporter id's unit instance (its key, AC0G-B4); any other name
+        (a legacy radiod-keyed my-rx888) escaped as systemd spells it."""
+        try:
+            return _systemd_instance(name)
+        except ValueError:
+            return _systemd_escape(name)
     _HAS_SIGMOND_LIB = True
 except ImportError:
     _HAS_SIGMOND_LIB = False
@@ -11063,7 +11075,8 @@ def _instances_bound(pairs: str, etc_root=None) -> tuple:
         n += 1
         try:
             rid = _inst.parse_user_reporter_id(shown)
-            sel = ClientSources.load(f'{client}@{rid}', root=clients_root).selected
+            stem = _inst.instance_stem(rid)       # files carry the key
+            sel = ClientSources.load(f'{client}@{stem}', root=clients_root).selected
         except (OSError, ValueError) as exc:
             wrong.append(f'{pair} (selection unreadable: {exc})')
             continue
@@ -11071,7 +11084,7 @@ def _instances_bound(pairs: str, etc_root=None) -> tuple:
         if len(want) != 1:
             wrong.append(f'{pair} (selects {len(want)} radiods)')
             continue
-        cfg = etc / client / f'{rid}.toml'
+        cfg = etc / client / f'{stem}.toml'
         try:
             data = tomllib.loads(cfg.read_text())
         except (OSError, ValueError) as exc:
@@ -12732,6 +12745,7 @@ def _install_full_suite(args) -> int:
         return 1
 
     print(BANNER)
+    _rekey_instances()
     _netdiag_auto_refresh('install')
     topology = _load_topology(
         Path(args.topology) if args.topology else TOPOLOGY_PATH,
@@ -15206,9 +15220,31 @@ def _ensure_other_affinity_drop_ins(topology_cpu_affinity=None) -> bool:
     return wrote_any
 
 
+def _rekey_instances() -> None:
+    """Move any reporter-keyed instance still named the old way
+    (psk-recorder@AC0G\x3dB4, /etc/psk-recorder/AC0G=B4.toml) to its
+    instance key (AC0G-B4) -- rob, 2026-11-11.  Runs before start, restart
+    and install, so the units they resolve exist under the names they use.
+    A no-op once a station is moved; never fatal."""
+    if not _HAS_SIGMOND_LIB or os.geteuid() != 0:
+        return
+    try:
+        from sigmond import instance_rekey
+        steps = instance_rekey.apply()
+    except Exception as exc:                          # noqa: BLE001
+        _warn(f'instance names: could not move old =-names to the key: {exc}')
+        return
+    if steps:
+        _heading('instance names: / and = become - (psk-recorder@AC0G-B4)')
+        for line in steps:
+            (_warn if line.startswith('WARN') else _info)(
+                line[len('WARN: '):] if line.startswith('WARN: ') else line)
+
+
 def cmd_start(args) -> int:
     if _need_root('start'):
         return 1
+    _rekey_instances()
     rc = _act_declared_services('start', args)
     return _cmd_start_enabled(args) or rc
 
@@ -16385,6 +16421,7 @@ def _cmd_restart_enabled(args) -> int:
 def cmd_restart(args) -> int:
     if _need_root('restart'):
         return 1
+    _rekey_instances()
     rc = _act_declared_services('restart', args)
     return _cmd_restart_enabled(args) or rc
 
@@ -20498,7 +20535,7 @@ def _restart_hint(client: str, rid: str) -> str:
     """The instance as a person reads it, then a restart command in the
     form systemctl accepts (a slash would name a different unit)."""
     return (f"{client}@{_display_rid(rid)}  "
-            f"(sudo systemctl restart '{client}@{_systemd_escape(rid)}.service')")
+            f"(sudo systemctl restart '{client}@{_unit_instance(rid)}.service')")
 
 
 def _sources_inventory():
@@ -20925,7 +20962,8 @@ def _apply_single_radiod_to_instance(client: str, rid: str, selected: list,
         return False, (f'  ⊘ {label}: {len(selected)} source(s) selected but '
                        f'{client} takes exactly one radiod (deferred)')
     status = radiods[0]
-    cfg = etc_root / client / f'{rid}.toml'
+    from sigmond.instance import instance_stem as _stem
+    cfg = etc_root / client / f'{_stem(rid)}.toml'
     try:
         text = cfg.read_text()
     except OSError:
@@ -20970,7 +21008,8 @@ def _apply_sources_to_instance(client: str, rid: str, selected: list,
     if client != 'wspr-recorder':
         return _apply_single_radiod_to_instance(
             client, rid, selected, dry_run=dry_run, etc_root=etc_root)
-    inst_config = etc_root / 'wspr-recorder' / f'{rid}.toml'
+    from sigmond.instance import instance_stem as _stem
+    inst_config = etc_root / 'wspr-recorder' / f'{_stem(rid)}.toml'
     if not inst_config.exists():
         return False, (f'  ⚠ {client}@{_display_rid(rid)}: no per-instance '
                        f'config at {inst_config} — run `smd admin instance add '
@@ -21152,7 +21191,8 @@ def _sources_bind(status_dns: str, reporter: str, clients, *,
         shared = _inst.shared_config_path(client, etc_root=etc_root)
         if paths.config.exists() or shared.exists():
             _inst.create_instance(client, rid, force=True, etc_root=etc_root)
-        cs = ClientSources(client=f'{client}@{rid}', selected=[key])
+        cs = ClientSources(client=f'{client}@{_inst.instance_stem(rid)}',
+                           selected=[key])
         if ClientSources.load(cs.client, root=clients_root).selected != [key]:
             cs.save(root=clients_root)
             _ok(f'{label}: source {key}')
@@ -22112,7 +22152,7 @@ def _watch_instance(raw, client: str):
             _warn(_legacy_hint(exact))
             return exact, legacy_unit
         raise
-    unit = f'{client}@{_systemd_escape(rid)}.service'
+    unit = f'{client}@{_unit_instance(rid)}.service'
     if (can_be_legacy and exact != rid and not _unit_known(unit)
             and _unit_known(legacy_unit)):
         _warn(_legacy_hint(exact))
@@ -22131,7 +22171,7 @@ def _spool_watch_instance(raw, client: str):
     without ``--instance``; raises ValueError on a bad one.
     """
     instance, _unit = _watch_instance(raw, client)
-    return None if instance is None else _systemd_escape(instance)
+    return None if instance is None else _unit_instance(instance)
 
 
 def _watch_preflight(target_label: str, unit_pattern: str,
@@ -22182,10 +22222,10 @@ def _radiod_status_from_per_instance_config(client: str, instance: str) -> Optio
     ``[[radiod]] status`` value found, which is what
     contract/inventory uses as the spool key.
     """
-    # A watch that found its instance in a unit name holds systemd's
-    # spelling (AC0G\x3dB4); the config file carries AC0G=B4.toml.
-    instance = _unescape_instance(instance)
-    cfg_path = Path(f'/etc/{client}/{instance}.toml')
+    # Any spelling (AC0G-B4 off a unit, AC0G=B4, AC0G\x3dB4) -> the file
+    # stem, which is the instance key (AC0G-B4.toml).
+    from sigmond.instance import instance_stem as _stem
+    cfg_path = Path(f'/etc/{client}/{_stem(instance)}.toml')
     if not cfg_path.exists():
         return None
     try:
@@ -25165,8 +25205,10 @@ def _superdarn_instance_dir(raw, root=None):
             _warn(_legacy_hint(exact))
             return exact, root / exact
         raise
-    escaped = root / _systemd_escape(rid)
-    for candidate in (escaped, root / rid):
+    escaped = root / _unit_instance(rid)
+    # The key-named dir (AC0G-B4) first; a not-yet-migrated station still
+    # has AC0G\x3dB4 or AC0G=B4.
+    for candidate in (escaped, root / _systemd_escape(rid), root / rid):
         if candidate.is_dir():
             return rid, candidate
     if can_be_legacy and exact != rid and (root / exact).is_dir():

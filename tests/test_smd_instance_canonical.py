@@ -27,7 +27,7 @@ class CanonicalTests(unittest.TestCase):
 
     def test_systemd_form(self):
         r = _canonical("--systemd", "AC0G/B4")
-        self.assertEqual((r.returncode, r.stdout), (0, "AC0G\\x3dB4\n"), r.stderr)
+        self.assertEqual((r.returncode, r.stdout), (0, "AC0G-B4\n"), r.stderr)
 
     def test_hyphen_stays_a_hyphen(self):
         # systemd-escape(1) would print W1ABC\x2d5.
