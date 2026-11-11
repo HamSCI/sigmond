@@ -2122,14 +2122,17 @@ ntp_from_dhcp() {
     printf '%s' "$s" | cut -d, -f1
 }
 
-# ntp_scan_lan -> "ip stratum refid" per synchronised NTP server on the uplink's
-# IPv4 subnet, the default gateway first.  DHCP option 42 is rarely set (the
-# ER-X at rob's HamLAN serves NTP and does not advertise it), so when DHCP is
-# silent the wizard asks the LAN directly: one NTP client packet to every host,
-# then 2 s for answers.  Measured on a /24, 2026-11-10: 2.06 s, found the
-# gateway.  Subnets wider than /22 are swept as the /22 around this host so the
-# cost stays bounded (1022 probes).  Servers that say they are unsynchronised
-# (leap 3, stratum 0 or 16) are dropped.  Prints nothing on an IPv6-only uplink.
+# ntp_scan_lan -> "ip stratum refid" per stratum-1 NTP server on the uplink's
+# IPv4 subnet, the default gateway first.  DHCP option 42 is rarely set, so when
+# DHCP is silent the wizard asks the LAN directly: one NTP client packet to
+# every host, then 2 s for answers.  Measured on a /24, 2026-11-10: 2.06 s.
+# Subnets wider than /22 are swept as the /22 around this host so the cost
+# stays bounded (1022 probes).
+# Only stratum 1 counts: a LAN GPS+PPS server can become T4, while a router
+# serving stratum 2 or 3 adds nothing the public pool lacks -- and taking it
+# would make one unvetted box the only time source on both planes.  An
+# unsynchronised server (leap 3) is dropped too.  Prints nothing on an
+# IPv6-only uplink.
 ntp_scan_lan() {
     command -v python3 >/dev/null 2>&1 || return 0
     python3 - <<'NTPSCANEOF' 2>/dev/null
@@ -2156,9 +2159,8 @@ while time.monotonic() - t0 < 2.0:
     try: data, (ip, _) = s.recvfrom(512)
     except BlockingIOError: time.sleep(0.02); continue
     except OSError: continue
-    if len(data) < 48 or data[0] & 7 != 4 or data[0] >> 6 == 3 or not 1 <= data[1] <= 15: continue
-    rid = data[12:16]
-    found[ip] = (data[1], rid.decode("ascii", "replace").strip("\0") if data[1] == 1 else socket.inet_ntoa(rid))
+    if len(data) < 48 or data[0] & 7 != 4 or data[0] >> 6 == 3 or data[1] != 1: continue
+    found[ip] = (data[1], data[12:16].decode("ascii", "replace").strip("\0"))
 print(f"# {net}")
 for ip in sorted(found, key=lambda x: (x != gw, found[x][0], ipaddress.ip_address(x))):
     print(ip, found[ip][0], found[ip][1], "gateway" if ip == gw else "")
@@ -2177,12 +2179,12 @@ ask_ntp() {
         echo "  DHCP on this network offers: $detected"
     else
         echo "  DHCP on this network does not name an NTP server (most don't)."
-        echo "  Asking every address on the local network instead (~2 s)..."
+        echo "  Looking for a stratum-1 (GPS) time server on the local network (~2 s)..."
         scan=$(ntp_scan_lan)
         net=$(printf '%s\n' "$scan" | sed -n 's/^# //p')
         scan=$(printf '%s\n' "$scan" | grep -v '^#' | grep .)
         if [ -n "$scan" ]; then
-            echo "  Found NTP on ${net:-this network}:"
+            echo "  Found stratum-1 NTP on ${net:-this network}:"
             while read -r _ip _st _ref _gw; do
                 _where=""; [ "$_gw" = gateway ] && _where=" — your router (default gateway)"
                 echo "    $_ip  stratum $_st, synced to $_ref$_where"
@@ -2192,10 +2194,10 @@ EOF
             detected=$(printf '%s\n' "$scan" | awk 'NR==1{print $1}')
             echo "  Using $detected unless you name another."
         else
-            echo "  No NTP server answered on ${net:-this network}."
-            echo "  If your site has one (often the router, a Windows domain"
-            echo "  controller, or a GPS time server), enter its address; ask"
-            echo "  your network admin if unsure.  Enter alone uses $NTP_PUBLIC_POOL."
+            echo "  No stratum-1 time server answered on ${net:-this network}."
+            echo "  If your site has a GPS time server the scan cannot reach, or"
+            echo "  a policy names one NTP server, enter its address.  Enter"
+            echo "  alone uses $NTP_PUBLIC_POOL."
         fi
     fi
     if [ -n "$detected" ]; then

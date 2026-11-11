@@ -232,3 +232,60 @@ def test_ntp_option_reruns_site_timing_in_the_vm():
     case = case[:case.index(";;")]
     assert "ntp_normalize" in case and "ntp_apply_both_planes" in case
     assert "/usr/local/sbin/sigmond-site-timing" in case
+
+
+# The LAN scan's Python, run against a fake network: `ip` answers for a /29
+# and the socket returns canned NTP replies, so the filter is exercised as
+# written in the wizard rather than restated here.
+def _scan_py() -> str:
+    m = re.search(r"<<'NTPSCANEOF'.*?\n(.*?)\nNTPSCANEOF", WIZARD.read_text(), re.S)
+    assert m, "ntp_scan_lan's heredoc not found"
+    return m.group(1)
+
+
+def _reply(stratum: int, refid: bytes, leap: int = 0) -> bytes:
+    return bytes([leap << 6 | 4 << 3 | 4, stratum]) + b"\0" * 10 + refid + b"\0" * 32
+
+
+def scan_with(replies: dict) -> list[str]:
+    fake = textwrap.dedent(f"""
+        import socket, subprocess, types
+        REPLIES = {replies!r}
+        def run(cmd, **kw):
+            out = ("default via 192.168.7.1 dev eth0" if "route" in cmd
+                   else "2: eth0 inet 192.168.7.2/29 brd 192.168.7.7 scope global eth0")
+            return types.SimpleNamespace(stdout=out)
+        subprocess.run = run
+        class Sock:
+            def __init__(self, *a): self.q = list(REPLIES.items())
+            def setblocking(self, flag): pass
+            def sendto(self, pkt, addr): pass
+            def recvfrom(self, n):
+                if not self.q: raise BlockingIOError
+                ip, data = self.q.pop(0); return data, (ip, 123)
+        socket.socket = Sock
+    """)
+    p = subprocess.run(["python3", "-c", fake + _scan_py()],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0, p.stderr
+    return [l for l in p.stdout.splitlines() if not l.startswith("#")]
+
+
+def test_scan_keeps_only_stratum_1():
+    found = scan_with({
+        "192.168.7.1": _reply(3, bytes([10, 0, 0, 1])),   # router, stratum 3
+        "192.168.7.4": _reply(1, b"GPS\0"),              # LAN GPS+PPS server
+        "192.168.7.5": _reply(2, bytes([192, 168, 7, 4])),
+    })
+    assert found == ["192.168.7.4 1 GPS "]
+
+
+def test_scan_drops_an_unsynchronised_stratum_1():
+    assert scan_with({"192.168.7.4": _reply(1, b"GPS\0", leap=3)}) == []
+
+
+def test_scan_puts_the_gateway_first():
+    found = scan_with({"192.168.7.4": _reply(1, b"PPS\0"),
+                       "192.168.7.1": _reply(1, b"GPS\0")})
+    assert [l.split()[0] for l in found] == ["192.168.7.1", "192.168.7.4"]
+    assert found[0].endswith("gateway")
