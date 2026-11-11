@@ -222,7 +222,8 @@ def test_each_gateway_base_belongs_to_its_channel():
     # The wizard's RAC_BASE_<NAME>=<base> assignments, read out and set beside
     # the row the page gives for that channel.
     row_of = {"VMSSH": "**VM ssh**", "VMWEB": "**VM web**", "VMSTN": "**station pages**",
-              "VMGMAG": "**magnetometer**", "HSSH": "**host ssh**", "HUI": "**host UI**"}
+              "VMGMAG": "**magnetometer**", "HSSH": "**host ssh**", "HUI": "**host UI**",
+              "VMWEB2": "**VM web, 2nd radiod**", "VMWEB3": "**VM web, 3rd radiod**"}
     bases = dict(re.findall(r"\bRAC_BASE_(\w+)=(\d+)", WIZARD))
     assert set(row_of) <= set(bases), sorted(bases)
     rows = {line.split("|")[1].strip(): line for line in PAGE.splitlines() if line.startswith("| **")}
@@ -384,6 +385,22 @@ def test_the_page_lists_the_six_channels_the_tunnel_declares():
         # The wizard's header comment names every base too; only an
         # assignment makes it the base the tunnel uses.
         assert re.search(rf"RAC_BASE_\w+={base}\b", WIZARD), base
+
+
+def test_the_page_says_a_multi_radiod_decoder_adds_a_web_channel_per_radiod():
+    # The six are what every station has.  A decoder that runs more than one
+    # radiod adds a ka9q-web channel per extra radiod (two at most: gw2 has
+    # bands for a 2nd and a 3rd), and the page says how the tunnel learns of
+    # a radiod added later.
+    assert re.search(r"RAC_BASE_VMWEB2=46800\b", WIZARD) and re.search(r"RAC_BASE_VMWEB3=47800\b", WIZARD)
+    assert "46800 + your RAC number" in PAGE and "47800 + your RAC number" in PAGE
+    assert "sigmond-setup --rac-register" in PAGE
+    # ... and that, on a registered host, it rewrites the web channels alone
+    flat = " ".join(PAGE.split())
+    assert "rewrites only the ka9q-web channels" in flat
+    assert "rac_register refresh" in WIZARD and "rac_refresh_webs" in WIZARD
+    # the wizard tells the operator when a 4th page cannot be carried
+    assert "no gateway band for a 4th ka9q-web page" in WIZARD
 
 
 def test_the_station_heredoc_declares_exactly_four_channels():

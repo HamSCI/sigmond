@@ -26,7 +26,8 @@ TEXT = WIZARD.read_text()
 
 FUNCS = ("build_rac_tiers", "rac_gateway_set", "rac_load_pin", "rac_save_pin",
          "rac_site_name", "rac_payload_ready", "rac_ladder", "rac_write_config",
-         "rac_register_locked", "rac_register")
+         "rac_register_locked", "rac_register", "rac_ka9q_webs", "mgmt_vm_ip",
+         "rac_webs_in_config", "rac_web_channels", "rac_refresh_webs")
 
 PUBKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeFakeFakeFakeFakeFakeFakeFakeFakeFakeFake root@test"
 
@@ -118,6 +119,7 @@ def host(tmp_path, *, tiers, relays=True, frpc=True, configured="AC0G/B4 EM38ww 
         RAC_BASE_VMSSH=35800; RAC_BASE_VMWEB=45800
         RAC_BASE_HSSH=50800;  RAC_BASE_HUI=55800
         RAC_BASE_VMSTN=48800; RAC_BASE_VMGMAG=49800
+        RAC_BASE_VMWEB2=46800; RAC_BASE_VMWEB3=47800
         DASI_NUM=""; HAMSCI_TOKEN=""
         RAC_SERVER=""; RAC_TLS="on"; RAC_TIER_LABEL=""
         RAC_CA_GW2={tmp_path}/ca.crt
@@ -430,7 +432,9 @@ def test_a_wizard_run_without_a_pin_writes_no_pin_file(tmp_path):
 def test_rac_register_runs_before_the_wizard_waits_for_a_vm_or_asks_anything():
     case_at = TEXT.index('case "${1:-}" in\n    --rac-register)')
     branch = TEXT[case_at:TEXT.index("    --rac-off", case_at)]
-    assert "rac_register ensure" in branch and "exit 0" in branch and "exit 1;;" in branch
+    # refresh: register a host that is not registered, and re-render the
+    # ka9q-web channels of one that is (see the multi-radiod tests below)
+    assert "rac_register refresh" in branch and "exit 0" in branch and "exit 1;;" in branch
     assert case_at < TEXT.index("waiting for decoder VM")
     assert case_at < TEXT.index("ask_reporter() {")
     for name in FUNCS:
@@ -471,3 +475,237 @@ def test_the_ssh_proxies_advertise_their_login_to_the_gateway(tmp_path, registra
     assert users == {"vm-ssh": "hamsci", "vm-web": None, "vm-station": None,
                      "vm-gmag": None, "host-ssh": "root", "host-ui": None}
     assert doc["metadatas"]["site"] == "AC0G_B4"      # the login-level table is unchanged
+
+
+# -- a decoder VM that runs more than one radiod ------------------------------
+# rob, 2026-11-08, looking at KFS-SE-NW on the wsprdaemon RAC page: "now that
+# that one PM can support multiple radiods, I'd like to have both of them
+# listed, a link to both of them".  Each ka9q-web page of the VM gets a channel
+# of its own, and every web channel names the radiod it shows, so the gateway
+# page can label the links.
+
+def _proxies(toml):
+    import tomllib
+    return {p["name"].split("-", 1)[1]: p for p in tomllib.loads(toml)["proxies"]}
+
+
+def test_a_multi_radiod_vm_gets_one_web_channel_per_page(tmp_path, registrar):
+    pre = host(tmp_path, tiers=tier(registrar.port))
+    r = run(pre + "rac_register fresh\n", tmp_path,
+            {"SIGMOND_RAC_KA9Q_WEBS": "KFS-NW 8081\nKFS-SE 8084\n", "SIGMOND_MGMT_VM": "10.99.0.2"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    toml = (tmp_path / "frpc-host.toml").read_text()
+    names = [ln.split('"')[1].split("-", 1)[1] for ln in toml.splitlines() if ln.startswith("name = ")]
+    # the 2nd page sits right after the 1st, where the gateway page reads it
+    assert names == ["vm-ssh", "vm-web", "vm-web2", "vm-station", "vm-gmag", "host-ssh", "host-ui"]
+    px = _proxies(toml)
+    assert px["vm-web"]["metadatas"]["radiod"] == "KFS-NW"
+    assert px["vm-web"]["localPort"] == 12223                      # the relay, as before
+    assert px["vm-web2"]["metadatas"]["radiod"] == "KFS-SE"
+    assert px["vm-web2"]["remotePort"] == 46800 + 507               # the gateway's vm_web2 band
+    # no relay exists for a 2nd page: the channel dials the VM on the host-only /30
+    assert (px["vm-web2"]["localIP"], px["vm-web2"]["localPort"]) == ("10.99.0.2", 8084)
+    assert px["vm-web2"]["type"] == "tcp"
+
+
+def test_a_single_radiod_vm_keeps_the_six_channels_and_names_its_page(tmp_path, registrar):
+    pre = host(tmp_path, tiers=tier(registrar.port))
+    r = run(pre + "rac_register fresh\n", tmp_path, {"SIGMOND_RAC_KA9Q_WEBS": "AC0G 8081\n"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    px = _proxies((tmp_path / "frpc-host.toml").read_text())
+    assert sorted(px) == ["host-ssh", "host-ui", "vm-gmag", "vm-ssh", "vm-station", "vm-web"]
+    assert px["vm-web"]["metadatas"] == {"radiod": "AC0G"}
+
+
+def test_a_vm_that_cannot_be_asked_gets_the_six_bare_channels(tmp_path, registrar):
+    # No guest agent in this scratch host: the configuration is the one every
+    # station has had so far -- six channels, no radiod names.
+    pre = host(tmp_path, tiers=tier(registrar.port))
+    r = run(pre + "rac_register fresh\n", tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    toml = (tmp_path / "frpc-host.toml").read_text()
+    assert "radiod" not in toml and "vm-web2" not in toml
+    assert len(_proxies(toml)) == 6
+
+
+def test_a_primary_page_without_a_radiod_name_carries_none(tmp_path, registrar):
+    pre = host(tmp_path, tiers=tier(registrar.port))
+    r = run(pre + "rac_register fresh\n", tmp_path, {"SIGMOND_RAC_KA9Q_WEBS": "- 8081\nKFS-SE 8084\n"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    px = _proxies((tmp_path / "frpc-host.toml").read_text())
+    assert "metadatas" not in px["vm-web"]
+    assert px["vm-web2"]["metadatas"]["radiod"] == "KFS-SE"
+
+
+def test_a_third_page_takes_the_next_band_and_a_fourth_is_left_out(tmp_path, registrar):
+    # gw2 reserves 46800 and 47800 for a 2nd and 3rd ka9q-web; there is no
+    # band for a 4th, so it is not tunnelled, and the operator is told.
+    pre = host(tmp_path, tiers=tier(registrar.port))
+    r = run(pre + "rac_register fresh\n", tmp_path,
+            {"SIGMOND_RAC_KA9Q_WEBS": "A 8081\nB 8084\nC 8085\nD 8086\n", "SIGMOND_MGMT_VM": "10.99.0.2"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    px = _proxies((tmp_path / "frpc-host.toml").read_text())
+    assert px["vm-web2"]["remotePort"] == 46800 + 507 and px["vm-web2"]["localPort"] == 8084
+    assert px["vm-web3"]["remotePort"] == 47800 + 507 and px["vm-web3"]["localPort"] == 8085
+    assert px["vm-web3"]["metadatas"]["radiod"] == "C"
+    assert "vm-web4" not in px
+    assert "no gateway band for a 4th ka9q-web page (D on port 8086)" in r.stdout
+
+
+def test_a_page_on_the_primary_port_is_not_tunnelled_twice(tmp_path, registrar):
+    pre = host(tmp_path, tiers=tier(registrar.port))
+    r = run(pre + "rac_register fresh\n", tmp_path, {"SIGMOND_RAC_KA9Q_WEBS": "A 8081\nA 8081\n"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "vm-web2" not in (tmp_path / "frpc-host.toml").read_text()
+
+
+def test_every_gateway_config_carries_the_extra_page(tmp_path, registrar):
+    # A station on two gateways publishes the same channels on both.
+    pre = host(tmp_path, tiers=tier(registrar.port, label="HamSCI secure (TOFU)"))
+    r = run(pre + "rac_register fresh\n", tmp_path, {"SIGMOND_RAC_KAQ_WEBS_UNUSED": "",
+                                                       "SIGMOND_RAC_KA9Q_WEBS": "X 8081\nY 8084\n"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    tomls = sorted(tmp_path.glob("frpc-host-*.toml"))
+    assert len(tomls) >= 1
+    for t in tomls:
+        assert _proxies(t.read_text())["vm-web2"]["metadatas"]["radiod"] == "Y", t
+
+
+def test_a_radiod_name_that_cannot_sit_in_a_toml_string_is_dropped(tmp_path, registrar):
+    pre = host(tmp_path, tiers=tier(registrar.port))
+    r = run(pre + "rac_register fresh\n", tmp_path,
+            {"SIGMOND_RAC_KA9Q_WEBS": 'KFS"-NW 8081\nKFS-SE 8084\n', "SIGMOND_MGMT_VM": "10.99.0.2"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    px = _proxies((tmp_path / "frpc-host.toml").read_text())     # still parses
+    assert "metadatas" not in px["vm-web"] and px["vm-web2"]["metadatas"]["radiod"] == "KFS-SE"
+
+
+def test_a_duplicate_page_does_not_push_the_next_one_off_its_band(tmp_path, registrar):
+    # A stale or repeated line is no page.  It must not use up vm-web2, so
+    # the real 2nd page still lands there and the 3rd on vm-web3.
+    pre = host(tmp_path, tiers=tier(registrar.port))
+    r = run(pre + "rac_register fresh\n", tmp_path,
+            {"SIGMOND_RAC_KA9Q_WEBS": "A 8081\nA 8081\nB 8084\nB 8084\nC 8085\n",
+             "SIGMOND_MGMT_VM": "10.99.0.2"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    px = _proxies((tmp_path / "frpc-host.toml").read_text())
+    assert (px["vm-web2"]["remotePort"], px["vm-web2"]["localPort"]) == (46800 + 507, 8084)
+    assert (px["vm-web3"]["remotePort"], px["vm-web3"]["localPort"]) == (47800 + 507, 8085)
+    assert "4th" not in r.stdout
+
+
+def test_the_writing_line_counts_the_channels_it_writes(tmp_path, registrar):
+    pre = host(tmp_path, tiers=tier(registrar.port))
+    r = run(pre + "rac_register fresh\n", tmp_path,
+            {"SIGMOND_RAC_KA9Q_WEBS": "A 8081\nB 8084\nC 8085\n", "SIGMOND_MGMT_VM": "10.99.0.2"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "(8 channels, gateway gw2" in r.stdout, r.stdout
+
+
+# -- a radiod added (or removed) after registration ---------------------------
+# The host asks the VM for its pages when it writes the configuration.
+# `sigmond-setup --rac-register` on a registered host asks again and rewrites
+# only the ka9q-web channels: the RAC number, the ports, the token and the
+# keys stay as they are, and the gateway is not asked anything.
+
+def _register_with(tmp_path, registrar, webs):
+    pre = host(tmp_path, tiers=tier(registrar.port))
+    r = run(pre + "rac_register fresh\n", tmp_path,
+            {"SIGMOND_RAC_KA9Q_WEBS": webs, "SIGMOND_MGMT_VM": "10.99.0.2"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    (tmp_path / "systemctl.calls").unlink()
+    return pre
+
+
+def _without_extra_webs(toml):
+    # the configuration with its vm-web2/3 blocks and its radiod names taken out
+    out, skip = [], False
+    for block in toml.split("\n\n"):
+        if '-vm-web2"' in block or '-vm-web3"' in block:
+            continue
+        out.append("\n".join(ln for ln in block.splitlines()
+                             if not ln.startswith("radiod = ") and ln != "[proxies.metadatas]"
+                             or "user = " in block and ln == "[proxies.metadatas]"))
+    return "\n\n".join(out)
+
+
+def test_refresh_adds_the_channel_of_a_radiod_added_later(tmp_path, registrar):
+    pre = _register_with(tmp_path, registrar, "A 8081\n")
+    before = (tmp_path / "frpc-host-gw2.toml").read_text()
+    r = run(pre + 'rac_register refresh; echo "rc=$?"\n', tmp_path,
+            {"SIGMOND_RAC_KA9Q_WEBS": "A 8081\nB 8084\n", "SIGMOND_MGMT_VM": "10.99.0.2"})
+    assert "rc=0" in r.stdout, r.stdout + r.stderr
+    after = (tmp_path / "frpc-host-gw2.toml").read_text()
+    assert len(registrar.bodies) == 1                       # the gateway was not asked again
+    names = [ln.split('"')[1].split("-", 1)[1] for ln in after.splitlines() if ln.startswith("name = ")]
+    assert names == ["vm-ssh", "vm-web", "vm-web2", "vm-station", "vm-gmag", "host-ssh", "host-ui"]
+    px = _proxies(after)
+    assert px["vm-web2"]["metadatas"]["radiod"] == "B"
+    assert (px["vm-web2"]["localIP"], px["vm-web2"]["localPort"], px["vm-web2"]["remotePort"]) \
+        == ("10.99.0.2", 8084, 46800 + 507)
+    # everything else stands exactly as registered
+    assert _without_extra_webs(after) == _without_extra_webs(before)
+    assert stat.S_IMODE((tmp_path / "frpc-host-gw2.toml").stat().st_mode) == 0o600
+    assert (tmp_path / "frpc-host.toml").is_symlink()
+    assert calls(tmp_path) == ["try-restart sigmond-rac-host@gw2.service"]
+    assert "7 channels" in r.stdout
+
+
+def test_refresh_drops_the_channel_of_a_radiod_removed_since(tmp_path, registrar):
+    pre = _register_with(tmp_path, registrar, "A 8081\nB 8084\nC 8085\n")
+    before = (tmp_path / "frpc-host-gw2.toml").read_text()
+    r = run(pre + 'rac_register refresh; echo "rc=$?"\n', tmp_path,
+            {"SIGMOND_RAC_KA9Q_WEBS": "A 8081\nC 8085\n", "SIGMOND_MGMT_VM": "10.99.0.2"})
+    assert "rc=0" in r.stdout, r.stdout + r.stderr
+    after = (tmp_path / "frpc-host-gw2.toml").read_text()
+    px = _proxies(after)
+    assert "vm-web3" not in px and px["vm-web2"]["metadatas"]["radiod"] == "C"
+    assert len(registrar.bodies) == 1
+    assert _without_extra_webs(after) == _without_extra_webs(before)
+    assert len(_proxies(after)) == 7
+
+
+def test_refresh_with_nothing_changed_touches_nothing(tmp_path, registrar):
+    pre = _register_with(tmp_path, registrar, "A 8081\nB 8084\n")
+    before = (tmp_path / "frpc-host-gw2.toml").read_text()
+    r = run(pre + 'rac_register refresh; echo "rc=$?"\n', tmp_path,
+            {"SIGMOND_RAC_KA9Q_WEBS": "A 8081\nB 8084\n", "SIGMOND_MGMT_VM": "10.99.0.2"})
+    assert "rc=0" in r.stdout, r.stdout + r.stderr
+    assert (tmp_path / "frpc-host-gw2.toml").read_text() == before
+    assert calls(tmp_path) == [] and len(registrar.bodies) == 1
+
+
+def test_refresh_registers_a_host_that_is_not_registered_yet(tmp_path, registrar):
+    pre = host(tmp_path, tiers=tier(registrar.port))
+    r = run(pre + 'rac_register refresh; echo "rc=$?"\n', tmp_path,
+            {"SIGMOND_RAC_KA9Q_WEBS": "A 8081\n"})
+    assert "rc=0" in r.stdout, r.stdout + r.stderr
+    assert len(registrar.bodies) == 1
+    assert _proxies((tmp_path / "frpc-host.toml").read_text())["vm-web"]["metadatas"]["radiod"] == "A"
+
+
+def test_refresh_keeps_the_channels_when_the_vm_cannot_be_asked(tmp_path, registrar):
+    pre = _register_with(tmp_path, registrar, "A 8081\nB 8084\n")
+    before = (tmp_path / "frpc-host-gw2.toml").read_text()
+    r = run(pre + 'rac_register refresh; echo "rc=$?"\n', tmp_path)     # no guest agent here
+    assert "rc=0" in r.stdout, r.stdout + r.stderr
+    assert (tmp_path / "frpc-host-gw2.toml").read_text() == before
+    assert calls(tmp_path) == []
+    assert "could not ask the VM for its ka9q-web pages" in r.stdout
+
+
+def test_a_fresh_run_that_cannot_ask_the_vm_keeps_the_extra_pages(tmp_path, registrar):
+    # A wizard rerun while the guest agent is slow must not drop vm-web2/3:
+    # it carries the pages the current configuration names, and says so.
+    pre = _register_with(tmp_path, registrar, "A 8081\nB 8084\nC 8085\n")
+    before = (tmp_path / "frpc-host-gw2.toml").read_text()
+    r = run(pre + 'rac_register fresh; echo "rc=$?"\n', tmp_path, {"SIGMOND_MGMT_VM": "10.99.0.2"})
+    assert "rc=0" in r.stdout, r.stdout + r.stderr
+    assert len(registrar.bodies) == 2
+    after = (tmp_path / "frpc-host-gw2.toml").read_text()
+    px = _proxies(after)
+    assert px["vm-web"]["metadatas"]["radiod"] == "A"
+    assert (px["vm-web2"]["metadatas"]["radiod"], px["vm-web2"]["localPort"]) == ("B", 8084)
+    assert (px["vm-web3"]["metadatas"]["radiod"], px["vm-web3"]["localPort"]) == ("C", 8085)
+    assert after.split("\n", 1)[1] == before.split("\n", 1)[1]    # all but the dated header line
+    assert "could not ask the VM for its ka9q-web pages" in r.stdout
