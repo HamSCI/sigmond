@@ -187,6 +187,8 @@ HT_PAIRS="${HT_PAIRS% }"
 
 # CPU vendor (for grub iommu flag).
 CPU_VENDOR="$(awk -F: '/^vendor_id/{print $2; exit}' /proc/cpuinfo | tr -d ' ')"
+# CPU model name, for the per-CPU defaults in lib/sigmond/cpu_profiles.py.
+CPU_MODEL="$(awk -F: '/^model name/{sub(/^[ \t]+/, "", $2); print $2; exit}' /proc/cpuinfo)"
 
 # ─── RX888 count ──────────────────────────────────────────────────────────────
 # One radiod per RX888 on this host's bus: 04b4:00f1 is a card with firmware
@@ -222,6 +224,7 @@ emit HOST_CPU_COUNT "$HOST_CPU_COUNT"
 emit HT_PATTERN "$HT_PATTERN"
 emit HT_PAIRS "$HT_PAIRS"
 emit CPU_VENDOR "$CPU_VENDOR"
+emit CPU_MODEL "$CPU_MODEL"
 emit RX888_COUNT "$RX888_COUNT"
 emit RX888_VISIBLE "$RX888_VISIBLE"
 emit HOST_LAYOUT_RADIOD_COUNT "$HOST_LAYOUT_RADIOD_COUNT"

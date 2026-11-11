@@ -243,6 +243,20 @@ print(layout_shell_vars(lay))
         || die "CPU layout computation failed (HT_PAIRS='$ht_pairs' local_radiods=$radiod_count). Non-SMT/asymmetric host or too few cores — configure manually per docs/proxmox/wsprdaemon-proxmox-cpu-clock-tuning.md."
     eval "$layout_vars"
 
+    # Decoder DRAM-bandwidth cap (AMD MBA) for the host's resctrl unit, from
+    # the host CPU's entry in lib/sigmond/cpu_profiles.py; empty for a CPU
+    # with no entry.  CPU_MODEL arrives %q-escaped; a model name holds no
+    # backslash of its own, so dropping them all undoes it.
+    local host_cpu_model="${KV[CPU_MODEL]:-}" DECODER_MB_GBPS=""
+    host_cpu_model="${host_cpu_model//\\/}"
+    if [[ -n "$host_cpu_model" ]]; then
+        DECODER_MB_GBPS="$(PYTHONPATH="$SIGMOND_REPO/lib" python3 -m sigmond.cpu_profiles \
+            decoder-mba-gbps "$host_cpu_model" 2>/dev/null || true)"
+    fi
+    if [[ -n "$DECODER_MB_GBPS" ]]; then
+        info "host CPU '${host_cpu_model}': decoder pCPUs get a ${DECODER_MB_GBPS} GB/s MBA cap"
+    fi
+
     state_set VMID "$vmid" \
               USB_VID_DID "$usb_vid_did" \
               USB_ADDRS_FOR_ID "$usb_addrs" \
@@ -278,7 +292,7 @@ print(layout_shell_vars(lay))
               VM_CORES='$VM_CORES' VM_THREADS='$VM_THREADS' \
               ISOLCPUS_RANGE='$ISOLCPUS_RANGE' \
               RADIOD_CPUS='$RADIOD_CPUS' WORKER_CPUS='$WORKER_CPUS' \
-              VCPU_TO_PCPU='$VCPU_TO_PCPU' \
+              VCPU_TO_PCPU='$VCPU_TO_PCPU' DECODER_MB_GBPS='$DECODER_MB_GBPS' \
               RADIOD_FREQ_KHZ='3200000' WORKER_FREQ_KHZ='1400000' \
               bash /tmp/host-apply.sh")"
     printf '%s\n' "$apply_out" | sed 's/^/    /'

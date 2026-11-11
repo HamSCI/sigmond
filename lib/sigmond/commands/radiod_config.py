@@ -57,11 +57,12 @@ from pathlib import Path
 from string import Template
 from typing import Optional
 
-from .. import sdr_map
+from .. import cpu_profiles, sdr_map
 from ..coordination import load_coordination, render_env
 from ..discovery import usb_sdr
 from ..environment import Environment
-from ..paths import COORDINATION_ENV, COORDINATION_PATH, SIGMOND_CONF
+from ..paths import (COORDINATION_ENV, COORDINATION_PATH, HF_TIMESTD_CONF,
+                     SIGMOND_CONF)
 from ..ui import err, heading, info, ok, warn
 # {instance: serial} each running radiod has open; patchable in tests.
 from .sdr import held_serials as _held_serials
@@ -185,6 +186,173 @@ _FRONTEND_PROFILES: dict[str, dict] = {
         ),
     },
 }
+
+
+def _host_cpu_profile():
+    """This host's cpu_profiles entry, or None (patchable in tests)."""
+    return cpu_profiles.host_profile()
+
+
+# The samprate line of an RX888 profile plus the comment-only continuation
+# lines under it (the "RX888" profile's comment runs to five lines).
+_SAMPRATE_BLOCK_RE = re.compile(r"^samprate\s*=.*\n(?:[ \t]+#.*\n)*", re.M)
+
+
+def _rx888_samprate_block(rate, comment: list[str]) -> str:
+    lines = [f"samprate    = {str(rate):<12s}   # {comment[0]}"]
+    lines += [f"{'':29s}# {c}" for c in comment[1:]]
+    return "\n".join(lines) + "\n"
+
+
+# What radiod runs an RX888 at with no `samprate` line (rx888.c
+# DEFAULT_SAMPRATE).
+_RX888_DEFAULT_SAMPRATE_HZ = 64_800_000
+
+
+def _mhz(rate) -> str:
+    return f"{rate / 1e6:g} Msps" if isinstance(rate, int) else f"{rate!r}"
+
+
+def _choose_rx888_samprates(plans: list[dict], profile,
+                            full_rate: Optional[str] = None,
+                            coord=None) -> None:
+    """Set each new RX888 plan's ADC rate from the host's CPU profile.
+
+    The profile gives the first ``full_rate_radiods`` RX888 radiods on the
+    host 129.6 Msps and the rest its reduced rate.  "First" means, in
+    order: the radiod ``full_rate`` names (`--full-rate`: an instance id,
+    status name or card serial), else the one hf-timestd is bound to (the
+    TS-1 T6 pilot's alias plan is built for 129.6 Msps); then the RX888
+    confs already on disk (other than ones this run replaces); then this
+    run's plans in bus order.  When neither names a radiod, bus order
+    decides alone and the operator is told which card got which rate.
+
+    An unknown CPU gets 129.6 Msps for every radiod, i.e. the profile text
+    unchanged.  A conf this run replaces (--reconfig) keeps the samprate it
+    had, even one sigmond cannot read: an operator's rate is never
+    rewritten.  So is every conf already on disk, which can leave two
+    radiods at full rate; that is said aloud too.
+    """
+    targets = {plan["target"] for plan in plans}
+    names: list[sdr_map.RadiodName] = []
+    on_disk: dict[str, object] = {}         # instance -> its kept rate
+    for conf in sorted(RADIOD_CONFIG_DIR.glob("radiod@*.conf")):
+        if conf in targets:
+            continue
+        try:
+            text = conf.read_text()
+        except OSError:
+            continue
+        if not sdr_map.has_rx888_section(text):
+            continue
+        inst = conf.name[len("radiod@"):-len(".conf")]
+        rd = sdr_map.coord_radiod_for(coord, inst) if coord else None
+        names.append(sdr_map.RadiodName(
+            inst, sdr_map.conf_status(text),
+            sdr_map.conf_serial(text)
+            or sdr_map._norm(getattr(rd, "sdr_serial", ""))))
+        on_disk[inst] = (sdr_map.conf_samprate_hz(text)
+                         or sdr_map.conf_samprate_raw(text)
+                         or _RX888_DEFAULT_SAMPRATE_HZ)
+    rx_plans = [p for p in plans if p["frontend"] == "rx888"]
+    names += [sdr_map.RadiodName(p["instance_id"], p["status_dns"],
+                                 sdr_map._norm(p.get("serial")))
+              for p in rx_plans]
+
+    named = (sdr_map.find_radiod(full_rate, names, coord)
+             if full_rate else None)
+    if full_rate and named is None:
+        warn(f"--full-rate {full_rate}: no RX888 radiod on this host has "
+             f"that id, status name or card serial; ignoring it")
+    timing = None
+    for key in sdr_map.timestd_radiod_keys(coord, HF_TIMESTD_CONF):
+        timing = sdr_map.find_radiod(key, names, coord)
+        if timing is not None:
+            break
+    chosen = named or timing
+    if (profile is not None and named is not None and timing is not None
+            and named != timing):
+        warn(f"--full-rate gives radiod@{named.instance} 129.6 Msps, but "
+             f"hf-timestd is bound to radiod@{timing.instance}, which may "
+             f"get {_mhz(profile.reduced_samprate_hz)}; hf-timestd's T6 "
+             f"pilot plan is built for 129.6 Msps")
+
+    order = [n.instance for n in names]
+    if chosen is not None:
+        order.remove(chosen.instance)
+        order.insert(0, chosen.instance)
+
+    rates: dict[str, object] = dict(on_disk)
+    from_profile: list[str] = []
+    for plan in rx_plans:
+        ordinal = order.index(plan["instance_id"])
+        kept = kept_raw = None
+        if plan["target"].exists():
+            try:
+                text = plan["target"].read_text()
+                kept = sdr_map.conf_samprate_hz(text)
+                kept_raw = sdr_map.conf_samprate_raw(text)
+            except OSError:
+                pass
+        if kept is not None:
+            hz = kept
+            comment = ["kept from the conf this one replaced"]
+        elif kept_raw:
+            # Present but in no form we read: still the operator's.
+            hz = kept_raw
+            comment = ["kept as written from the conf this one replaced"]
+            warn(f"cannot read `samprate = {kept_raw}` in {plan['target']}; "
+                 f"kept as written, not recomputed")
+        else:
+            hz = cpu_profiles.rx888_samprate_hz(ordinal, profile)
+            from_profile.append(plan["instance_id"])
+            comment = [] if profile is None else [
+                f"{hz / 1e6:g} Msps, HF only (Nyquist {hz / 2e6:g} MHz).",
+                f"RX888 radiod #{ordinal + 1} on a {profile.name}, which",
+                f"runs {profile.full_rate_radiods} at 129.6 Msps: two at "
+                f"129.6 saturate",
+                "both FFT threads.  Measured: " + profile.source + ";",
+                "see sigmond lib/sigmond/cpu_profiles.py."]
+        rates[plan["instance_id"]] = hz
+        if hz == cpu_profiles.FULL_SAMPRATE_HZ:
+            continue        # the profile's own 129.6 line, comment and all
+        block = _rx888_samprate_block(hz, comment)
+        plan["frontend_defaults"] = _SAMPRATE_BLOCK_RE.sub(
+            lambda _m: block, plan["frontend_defaults"] + "\n",
+            count=1).rstrip()
+
+    if profile is None or not from_profile:
+        return
+    by_inst = {n.instance: n for n in names}
+
+    def _who(inst: str) -> str:
+        serial = by_inst[inst].serial
+        return f"radiod@{inst}" + (f" (card {serial})" if serial else "")
+
+    if chosen is None and len(order) > profile.full_rate_radiods:
+        layout = ", ".join(f"{_who(i)} {_mhz(rates[i])}" for i in order)
+        warn(f"no radiod is named for 129.6 Msps (hf-timestd is bound to "
+             f"none of these and --full-rate was not given), so bus order "
+             f"decided: {layout}.  hf-timestd needs the 129.6 Msps one "
+             f"(its TS-1 T6 pilot plan is built for that rate).  To choose, "
+             f"register with `smd config init radiod --full-rate <radiod "
+             f"id or card serial>`, or bind hf-timestd first.  Once these "
+             f"confs exist sigmond never rewrites their rate: set "
+             f"`samprate` in each [rx888] section by hand and restart "
+             f"those radiods.")
+    full = [i for i in order if rates[i] == cpu_profiles.FULL_SAMPRATE_HZ]
+    if (len(full) > profile.full_rate_radiods
+            and any(i in from_profile for i in full)):
+        kept_full = [i for i in full if i not in from_profile]
+        warn(f"this {profile.name} now runs {len(full)} radiods at 129.6 "
+             f"Msps ({', '.join(_who(i) for i in full)}); two at 129.6 "
+             f"saturate both FFT threads.  "
+             + (f"{', '.join('radiod@' + i for i in kept_full)} kept the "
+                f"rate its conf already had (sigmond never rewrites it); "
+                if kept_full else "")
+             + f"set `samprate = {profile.reduced_samprate_hz}` in the "
+               f"[rx888] section of all but the one hf-timestd uses, and "
+               f"restart them.")
 
 
 def _profile_for(sdr_type: str) -> dict:
@@ -627,6 +795,10 @@ def cmd_radiod_init(args) -> int:
         if _refuse_overwrite(plan["target"], args):
             return 1
         plans.append(plan)
+
+    _choose_rx888_samprates(plans, _host_cpu_profile(),
+                            full_rate=getattr(args, "full_rate", None),
+                            coord=coord)
 
     # Second pass: write.
     _write_repins()

@@ -30722,6 +30722,13 @@ def _build_parser() -> argparse.ArgumentParser:
                         'hardware-free testing (no USB SDR required).  Generates '
                         'a 10 MHz carrier + a built-in demod channel on loopback '
                         'so the radiod multicast chain can be exercised anywhere.')
+    p.add_argument('--full-rate', dest='full_rate', metavar='ID|SERIAL',
+                   default=None,
+                   help='radiod only: on a CPU that runs only some RX888 '
+                        'radiods at 129.6 Msps (lib/sigmond/cpu_profiles.py), '
+                        'the radiod to give 129.6, by instance id, status '
+                        'name or card serial.  Default: the one hf-timestd '
+                        'is bound to, else bus order (with a warning).')
 
     p = config_sub.add_parser('register-radiod',
                               help='register an already-written '

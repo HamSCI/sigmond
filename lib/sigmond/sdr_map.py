@@ -11,6 +11,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
 from typing import Callable
 
@@ -69,14 +70,15 @@ def _unquote(value: str) -> str:
     return value.split('#', 1)[0].strip()
 
 
-def _section_value(text: str, key: str) -> str:
-    """Raw uncommented `key = value` in the [rx888] section, "" if none."""
+def _section_value(text: str, key: str, section: str = 'rx888') -> str:
+    """Raw uncommented `key = value` in the [rx888] (or another) section,
+    "" if none."""
     pat = re.compile(rf'^{key}\s*=\s*(.*)$')
     in_rx888 = False
     for raw in text.splitlines():
         line = raw.strip()
         if line.startswith('['):
-            in_rx888 = line.split('#', 1)[0].strip() == '[rx888]'
+            in_rx888 = line.split('#', 1)[0].strip() == f'[{section}]'
             continue
         if in_rx888:
             m = pat.match(line)
@@ -95,9 +97,106 @@ def conf_serial(text: str) -> str:
     return _norm(_section_value(text, 'serial'))
 
 
+# The forms radiod's parse_frequency (ka9q-radio src/parse.c) reads as a
+# rate: a plain or decimal number, optionally with an exponent, or digits
+# around one k/M/G multiplier in either case (`129.6M`, `129m6`, `64m800000`).
+_PLAIN_RATE_RE = re.compile(r'(\d+\.?\d*|\.\d+)(e[+-]?\d+)?')
+_SUFFIX_RATE_RE = re.compile(r'(\d*)(?:[.,](\d*))?([kmg])(\d*)')
+_RATE_SCALE = {'k': 10 ** 3, 'm': 10 ** 6, 'g': 10 ** 9}
+
+
+def parse_samprate_hz(raw: str) -> int | None:
+    """A radiod rate value in Hz, None when it is not a form we can read."""
+    s = (raw or '').strip().lower().replace('_', '')
+    if not s:
+        return None
+    if _PLAIN_RATE_RE.fullmatch(s):
+        hz = int(round(float(s)))
+    else:
+        m = _SUFFIX_RATE_RE.fullmatch(s)
+        if not m or not (m.group(1) or m.group(2) or m.group(4)):
+            return None
+        whole, frac, suffix, tail = m.groups()
+        if frac and tail:
+            return None             # `1.2m3`: no reading we would trust
+        hz = int(Decimal(f"{whole or 0}.{(frac or '') + tail or 0}")
+                 * _RATE_SCALE[suffix])
+    return hz if hz > 0 else None
+
+
+def conf_samprate_raw(text: str) -> str:
+    """The [rx888] section's `samprate` value as written, with an inline
+    `#` or `;` comment cut (iniparser cuts both), "" if absent."""
+    return _section_value(text, 'samprate').split(';', 1)[0].strip()
+
+
+def conf_samprate_hz(text: str) -> int | None:
+    """The [rx888] section's ADC `samprate` in Hz, None if absent or
+    unreadable.  `[global] samprate` (the channel output rate) is ignored.
+    Reads every spelling radiod does: `129600000`, `129.6M`, `64.8m`,
+    `129m6`, `64m800000`, `129.6e6`.  A caller that must not overwrite an
+    operator's rate checks conf_samprate_raw too: None with a raw value
+    means "present but unreadable", which is a reason to keep it."""
+    return parse_samprate_hz(conf_samprate_raw(text))
+
+
 def conf_description(text: str) -> str:
     """The [rx888] section's `description =` value, "" if none."""
     return _section_value(text, 'description')
+
+
+def conf_status(text: str) -> str:
+    """The [global] section's `status =` name, "" if none."""
+    return _section_value(text, 'status', 'global').split(';', 1)[0].strip()
+
+
+@dataclass(frozen=True)
+class RadiodName:
+    """The three names a local radiod goes by."""
+    instance: str           # the <id> of radiod@<id>.conf
+    status: str = ''        # its [global] status name
+    serial: str = ''        # its card's USB serial
+
+
+def find_radiod(key: str, radiods: list[RadiodName], coord=None):
+    """The radiod in ``radiods`` that ``key`` names, by instance id, status
+    name or card serial, case ignored; None when none does.  A coordination
+    radiod id that is none of those counts through its status_dns and
+    sdr_serial, since coordination keys radiods by either id or status."""
+    want = {str(key or '').strip().lower()} - {''}
+    rd = (getattr(coord, 'radiods', None) or {}).get(str(key or '').strip())
+    if rd is not None:
+        want |= {str(v).strip().lower() for v in (
+            getattr(rd, 'effective_status_dns', ''),
+            getattr(rd, 'sdr_serial', '')) if v}
+    if not want:
+        return None
+    for r in radiods:
+        names = {r.instance.lower(), r.status.lower(), r.serial.lower()}
+        if r.status and not r.status.lower().endswith('.local'):
+            names.add(r.status.lower() + '.local')
+        if want & (names - {''}):
+            return r
+    return None
+
+
+def timestd_radiod_keys(coord, timestd_conf: Path) -> list[str]:
+    """What names the radiod hf-timestd uses: the `radiod_id` of each
+    [[clients.hf-timestd]] binding in coordination.toml, then the
+    `[ka9q] status_address` of hf-timestd's own config.  Unmatched names;
+    find_radiod resolves them.  An unreadable config adds nothing."""
+    keys = [c.radiod_id for c in (coord.instances_of('hf-timestd')
+                                  if coord is not None else [])
+            if c.radiod_id]
+    try:
+        import tomllib
+        raw = tomllib.loads(Path(timestd_conf).read_text())
+    except (OSError, ValueError):
+        return keys
+    addr = (raw.get('ka9q', {}) or {}).get('status_address', '')
+    if addr:
+        keys.append(str(addr))
+    return keys
 
 
 def instance_serials(confdir: Path = Path('/etc/radio'), coord=None) -> dict[str, str]:
