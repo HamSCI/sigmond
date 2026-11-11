@@ -450,3 +450,32 @@ def test_dispatch_passes_the_handlers_web_units_to_the_hook(smd, monkeypatch):
     monkeypatch.setattr(_sys, "argv", ["smd", "admin", "radiod", "rename", "a", "b", "--yes"])
     assert smd.main() == 0
     assert seen["kw"]["handler_web"] == ["ka9q-web@a.service"]
+
+
+# ------------------------------------------- lifecycle shim lookup (AC0G-B1)
+
+def test_shim_lookup_prefers_the_running_checkout(tmp_path):
+    """B1 kept install.sh's 09-28 copy without templated_units, so
+    `smd disable ka9q-web` left ka9q-web@ac0g-b1-b running."""
+    from sigmond.component_state import fallback_shim_path
+    repo, installed = tmp_path / "repo", tmp_path / "etc"
+    repo.mkdir(); installed.mkdir()
+    (installed / "ka9q-web.deploy.toml").write_text(
+        '[systemd]\nunits = ["ka9q-web.service"]\n')
+    assert fallback_shim_path("ka9q-web", repo=repo,
+                              installed=installed) == installed / "ka9q-web.deploy.toml"
+    (repo / "ka9q-web.deploy.toml").write_text(
+        '[systemd]\nunits = ["ka9q-web.service"]\n'
+        'templated_units = ["ka9q-web@.service"]\n')
+    assert fallback_shim_path("ka9q-web", repo=repo,
+                              installed=installed) == repo / "ka9q-web.deploy.toml"
+    assert fallback_shim_path("nothing", repo=repo, installed=installed) is None
+
+
+def test_repo_shim_declares_the_template():
+    import tomllib
+    from sigmond.component_state import fallback_shim_path
+    path = fallback_shim_path("ka9q-web")
+    assert path is not None and "etc/clients" in str(path)
+    systemd = tomllib.loads(path.read_text())["systemd"]
+    assert "ka9q-web@.service" in systemd["templated_units"]

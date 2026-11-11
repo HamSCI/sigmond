@@ -121,11 +121,34 @@ def _read_deploy_toml(name: str) -> Optional[dict]:
         return None
 
 
+_REPO_SHIMS = Path(__file__).resolve().parents[2] / "etc" / "clients"
+_INSTALLED_SHIMS = Path("/etc/sigmond/clients")
+
+
+def fallback_shim_path(name: str, *, repo: Path = _REPO_SHIMS,
+                       installed: Path = _INSTALLED_SHIMS) -> Optional[Path]:
+    """The lifecycle shim for a deploy-less component, or None.
+
+    The running sigmond checkout's own etc/clients/ copy comes first.
+    install.sh copies those files into /etc/sigmond/clients/ once, and
+    nothing refreshes the copies: AC0G-B1 (2026-11-11) still held its
+    09-28 ka9q-web shim without the 10-31 `templated_units` entry, so
+    `smd disable ka9q-web` stopped ka9q-web.service and left
+    ka9q-web@ac0g-b1-b running.  The installed copy remains the fallback
+    for a host whose checkout lacks the file.
+    """
+    for base in (repo, installed):
+        path = base / f"{name}.deploy.toml"
+        if path.exists():
+            return path
+    return None
+
+
 def _read_shim_deploy(name: str) -> Optional[dict]:
     """Synthesized lifecycle shim for deploy-less components (non-conformant
     infra like igmp-querier carries its [systemd] units here)."""
-    path = Path("/etc/sigmond/clients") / f"{name}.deploy.toml"
-    if not path.exists():
+    path = fallback_shim_path(name)
+    if path is None:
         return None
     try:
         with open(path, "rb") as f:

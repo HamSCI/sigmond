@@ -384,14 +384,15 @@ def _find_deploy_toml(component: str) -> Optional[Path]:
 
 def _has_fallback_shim(component: str) -> bool:
     """Check if a fallback shim exists for a non-contract component."""
-    shim = Path(f"/etc/sigmond/clients/{component}.deploy.toml")
-    return shim.exists()
+    from .component_state import fallback_shim_path
+    return fallback_shim_path(component) is not None
 
 
 def _load_fallback_shim(component: str) -> list[UnitRef]:
     """Load the fallback shim deploy.toml for non-contract components."""
-    shim_path = Path(f"/etc/sigmond/clients/{component}.deploy.toml")
-    if not shim_path.exists():
+    from .component_state import fallback_shim_path
+    shim_path = fallback_shim_path(component)
+    if shim_path is None:
         return []
 
     try:
