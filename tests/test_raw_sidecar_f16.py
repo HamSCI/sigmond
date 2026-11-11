@@ -39,24 +39,34 @@ def _sidecar(start, dtype, **extra):
     return rec
 
 
+F16_START = NOW - 300  # newest chunk, well inside check's 660 s window
+
+
 @pytest.fixture
 def raw_root(tmp_path):
     """tmp_path/raw_buffer/<chan>/<day>/ with F16, F32 and fallback chunks.
+    The F16 chunk is the newest; the others are older than check's 660 s
+    freshness window, so only the F16 chunk can make a channel look fresh.
+    Both the .bin.zst and the .json of each chunk get the chunk's mtime.
     Payloads stay tiny: sigmond never decodes them, and sizes differ on purpose."""
-    t0 = NOW - 600
-    day = datetime.fromtimestamp(t0, tz=timezone.utc).strftime("%Y%m%d")
+    day = datetime.fromtimestamp(F16_START, tz=timezone.utc).strftime("%Y%m%d")
     d = tmp_path / "raw_buffer" / CHANNEL / day
     d.mkdir(parents=True)
     chunks = [
-        (t0, "complex-f16", {"scale": 4096.0}, b"f16" * 10),
-        (t0 + 60, "complex64", {}, b"f32" * 40),
-        (t0 + 120, "complex64", {"f16_fallback": "overflow"}, b"ovf" * 40),
+        (NOW - 1500, "complex64", {}, b"f32" * 40),
+        (NOW - 1400, "complex64", {"f16_fallback": "overflow"}, b"ovf" * 40),
+        (F16_START, "complex-f16", {"scale": 4096.0}, b"f16" * 10),
     ]
     for start, dtype, extra, payload in chunks:
         (d / f"{start}.bin.zst").write_bytes(payload)
         (d / f"{start}.json").write_text(json.dumps(_sidecar(start, dtype, **extra)))
-        os.utime(d / f"{start}.bin.zst", (start, start))
+        for ext in (".bin.zst", ".json"):
+            os.utime(d / f"{start}{ext}", (start, start))
     return tmp_path / "raw_buffer"
+
+
+def _f16_files(raw_root):
+    return list(raw_root.glob(f"{CHANNEL}/*/{F16_START}.*"))
 
 
 def test_gap_hourly_counts_every_chunk_including_f16(raw_root):
@@ -76,10 +86,21 @@ def test_local_resources_reads_f16_sidecars_without_a_false_gap(raw_root):
     assert s["gap_rate_per_channel_hour"] == 0.0
 
 
-def test_check_grape_line_sees_f16_chunks_as_fresh(raw_root, tmp_path):
+def _grape(tmp_path):
     cfg = {"ka9q": {"source": "radiod"},
            "recorder": {"production_data_root": str(tmp_path), "tiered_storage": False,
                         "channel_group": {"g": {"channels": [
                             {"frequency_hz": 10000000, "description": CHANNEL}]}}}}
-    line = check.grape_line(make_env(now=NOW, timestd_config=lambda: cfg))
+    return check.grape_line(make_env(now=NOW, timestd_config=lambda: cfg))
+
+
+def test_check_grape_line_sees_f16_chunks_as_fresh(raw_root, tmp_path):
+    assert len(_f16_files(raw_root)) == 2
+    line = _grape(tmp_path)
     assert line.mark == check.OK, line
+
+
+def test_check_grape_line_goes_stale_when_the_f16_chunk_ages(raw_root, tmp_path):
+    for f in _f16_files(raw_root):
+        os.utime(f, (NOW - 2000, NOW - 2000))
+    assert _grape(tmp_path).mark != check.OK
