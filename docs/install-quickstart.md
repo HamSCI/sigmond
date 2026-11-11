@@ -1,5 +1,12 @@
 # Sigmond install quickstart
 
+> **Start elsewhere (2026-11-11).**  Sigmond installs two ways.  For a station on your own Linux
+> machine, with no Proxmox, follow [install-bare-metal.md](install-bare-metal.md); `smd bringup`
+> does what this page describes.  For a dedicated computer from the USB image (a Proxmox host
+> with the station in a VM), follow
+> [sigmond-appliance INSTALL.md](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md).
+> This page stays as the reference for the `install.sh` bootstrap step by step.
+
 A short operator-focused guide to getting `smd` on a fresh Linux host.
 Covers the simplified flow from `install.sh`, including the auto-sudo
 bootstrap, auto-relocation, and ka9q-python handling.
