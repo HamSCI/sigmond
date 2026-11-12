@@ -80,9 +80,13 @@ def test_named_library_without_services_still_warns(monkeypatch):
     assert any(k == "warn" and "callhash: not enabled in topology" in m for k, m in out)
 
 
-def test_bare_restart_unchanged(monkeypatch):
+def test_bare_restart_leaves_a_disabled_daemon_alone(monkeypatch):
+    # c0dfdba: a bare restart now covers hs-uploader.service, but only when it
+    # is enabled on the host.  Here it is not, so it is asked about and left.
     rc, calls, out = _run(monkeypatch, "restart", [])
-    assert not [c for c in calls if "hs-uploader.service" in c]
+    acted = [c for c in calls if "hs-uploader.service" in c
+             and c[:2] != ["systemctl", "is-enabled"]]
+    assert not acted
     assert not [m for k, m in out if "hs-uploader" in m]
 
 
