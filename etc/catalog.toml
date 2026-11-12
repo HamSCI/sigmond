@@ -350,6 +350,25 @@ local_radiod_infra = ["igmp-querier", "gpsdo-monitor", "ka9q-web"]
 # on demand (install implies enable — see bin/smd _enable_after_install).
 optional           = ["codar-sounder", "hf-tec", "hfdl-recorder", "superdarn-sounder"]
 
+[profile.wd]
+description        = "WsprDaemon replacement — local radiod, WSPR + FT8/FT4 spots, ka9q-web; hf-timestd only where WD recorded WWV"
+# rob, 2026-11-12: the profile for converting the ~40-50 RX888 WsprDaemon
+# stations to bare-metal sigmond (wsprdaemon branch wd-to-sigmond,
+# wd-to-sigmond.sh).  dasi2 is the HamSCI science kit (GRAPE, magnetometer,
+# meteor scatter, ...): on KJ6MKI (2026-11-11) an install that brought in
+# more than the station ran left extras Rob then removed by hand.  A WD
+# station replaces what WD did: WSPR/FST4W and FT8/FT4 spots from its own
+# radiod, plus the ka9q-web page.  ka9q-radio and ka9q-python come in as
+# requirements of the recorders.
+# optional: hf-timestd where WD recorded WWV (GRAPE needs PSWS re-enrolment);
+# igmp-querier only when the LAN has no querier (wd-to-sigmond.sh checks with
+# a root listen first); gpsdo-monitor with a supported Leo Bodnar; station-web
+# for the local status pages.  `smd install <name>` adds one; --with-optional
+# adds all of them, which a WD conversion normally should not.
+clients            = ["wspr-recorder", "psk-recorder"]
+local_radiod_infra = ["ka9q-web"]
+optional           = ["hf-timestd", "igmp-querier", "gpsdo-monitor", "station-web"]
+
 [profile.base]
 description        = "Base SDR station — local radiod + web + timing, no recording clients"
 clients            = ["hf-timestd", "station-web"]

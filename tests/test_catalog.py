@@ -498,3 +498,17 @@ class TestNextSteps:
         ]
         assert any('enable radiod in topology' in a for a in enable_actions), \
             items
+
+
+def test_wd_profile_is_the_wsprdaemon_replacement():
+    """rob, 2026-11-12: converted WsprDaemon stations get only what WD did --
+    WSPR and FT8/FT4 spots and the ka9q-web page; hf-timestd and the rest
+    are optional, never installed by a plain `smd bringup wd`."""
+    from sigmond.catalog import load_profiles
+    wd = load_profiles()['wd']
+    assert set(wd.clients) == {'wspr-recorder', 'psk-recorder'}
+    assert list(wd.local_radiod_infra) == ['ka9q-web']
+    assert 'hf-timestd' in wd.optional
+    for science in ('hamsci-physics', 'mag-recorder', 'meteor-scatter', 'gmag-webui',
+                    'sigmond-rac', 'codar-sounder', 'hf-tec'):
+        assert science not in set(wd.clients) | set(wd.local_radiod_infra) | set(wd.optional)
