@@ -10684,9 +10684,31 @@ def cmd_enable(args) -> int:
             _ok(f'{entry.name}: enabled in topology')
         else:
             _info(f'{entry.name}: already enabled')
+        _enable_units_for_boot(entry.name)
     if rc == 0:
         _info('  start with: smd start')
     return rc
+
+
+def _enable_units_for_boot(component: str) -> list:
+    """`systemctl enable` a component's units (not orphans; nothing started),
+    so "enabled" survives a reboot -- the mirror of `smd disable` (sigmond#52).
+    KJ6MKI, 2026-11-12: gpsdo-monitor was enabled in topology but never in
+    systemd, and a reboot left it stopped.  Returns the units it enabled."""
+    try:
+        units = [u for u in resolve_units([component], [component]) if not u.orphaned]
+    except Exception:                                          # noqa: BLE001
+        return []
+    done = []
+    for u in units:
+        state = (_run(['systemctl', 'is-enabled', u.unit]).stdout or '').strip()
+        if state in ('enabled', 'static', 'masked', 'alias', 'indirect', 'generated'):
+            continue          # already persistent, or not ours to change
+        r = _run(['systemctl', 'enable', u.unit], sudo=True)
+        if r.returncode == 0:
+            done.append(u.unit)
+            _ok(f'{_display_unit(u.unit)}: enabled at boot')
+    return done
 
 
 def cmd_disable(args) -> int:
@@ -14497,13 +14519,14 @@ def _radiod_plan_cpus() -> str:
     Returns '' when there is no radiod unit or no explicit cpuset, so callers
     fall back to the historical CPU 0.
     """
+    # The configured or running radiods only (get_radiod_instances): a
+    # conf-less leftover listed by `list-units --all` sorted first and lent
+    # the planner its CPUs (KJ6MKI, 2026-11-12).
     try:
-        out = subprocess.run(['systemctl', 'list-units', 'radiod@*',
-                              '--no-legend', '--plain', '--all'],
-                             capture_output=True, text=True, timeout=10).stdout
+        from sigmond.cpu import get_radiod_instances
+        unit = next(iter(get_radiod_instances()), '')
     except Exception:
         return ''
-    unit = next((ln.split()[0] for ln in out.splitlines() if ln.strip()), '')
     if not unit:
         return ''
     try:
@@ -19099,6 +19122,12 @@ def cmd_diag_net(args) -> int:
     from sigmond import net_diag
 
     listen_s = getattr(args, 'listen', None)
+    # An explicit --listen asks for the raw-socket querier listen, which
+    # needs root: elevate the way every root verb does.  smd refuses a
+    # hand-typed `sudo smd`, so "re-run with sudo" was advice that could not
+    # be followed (KJ6MKI, 2026-11-12).
+    if listen_s and listen_s > 0 and os.geteuid() != 0 and _need_root('admin diag net --listen'):
+        return 1
     if listen_s is None:
         listen_s = 130
     iface = getattr(args, 'interface', None)
@@ -19184,8 +19213,8 @@ def cmd_diag_net(args) -> int:
             _warn(err)
         print()
     else:
-        _info('IGMP queriers: passive listen skipped (re-run with sudo for '
-              'definitive querier detection)')
+        _info('IGMP queriers: passive listen skipped (for definitive querier '
+              'detection run: smd admin diag net --listen 130 -- it elevates itself)')
         print()
 
     # Classification
@@ -20240,14 +20269,37 @@ def _wisdom_stop_start_args():
                               allow_shared_radiod_cores=False)
 
 
+def _active_service_units() -> set:
+    """Every active .service and .timer unit, by name."""
+    r = _run(['systemctl', 'list-units', '--type=service,timer', '--state=active',
+              '--no-legend', '--plain'], capture=True)
+    return {l.split()[0] for l in (getattr(r, 'stdout', '') or '').splitlines()
+            if l.split()}
+
+
+def _read_suspended_units() -> list:
+    """The units suspend recorded as stopped (marker lines after the first)."""
+    try:
+        lines = _WISDOM_SUSPEND_MARKER.read_text().splitlines()
+    except OSError:
+        return []
+    return [l.strip() for l in lines[1:] if l.strip()]
+
+
 def cmd_wisdom_suspend(args) -> int:
-    """Stop managed services for the planner and leave the marker resume reads."""
+    """Stop managed services for the planner and leave the marker resume reads.
+
+    The marker records exactly which units this stop took down, so resume
+    restarts all of them -- not just what a bare `smd start` would (KJ6MKI,
+    2026-11-12: igmp-querier was stopped and never came back)."""
+    before = _active_service_units()
     rc = cmd_stop(_wisdom_stop_start_args())
+    stopped = sorted(before - _active_service_units())
     # Marker even after a partial stop: some services may be down, and
     # resume must bring them back.
     try:
         _WISDOM_SUSPEND_MARKER.parent.mkdir(parents=True, exist_ok=True)
-        _WISDOM_SUSPEND_MARKER.write_text('suspended\n')
+        _WISDOM_SUSPEND_MARKER.write_text('suspended\n' + ''.join(f'{u}\n' for u in stopped))
     except OSError as exc:
         _warn(f'could not write {_WISDOM_SUSPEND_MARKER}: {exc}')
     return rc
@@ -20287,9 +20339,19 @@ def cmd_wisdom_resume(args) -> int:
     if _system_stopping():
         _info('wisdom resume: the system is shutting down; starting nothing')
         return 0
+    stopped = _read_suspended_units()
     # Clear the marker first: while it stands, cmd_start holds radiod back.
     _WISDOM_SUSPEND_MARKER.unlink(missing_ok=True)
     rc = cmd_start(_wisdom_stop_start_args())
+    # Then anything suspend stopped that the bare start left down.
+    left = [u for u in stopped if u not in _active_service_units()]
+    for unit in left:
+        r = _run(['systemctl', 'start', unit], sudo=True)
+        if getattr(r, 'returncode', 1) == 0:
+            _ok(f'{_display_unit(unit)} (stopped by the suspend)')
+        else:
+            _err(f'{_display_unit(unit)}: {(getattr(r, "stderr", "") or "").strip()}')
+            rc = rc or 1
     # A radiod that something started during planning still runs on the
     # plans it had then, and a start leaves a running radiod alone (sigma,
     # 2026-11-09: bring-up's streaming gate started radiod mid-plan; it ran
@@ -20388,6 +20450,34 @@ def _resume_sigmond_timers(timers: list) -> None:
               + ' '.join(timers))
 
 
+def _wisdom_install_cpu_bundle() -> bool:
+    """Install sigmond's bundled wisdom for this CPU over /etc/fftw/wisdomf,
+    with the bundle's sidecar.  False when there is no bundle for this CPU
+    or the copy fails; the installed wisdom is then left as it was."""
+    from sigmond import wisdom as _w
+    verdict = _w.identify_cpu(_WISDOM_BUNDLE_DIRS, _w.CPUINFO)
+    bundle = verdict.get('bundle')
+    if not bundle:
+        return False
+    wf, side = Path(_w.WISDOM_FILE), Path(_w.WISDOM_SIDECAR)
+    try:
+        wf.parent.mkdir(parents=True, exist_ok=True)
+        tmp = wf.with_name(wf.name + '.bundle')
+        shutil.copyfile(bundle, tmp)
+        os.chmod(tmp, 0o644)
+        tmp.replace(wf)
+        src_side = Path(str(bundle) + '.cpu')
+        if src_side.is_file():
+            shutil.copyfile(src_side, side)
+            os.chmod(side, 0o644)
+    except OSError as exc:
+        _warn(f'auto: could not install the {bundle.name} bundle: {exc}')
+        return False
+    _info(f'auto: installed the {bundle.name} bundle (measured on this CPU) '
+          f'instead of a fresh plan; only what it lacks will be measured')
+    return True
+
+
 def cmd_wisdom_plan(args) -> int:
     """Run fftwf-wisdom for every transform radiod uses; install /etc/fftw/wisdomf.
 
@@ -20421,6 +20511,14 @@ def cmd_wisdom_plan(args) -> int:
     auto_verdict = None
     if getattr(args, 'auto', False) and not getattr(args, 'fresh', False):
         auto_verdict = _wisdom_verdict()
+        # Never a fresh plan when sigmond carries this CPU's bundle: install
+        # it (it was measured on this CPU) and top up only what it lacks.
+        # KJ6MKI, 2026-11-12: one estimated transform (cif400) turned the
+        # boot-time unit into a fresh 104-profile plan with radiod stopped,
+        # hours off the air, although a 5560U bundle sat in the repo.  A
+        # fresh plan stays for a CPU with no bundle, or for --fresh.
+        if auto_verdict == 'fresh' and _wisdom_install_cpu_bundle():
+            auto_verdict = _wisdom_verdict()
         if auto_verdict == 'current':
             _info('auto: FFT wisdom is current; nothing to plan')
             return 0

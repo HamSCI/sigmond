@@ -213,6 +213,7 @@ def _expand_template(
     from .instance import systemd_escape, unescape_systemd_instance
 
     configured = set()
+    conf_configured = set()     # instances with a conf in conf_dir (radiod@)
     env_dirs = [Path(f"/etc/{component}/env")]
     if env_dir:
         env_dirs.append(Path(env_dir))
@@ -247,6 +248,7 @@ def _expand_template(
                             cf.stem[len(base) + 1:])
                         if instance_name:
                             configured.add(instance_name)
+                            conf_configured.add(instance_name)
             except PermissionError:
                 pass
 
@@ -356,6 +358,14 @@ def _expand_template(
         # this instance isn't among them. If no env files exist the client
         # manages its own instances and nothing is orphaned.
         orphaned = bool(configured) and instance not in configured
+        # A conf-driven template (radiod@ reads /etc/radio/radiod@<id>.conf)
+        # cannot run an instance whose conf is gone: it exits 66 in a restart
+        # loop.  Such an instance is orphaned even when no other conf exists,
+        # so start/bringup never enable or start it (KJ6MKI, 2026-11-12:
+        # radiod@rx888-wsprdaemon, enabled during install after the WD
+        # handover moved its conf away, looped 59 times in 10 minutes).
+        if conf_dir and instance not in conf_configured:
+            orphaned = True
         units.append(
             UnitRef(
                 component=component,

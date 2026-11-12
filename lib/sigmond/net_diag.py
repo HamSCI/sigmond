@@ -283,7 +283,7 @@ def listen_for_queriers(seconds: int, interface: Optional[str] = None,
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_IGMP)
     except PermissionError:
-        return [], ['raw socket requires CAP_NET_RAW — re-run with sudo'], 0
+        return [], ['raw socket requires CAP_NET_RAW — run: smd admin diag net --listen 130 (it elevates itself)'], 0
     except OSError as exc:
         return [], [f'raw socket: {exc}'], 0
 

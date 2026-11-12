@@ -624,7 +624,11 @@ def get_radiod_instances() -> list[str]:
     try:
         for u in json.loads(r.stdout):
             name = u.get('unit', '')
-            if name and u.get('active', '') in ('active', 'activating'):
+            # Running only.  A conf-less instance in a restart loop sits in
+            # activating/auto-restart; counting it took a core in the
+            # placement and widened the wisdom planner's pin (KJ6MKI,
+            # 2026-11-12: radiod@rx888-wsprdaemon -> pin [8, 9, 10, 11]).
+            if name and u.get('active', '') == 'active' and u.get('sub', '') == 'running':
                 found.add(name)
     except Exception:
         pass
