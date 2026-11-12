@@ -325,7 +325,7 @@ extra_paths = ["/etc/wsprdaemon"]
 # device is absent from the USB bus (the redesign makes them install-dormant
 # instead — docs/install-redesign.md §3).
 [profile.dasi2]
-description        = "DASI2 grant core station (GRAPE + WSPR + PSK + magnetometer + meteor scatter)"
+description        = "DASI2 grant core station (GRAPE + WSPR + PSK + magnetometer + meteor scatter + HFDL + CODAR)"
 # meteor-scatter moved here from `optional` 2026-08-08: the DASI2 stations all
 # run MSK144, so leaving it discretionary meant a fresh `smd bringup dasi2`
 # did not install it while the station's topology.toml declared it -- the
@@ -343,12 +343,18 @@ description        = "DASI2 grant core station (GRAPE + WSPR + PSK + magnetomete
 # station-web added 2026-09-06 (split Phase 5): it replaces the web UI
 # hf-timestd used to carry, so a bringup without it leaves the station with
 # no pages.
-clients            = ["hf-timestd", "wspr-recorder", "psk-recorder", "mag-recorder", "gmag-webui", "meteor-scatter", "hamsci-physics", "station-web"]
+# hfdl-recorder and codar-sounder added 2026-11-12 (Michael): every station
+# sends HFDL squitter and CODAR timing to sigmondb, to learn transmitter
+# offsets from T6 ground-wave stations and add them to WWV/WWVH for T3.
+# chirp-recorder replaces codar-sounder once radiod's de-chirp channel lands.
+# They ran on stations whose topology never listed them, which held their
+# uploads at `fill` with nothing saying why (K3LR, UACNJ, W2NAF, WB6CXC).
+clients            = ["hf-timestd", "wspr-recorder", "psk-recorder", "mag-recorder", "gmag-webui", "meteor-scatter", "hamsci-physics", "hfdl-recorder", "codar-sounder", "station-web"]
 local_radiod_infra = ["igmp-querier", "gpsdo-monitor", "ka9q-web"]
 # Discretionary HF-science clients: NOT installed by default.  `smd bringup
 # dasi2 --with-optional` adds them; `smd install <name>` installs+enables one
 # on demand (install implies enable — see bin/smd _enable_after_install).
-optional           = ["codar-sounder", "hf-tec", "hfdl-recorder", "superdarn-sounder"]
+optional           = ["hf-tec", "superdarn-sounder"]
 
 [profile.wd]
 description        = "WsprDaemon replacement — local radiod, WSPR + FT8/FT4 spots, ka9q-web; hf-timestd only where WD recorded WWV"
@@ -377,6 +383,6 @@ optional           = ["gpsdo-monitor"]
 
 [profile.client]
 description        = "Decode-only station — clients against a REMOTE radiod (no local ka9q-radio/web)"
-clients            = ["hf-timestd", "wspr-recorder", "psk-recorder", "station-web"]
+clients            = ["hf-timestd", "wspr-recorder", "psk-recorder", "hfdl-recorder", "codar-sounder", "station-web"]
 local_radiod_infra = []
-optional           = ["mag-recorder", "codar-sounder", "hfdl-recorder", "hf-tec", "superdarn-sounder"]
+optional           = ["mag-recorder", "hf-tec", "superdarn-sounder"]

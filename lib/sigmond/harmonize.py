@@ -1430,6 +1430,46 @@ def rule_uploader_inprocess_drift(view: SystemView) -> RuleResult:
         "--write", affected)
 
 
+def _client_units_active(name: str) -> bool:
+    """True when any unit the client's deploy.toml declares is active."""
+    from .uploader_manifest import _client_is_running
+    return _client_is_running(name)
+
+
+def rule_client_outside_topology(view: SystemView) -> RuleResult:
+    """Runtime: a catalogued client whose units run while topology says off.
+    sigmond honours topology, so such a client gets no upload pipelines, its
+    sink switch stays at ``fill`` and the lifecycle verbs skip it.  It held
+    HFDL squitter timing back at K3LR, UACNJ, W2NAF and WB6CXC with nothing
+    saying why (2026-11-12)."""
+    rid = "client-outside-topology"
+    try:
+        from .catalog import load_catalog
+        catalog = load_catalog()
+    except Exception as exc:                               # noqa: BLE001
+        return RuleResult(rid, "pass", f"skipped (catalog: {exc})", [])
+    enabled = set(view.topology.enabled_components())
+    stray = []
+    for name, entry in sorted(catalog.items()):
+        alias = getattr(entry, "topology_alias", None)
+        if name in enabled or (alias and alias in enabled):
+            continue
+        try:
+            if _client_units_active(name):
+                stray.append(name)
+        except Exception:                                  # noqa: BLE001
+            continue
+    if not stray:
+        return RuleResult(rid, "pass",
+                          "every running client is enabled in topology", [])
+    return RuleResult(
+        rid, "warn",
+        f"{', '.join(stray)} run(s) but topology has it off, so sigmond "
+        f"renders no upload pipelines for it and its sink switch stays at "
+        f"fill.  Run: " + "; ".join(f"smd enable {n}" for n in stray)
+        + "; then smd admin uploader manifest --write", stray)
+
+
 ALL_RULES = [
     rule_radiod_resolution,
     rule_radiod_status_configured,
@@ -1457,6 +1497,7 @@ ALL_RUNTIME_RULES = [
     rule_upload_enabled,
     rule_upload_credentials,
     rule_uploader_inprocess_drift,
+    rule_client_outside_topology,
 ]
 
 
