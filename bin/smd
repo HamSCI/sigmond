@@ -20176,6 +20176,43 @@ def cmd_wisdom_needed(args) -> int:
     return 0
 
 
+def _pause_sigmond_timers() -> list:
+    """Stop every active sigmond-*.timer for the planner's run; return them.
+
+    `smd stop` stops the station's components but not sigmond's own
+    housekeeping timers (storage, snapshot, mdns, the watchdogs...).  Each
+    firing starts a full Python smd on CPUs 0-7, sharing the L3 and memory
+    bandwidth fftwf-wisdom is timing candidate plans against (AI6VN-1,
+    2026-11-12: `smd admin snapshot write` and `smd component list --json`
+    at 16-34 % mid-plan).  rob: "if you do a wisdom plan ... we ought to stop
+    everything."  A run already started finishes; only new firings stop."""
+    r = _run(['systemctl', 'list-units', '--type=timer', '--state=active',
+              '--no-legend', '--plain', 'sigmond-*.timer'], capture=True)
+    timers = [l.split()[0] for l in (getattr(r, 'stdout', '') or '').splitlines()
+              if l.split() and l.split()[0].endswith('.timer')]
+    if not timers:
+        return []
+    r = _run(['systemctl', 'stop', *timers], sudo=True)
+    if getattr(r, 'returncode', 1) != 0:
+        _warn(f'could not pause sigmond timers: {(r.stderr or "").strip()}')
+        return []
+    _info(f'paused {len(timers)} sigmond timer(s) for the run; they restart '
+          f'when it ends')
+    return timers
+
+
+def _resume_sigmond_timers(timers: list) -> None:
+    """Start exactly the timers _pause_sigmond_timers stopped."""
+    if not timers:
+        return
+    r = _run(['systemctl', 'start', *timers], sudo=True)
+    if getattr(r, 'returncode', 1) == 0:
+        _info(f'resumed {len(timers)} sigmond timer(s)')
+    else:
+        _warn('could not restart sigmond timers — run: sudo systemctl start '
+              + ' '.join(timers))
+
+
 def cmd_wisdom_plan(args) -> int:
     """Run fftwf-wisdom for every transform radiod uses; install /etc/fftw/wisdomf.
 
@@ -20431,6 +20468,7 @@ def cmd_wisdom_plan(args) -> int:
     # Run synchronously in foreground; tee to log so disconnects don't
     # lose progress.  fftwf-wisdom emits progress lines on stderr; merge.
     # try/finally ensures the freq restore fires even on Ctrl-C / errors.
+    paused_timers = _pause_sigmond_timers()
     start = time.monotonic()
     rc: int = 0
     try:
@@ -20455,6 +20493,7 @@ def cmd_wisdom_plan(args) -> int:
             _warn('aborted by operator (Ctrl-C)')
             return 130
     finally:
+        _resume_sigmond_timers(paused_timers)
         if boost and boost.get('boosted_khz') is not None:
             saved_mhz = boost['saved_khz'] / 1000
             err = _wisdom_restore_cpu0(boost)
