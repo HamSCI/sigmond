@@ -1,32 +1,27 @@
 model=AMD Ryzen 5 5560U with Radeon Graphics
 l3_bytes=8388608
 l3_ways=16
-mem_total_kb=13313688
+mem_total_kb=13313676
 radiod_l3_bytes=unknown-from-guest (resctrl is host-only)
 samprate=129600000
-codelets=249
-bytes=37415
-# Planned ON a 5560U INSIDE the Sigmond Proxmox VM (AI6VN-PM, VM 100:
-# 10 vCPUs pinned 1:1 to host CPUs 0-9, 13 GiB), on radiod's own core
-# (vCPU 6 = host pCPU 6) with the host laid out for TWO radiods: pCPUs
-# 6-9 pinned at the production 3.2 GHz, in the resctrl "radiod" group
-# (L3:0=3ff, 10 of 16 ways = 5 MiB), workers 0-5 at 1.4 GHz.  Made with
-# `smd admin wisdom plan --fresh` (fftwf-wisdom -n): all 65 profiles
-# measured here, nothing imported.  Run time 1 h 59 m (2026-10-31
-# 23:04Z - 2026-11-01 01:03Z), station stopped throughout.
+codelets=368
+bytes=53653
+# Planned ON a 5560U INSIDE the Sigmond Proxmox VM (AI6VN-PM, VM 100,
+# AI6VN-1), on radiod's own core (CPU 8) at its production clock, with the
+# station and every sigmond timer stopped (smd e4d90ac pauses them; c0dfdba
+# stops hs-uploader).  Made with `smd admin wisdom plan --fresh`
+# (fftwf-wisdom -n): all 104 profiles measured here, nothing imported.
+# Run time 2 h 7 m (2026-11-12 01:45Z - 03:53Z).
 #
-# Supersedes two earlier attempts the same day: a non-fresh run that
-# imported the WB6CXC-7 bundle, and a fresh run measured while pCPU 6
-# was still a 1.4 GHz worker core (the host layout had not been updated
-# for the second radiod).  Only this file was measured in the
-# environment radiod runs in.
+# Supersedes the 2026-11-01 bundle, which predates sigmond's cdb list
+# (6d90254, on main only via PR #100 on 11-10): ka9q-radio bc224260
+# (2026-10-07) plans input-destroying channel outputs as cdb<N>, which cob<N>
+# wisdom does not satisfy.  With radiod 401992cd (09-19) nothing asked for
+# cdb, so that bundle's fft.log stayed empty; on radiod aa52698c every channel
+# output fell back to FFTW_ESTIMATE (cdb100/300/600/2400 on AI6VN-1).
 #
-# Covers BOTH RX888 front-end rates: rof1620000 (64.8 Msps) and
-# rof3240000 (129.6 Msps), the demod channel sizes and the 23 ka9q-web
-# zoom levels.  Converged: /var/lib/ka9q-radio/fft.log stayed EMPTY
-# across the restart that followed.
-#
-# At 129.6 Msps with 36-45 channels per radiod the fft thread sits at
-# 85-100 % of a 3.2 GHz 5560U core with no sample loss; the plan does not
-# buy headroom there, 64.8 Msps does.  Harvested from AI6VN-PM
-# 2026-11-01.
+# Covers both RX888 front-end rates (rof1620000, rof3240000), every cob/cif/
+# cof/cdb channel size in sigmond's list, the ka9q-web zoom ladder and cdb100
+# from AI6VN-1's fft.log.  Converged: fft.log stayed EMPTY across the radiod
+# start that followed (03:54Z, radiod aa52698c, ka9q-python 3.27.0).
+# Harvested from AI6VN-1 2026-11-12.
