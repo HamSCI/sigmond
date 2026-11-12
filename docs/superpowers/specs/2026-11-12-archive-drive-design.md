@@ -93,6 +93,31 @@ first that returns SMART attributes *(writer's call)*. A drive whose bridge pass
 **unknown**, said plainly, and `add` continues to its usual confirmation. The working `-d` type is saved in
 `archive.toml` so later readings use it.
 
+**Bridges that block SMART under UAS.** Found on AI6VN-1, 2026-11-12: the Seagate Portable's bridge
+(0bc2:2344) answers every `-d` type with "unsupported field in scsi command" while the kernel drives it
+with `uas`. In usb-storage (BOT) mode the same bridge passes `-d sat` and the short self-test. So when the
+`sat` attempt fails that way on a drive bound to `uas`, `add` says the bridge blocks SMART under UAS and
+offers to switch it: it writes `options usb-storage quirks=<vid>:<pid>:u` to
+`/etc/modprobe.d/sigmond-archive-usb.conf`, sets the same quirk at runtime
+(`/sys/module/usb_storage/parameters/quirks`), unbinds and rebinds the USB device (the drive is not yet
+mounted at that point in `add`), waits for the disk to reappear, and reads again *(writer's call: modprobe.d
+rather than the kernel command line, so the change stays inside the VM and needs no grub edit)*. BOT is
+slower than UAS, which costs nothing at the archive's few MB/s. Declining keeps UAS and the verdict
+**unknown**. A failure to read health is never reported as a failing drive.
+
+**Two serial numbers.** A USB enclosure reports its bridge's serial (NACA9A86 on AI6VN-1), while SMART
+reports the disk's own (ZDZJHMBB). `archive.toml` keeps both, as `serial` (bridge, as now) and
+`disk_serial`; the health baseline keys on `disk_serial`, so a disk moved to another enclosure keeps its
+history and a new disk in the same enclosure starts a new one.
+
+**smartd.** Installing smartmontools on Debian enables `smartmontools.service` (smartd). sigmond masks it
+*(writer's call)*: the hourly sigmond reading does the job, and smartd's own polling and scheduled tests
+would spin the drive up on a schedule sigmond does not control.
+
+**SMR drives.** Many 2.5" portable drives are shingled (SMR; AI6VN-1's is an ST2000LM007). The archive
+writes whole files sequentially and deletes whole days, which suits SMR; nothing in the archiver rewrites
+files in place. `add` names an SMR drive when the model is a known one, for information only.
+
 Spinning drives report ATA attributes; an NVMe drive in a USB enclosure reports the NVMe health log. Both
 are read; the fields below name the ATA attribute and the NVMe equivalent where one exists.
 
