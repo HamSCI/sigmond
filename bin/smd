@@ -806,16 +806,62 @@ def _declared_services(name: str) -> tuple:
     return tuple(getattr(entry, 'services', ()) or ()) if entry else ()
 
 
-def _act_declared_services(verb: str, args) -> int:
+def _bare_declared_units() -> list:
+    """For a BARE `smd stop|start|restart`: the catalog-declared ``services``
+    of entries topology omits (hs-uploader), limited to units enabled on this
+    host.  rob, 2026-11-12: a bare restart after `smd update` left
+    hs-uploader.service running the code it booted with (19 h on AI6VN-1),
+    and the wisdom planner's `smd stop` left it running."""
+    if not _HAS_SIGMOND_LIB:
+        return []
+    try:
+        catalog = load_catalog()
+    except (FileNotFoundError, OSError):
+        return []
+    topology = _load_topology(TOPOLOGY_PATH)
+    enabled_set = set(_enabled_components(topology) if topology else [])
+    units = []
+    entries = catalog.values() if hasattr(catalog, 'values') else catalog
+    for entry in entries:
+        name = getattr(entry, 'name', '')
+        if not name or name in enabled_set:
+            continue
+        for unit in getattr(entry, 'services', ()) or ():
+            r = _run(['systemctl', 'is-enabled', unit], capture=True)
+            if (getattr(r, 'stdout', '') or '').strip() == 'enabled':
+                units.append((name, unit))
+    return units
+
+
+def _act_declared_services(verb: str, args, *, bare_pass: bool = False) -> int:
     """`smd <verb> <name>` for a NAMED component that is not enabled in
     topology but declares ``services`` in the catalog (hs-uploader is a
     "library" for its six clients yet installs a daemon): run systemctl
-    on those units directly.  A bare verb never reaches here."""
+    on those units directly.
+
+    A bare verb acts on every such unit that is enabled on this host
+    (_bare_declared_units): `stop` in the call before the topology
+    services, `start`/`restart` in the ``bare_pass`` call after them, so
+    the uploader comes back once its producers are up."""
     names = list(getattr(args, 'names', None) or [])
     legacy_arg = getattr(args, 'components', None)
     if legacy_arg:
         names += [c.strip() for c in legacy_arg.split(',') if c.strip()]
     if not names or 'all' in names:
+        if bare_pass != (verb != 'stop'):
+            return 0
+        rc = 0
+        for name, unit in _bare_declared_units():
+            if verb == 'restart':
+                _run(['systemctl', 'reset-failed', unit], sudo=True)
+            r = _run(['systemctl', verb, unit], sudo=True)
+            if r.returncode == 0:
+                _ok(_display_unit(unit))
+            else:
+                _err(f'{_display_unit(unit)}: {r.stderr.strip()}')
+                rc = 1
+        return rc
+    if bare_pass:
         return 0
     topology = _load_topology(Path(args.topology) if getattr(args, 'topology', None)
                               else TOPOLOGY_PATH)
@@ -15270,7 +15316,9 @@ def cmd_start(args) -> int:
         return 1
     _rekey_instances()
     rc = _act_declared_services('start', args)
-    return _cmd_start_enabled(args) or rc
+    rc_enabled = _cmd_start_enabled(args)
+    rc_after = _act_declared_services('start', args, bare_pass=True)
+    return rc_enabled or rc_after or rc
 
 
 def _cmd_start_enabled(args) -> int:
@@ -16447,7 +16495,9 @@ def cmd_restart(args) -> int:
         return 1
     _rekey_instances()
     rc = _act_declared_services('restart', args)
-    return _cmd_restart_enabled(args) or rc
+    rc_enabled = _cmd_restart_enabled(args)
+    rc_after = _act_declared_services('restart', args, bare_pass=True)
+    return rc_enabled or rc_after or rc
 
 
 def cmd_reload(args) -> int:
