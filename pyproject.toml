@@ -22,7 +22,7 @@ dependencies = []
 tui = [
   "textual>=8.0.0",
   "rich>=13.0.0",
-  "ka9q-python",
+  "ka9q-python>=3.27.0",
 ]
 dev = [
   "pytest>=7.0.0",
@@ -42,5 +42,5 @@ ka9q-python = { path = "../ka9q-python", editable = true }
 
 [dependency-groups]
 dev = [
-    "ka9q-python",
+    "ka9q-python>=3.27.0",
 ]
