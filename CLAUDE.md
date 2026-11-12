@@ -431,9 +431,11 @@ step in the forward path.
 Clients split into a **core set** that installs by default and a
 **discretionary set** installed at the operator's choice.  This is encoded in
 the catalog profiles (`etc/catalog.toml`): `[profile.dasi2].clients` is the core
-(hf-timestd, wspr-recorder, psk-recorder, mag-recorder) and
-`[profile.dasi2].optional` is the discretionary set (codar-sounder, hf-tec,
-hfdl-recorder, meteor-scatter).  `smd bringup dasi2` installs core;
+(hf-timestd, wspr-recorder, psk-recorder, mag-recorder, gmag-webui, meteor-scatter,
+hamsci-physics, hfdl-recorder, codar-sounder, station-web) and
+`[profile.dasi2].optional` is the discretionary set (hf-tec,
+superdarn-sounder).  CODAR's unattended init records 2 channels; an operator
+raises that with `CODAR_MAX_CENTRES`.  `smd bringup dasi2` installs core;
 `--with-optional` adds the optional set; the TUI Guided bring-up screen exposes
 the same choice as an "Optional clients" checkbox.
 

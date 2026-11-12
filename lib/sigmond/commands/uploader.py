@@ -1001,14 +1001,15 @@ def _manifest_step(*, write: bool, enable: bool, daemon_ready) -> int:
         # Say what a write replaces, every time: `smd sink upload` reaches
         # here too, and on KJ6MKI (2026-11-12) it rewrote a hand-edited
         # manifest with nothing on screen to say so.
+        # Every line keeps the "uploader: " prefix the step's output
+        # promises (the rig's static test reads this transcript).
         print(f"uploader: rewriting {path} (previous kept as "
-              f"{path.name}.bak):\n")
+              f"{path.name}.bak):")
         for line in difflib.unified_diff(
                 installed.splitlines(), text.splitlines(),
                 fromfile=f"{path} (installed)", tofile="generated",
                 lineterm=""):
-            print(line)
-        print()
+            print(f"uploader:   {line}")
 
     rc = _land_step(path=path, installed=installed, text=text,
                     sigmond_file=form.sigmond_file, gate=gate,
