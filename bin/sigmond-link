@@ -109,9 +109,9 @@ DEFAULT_RAC_UNITS = ["sigmond-rac-host@*.service", "sigmond-rac-host.service", "
 
 
 def _log(msg: str) -> None:
-    print(f"sigmond-link: {msg}", flush=True)
-    if msg.startswith(("ERROR", "WARNING")):
-        print(f"sigmond-link: {msg}", file=sys.stderr, flush=True)
+    # once: under systemd both streams land in the journal
+    out = sys.stderr if msg.startswith(("ERROR", "WARNING")) else sys.stdout
+    print(f"sigmond-link: {msg}", file=out, flush=True)
 
 
 def now() -> dt.datetime:
