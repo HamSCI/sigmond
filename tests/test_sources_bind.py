@@ -751,3 +751,42 @@ def test_bind_writes_coordination_env_atomically(tmp_path, monkeypatch):
                              inventory_rows=[]) == 0
     assert 'coordination.env' in wrote
     assert 'HF_TIMESTD_RADIOD=' + B in (etc / 'sigmond' / 'coordination.env').read_text()
+
+
+def test_one_radiod_source_also_names_it_in_the_radiod_table(tmp_path):
+    """KFS-MAIN, 2026-11-12: `sources apply` wrote the right [[source]] block
+    into wspr-recorder@KFS-NW's config but left [radiod] status at the
+    shared config's `<configure-via-config-init>` placeholder.  wspr-recorder
+    takes each spot's radiod_id from [radiod] status, so the spots reached
+    wsprdaemon.org with that placeholder as their rx_id."""
+    import tomllib
+    smd = _load_smd()
+    from sigmond.sources import SourceKey
+    cfg = tmp_path / 'KFS-NW.toml'
+    cfg.write_text(WSPR_SHARED.replace('template-status.local',
+                                       '<configure-via-config-init>'))
+    smd._apply_sources_to_wspr_recorder([SourceKey('radiod', A)], [], cfg,
+                                        dry_run=False)
+    data = tomllib.loads(cfg.read_text())
+    assert data['radiod']['status'] == A
+    assert [s['status'] for s in data['source']] == [A]
+    # A second apply changes nothing.
+    before = cfg.read_text()
+    changed, _ = smd._apply_sources_to_wspr_recorder(
+        [SourceKey('radiod', A)], [], cfg, dry_run=False)
+    assert not changed and cfg.read_text() == before
+
+
+def test_several_radiod_sources_leave_the_radiod_table_alone(tmp_path):
+    """A merge instance reads several radiods; no single one names it."""
+    import tomllib
+    smd = _load_smd()
+    from sigmond.sources import SourceKey
+    cfg = tmp_path / 'AC0G=B1.toml'
+    cfg.write_text(WSPR_SHARED)
+    smd._apply_sources_to_wspr_recorder(
+        [SourceKey('radiod', A), SourceKey('radiod', B)], [], cfg,
+        dry_run=False)
+    data = tomllib.loads(cfg.read_text())
+    assert data['radiod']['status'] == 'template-status.local'
+    assert [s['status'] for s in data['source']] == [A, B]

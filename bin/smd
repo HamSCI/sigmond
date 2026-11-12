@@ -21421,6 +21421,16 @@ def _apply_sources_to_wspr_recorder(
     else:
         body_after = body_stripped
 
+    # wspr-recorder takes each spot's radiod_id from [radiod] status, not
+    # from [[source]], so a one-radiod selection names its radiod there too.
+    # Left alone, an instance seeded from an uninitialised shared config sent
+    # its spots with rx_id "<configure-via-config-init>" (KFS-MAIN,
+    # 2026-11-12).  Several radiods have no single name; leave it then.
+    radiods = [str(k).split(':', 1)[1] for k in selected_keys
+               if str(k).startswith('radiod:')]
+    if len(radiods) == 1:
+        body_after = _set_client_radiod_status(body_after, radiods[0])
+
     if body_after == body_before:
         return (False, f'  ✓ {config_path}: already up to date')
 
