@@ -966,6 +966,19 @@ def _manifest_step(*, write: bool, enable: bool, daemon_ready) -> int:
              "manifest --write)")
         return 1
 
+    if changed and installed:
+        # Say what a write replaces, every time: `smd sink upload` reaches
+        # here too, and on KJ6MKI (2026-11-12) it rewrote a hand-edited
+        # manifest with nothing on screen to say so.
+        print(f"uploader: rewriting {path} (previous kept as "
+              f"{path.name}.bak):\n")
+        for line in difflib.unified_diff(
+                installed.splitlines(), text.splitlines(),
+                fromfile=f"{path} (installed)", tofile="generated",
+                lineterm=""):
+            print(line)
+        print()
+
     rc = _land_step(path=path, installed=installed, text=text,
                     sigmond_file=form.sigmond_file, gate=gate,
                     changed=changed, n=n, enable=enable,

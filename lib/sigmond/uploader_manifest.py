@@ -100,14 +100,58 @@ _REPORTER_CLIENT = "wspr-recorder"
 # --------------------------------------------------------------------------
 
 
-def host_key_file() -> str:
-    """The one host SSH key.  Prefer the ``_host``-suffixed name the
-    single-host daemon uses; fall back to the legacy shared name."""
+def _default_key_file() -> str:
+    """The key sigmond picks with no site override: the ``_host``-suffixed
+    name the single-host daemon uses, else the legacy shared name."""
     preferred = KEYS_DIR / "id_ed25519_host"
     legacy = KEYS_DIR / "id_ed25519"
     if legacy.exists() and not preferred.exists():
         return str(legacy)
     return str(preferred)
+
+
+_SAID_KEY_OVERRIDE: set = set()
+
+
+def installed_key_override(manifest: Optional[Path] = None) -> Optional[str]:
+    """The installed manifest's ``[identity] ssh_key_file`` when it names a
+    key file that exists and is not the one sigmond would pick, else None.
+
+    ⛔ A site's key choice survives a render.  A station converted from
+    WsprDaemon (wd-to-sigmond.sh) uploads with the key the WD gateways
+    already know (``id_rsa_wsprdaemon``); KJ6MKI, 2026-11-12: a render
+    switched it to ``id_ed25519_host``, which the gateways did not know, and
+    every WSPR tar would have failed.  To move such a site to the default
+    key, register the default key with the gateways and edit the installed
+    manifest's ``ssh_key_file``; the next render keeps that."""
+    path = manifest if manifest is not None else MANIFEST_PATH
+    try:
+        data = tomllib.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    ident = data.get("identity")
+    configured = ident.get("ssh_key_file") if isinstance(ident, dict) else None
+    if not isinstance(configured, str) or not configured.strip():
+        return None
+    configured = configured.strip()
+    if configured == _default_key_file() or not Path(configured).is_file():
+        return None
+    return configured
+
+
+def host_key_file() -> str:
+    """The one host SSH key: the site's own choice in the installed
+    manifest when it names an existing key (:func:`installed_key_override`),
+    else :func:`_default_key_file`."""
+    chosen = installed_key_override()
+    if chosen is None:
+        return _default_key_file()
+    if chosen not in _SAID_KEY_OVERRIDE:
+        _SAID_KEY_OVERRIDE.add(chosen)
+        logger.info("uploader-manifest: keeping the site's ssh_key_file %s "
+                    "from the installed manifest (default would be %s)",
+                    chosen, _default_key_file())
+    return chosen
 
 
 def _first_radiod_status(coord: Coordination) -> Optional[str]:
@@ -751,10 +795,19 @@ def collect_pipelines(topology: Optional[Topology] = None,
                         name, client, ", ".join(lacking))
                 continue
             if missing:
+                hint = ""
+                if (psws.is_psws_recorder(client)
+                        and {"station_id", "instrument_id"} & missing):
+                    cfg = psws.RECORDERS[client]["config"]
+                    if not Path(cfg).exists():
+                        # KJ6MKI, 2026-11-12: `smd config psws` was set, but
+                        # it renders into existing configs only.
+                        hint = (f" ({cfg} does not exist yet: run `smd config "
+                                f"init {client}`, then render again)")
                 logger.warning(
                     "uploader-manifest: skipping pipeline %s (%s) — "
-                    "unresolved identity: %s",
-                    name, client, ", ".join(sorted(missing)))
+                    "unresolved identity: %s%s",
+                    name, client, ", ".join(sorted(missing)), hint)
                 continue
             if name == SHARED_PSK_PIPELINE and client in PSK_PRODUCERS:
                 if split:
@@ -1170,6 +1223,72 @@ def drop_inprocess_pipelines(pipelines: list, senders: set,
     return [p for p in pipelines if p.get("name") not in drop]
 
 
+def server_delivered_producers(topology, *, units_env=None) -> set:
+    """Each enabled producer whose every instance hands its pskreporter
+    spots to the WD servers: psk-recorder reading ``server-merge`` alone,
+    meteor-scatter reading ``deposit``.  Their rows carry
+    ``forward_to_pskreporter = 1`` and wd30 posts them; a direct daemon
+    pipeline for such a producer is a route nobody chose.
+
+    ⛔ KJ6MKI, 2026-11-12: `smd config upload ... --via server-merge` and
+    `--via deposit` said "WD servers only", yet `smd sink upload` rendered
+    both direct pipelines, and one pump posted 500 spots straight to
+    pskreporter.info.  Any doubt keeps the pipeline, as D13 does: an
+    environment that cannot be read, no instances, or one instance on
+    another route (``server-raw``, which a sink lever writes below upload,
+    or ``direct``)."""
+    from . import inprocess_senders as ips
+    read = units_env or _units_env
+    rules = {
+        "psk-recorder":
+            lambda env: ips._psk_delivery_pipelines(env) == ("server-merge",),
+        "meteor-scatter":
+            lambda env: ips._ms_delivery_mode(env) == "deposit",
+    }
+    out = set()
+    for client, via_server in rules.items():
+        try:
+            rows = read(client, topology)
+        except OSError as exc:
+            logger.warning("uploader-manifest: cannot read %s environment "
+                           "(%s) — keeping its direct pskreporter pipeline",
+                           client, exc)
+            continue
+        if rows and all(via_server(env) for _unit, env in rows):
+            out.add(client)
+    return out
+
+
+def drop_server_delivered_pipelines(pipelines: list, producers: set,
+                                    *, store_version: int) -> list:
+    """Leave out each producer's own pskreporter pipeline when it delivers
+    via the WD servers (:func:`server_delivered_producers`).  Below the
+    split one shared pipeline serves both producers; it goes only when
+    both do."""
+    if not producers:
+        return pipelines
+    drop = set()
+    if store_version >= SPLIT_STORE_VERSION:
+        for producer in sorted(producers):
+            if producer in PSK_PRODUCERS:
+                drop.add(PSK_PRODUCERS[producer][0])
+    elif set(PSK_PRODUCERS) <= producers:
+        drop.add(SHARED_PSK_PIPELINE)
+    for name in sorted(drop & {p.get("name") for p in pipelines}):
+        logger.info("uploader-manifest: leaving out direct pipeline %s — "
+                    "its spots go via the WD servers", name)
+    return [p for p in pipelines if p.get("name") not in drop]
+
+
+def _server_delivered(topology, pipelines: list) -> set:
+    """:func:`server_delivered_producers`, asked only when a pskreporter
+    pipeline is in play."""
+    names = {SHARED_PSK_PIPELINE} | {v[0] for v in PSK_PRODUCERS.values()}
+    if not any(p.get("name") in names for p in pipelines):
+        return set()
+    return server_delivered_producers(topology)
+
+
 def _inprocess_pairs(topology, pipelines: list) -> set:
     """The D13 pairs, asked only when a pskreporter pipeline is in play."""
     names = {SHARED_PSK_PIPELINE} | {v[0] for v in PSK_PRODUCERS.values()}
@@ -1217,6 +1336,9 @@ def generate(topology: Optional[Topology] = None,
                                       features=features)
         pipelines = drop_inprocess_pipelines(
             pipelines, _inprocess_pairs(topology, pipelines),
+            store_version=store_version)
+        pipelines = drop_server_delivered_pipelines(
+            pipelines, _server_delivered(topology, pipelines),
             store_version=store_version)
     if mode == "upload":
         pass
@@ -1317,6 +1439,9 @@ def generate_forms(topology: Optional[Topology] = None,
                                   features=features)
     pipelines = drop_inprocess_pipelines(
         pipelines, _inprocess_pairs(topology, pipelines),
+        store_version=store_version)
+    pipelines = drop_server_delivered_pipelines(
+        pipelines, _server_delivered(topology, pipelines),
         store_version=store_version)
     identity = build_identity(coord, reporter_call(coord))
     return RenderResult(
