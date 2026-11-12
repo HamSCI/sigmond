@@ -203,3 +203,45 @@ class RestartsUnknown(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ── a blocked run names what still runs old code (KJ6MKI rerun, 2026-11-12) ──
+
+def test_blocked_run_names_stale_services_and_the_restart_command(monkeypatch):
+    from sigmond import align_apply
+    mod = smd
+    stale = {"psk-recorder": "moved", "wspr-recorder": "moved", "ka9q-web": "moved"}
+    monkeypatch.setattr(mod, "_align_services", lambda *a, **k: {})
+    monkeypatch.setattr(mod, "_align_staleness", lambda *a, **k: {
+        "stale": stale, "running": set(stale), "radiod_consumers": []})
+    out = []
+    steps = [align_apply.Step("hamsci-physics", "failed", "build exit 127"),
+             align_apply.Step("psk-recorder", "moved", "")]
+    names = mod._align_report_stale_after_failure(steps, base="/x", catalog=None,
+                                                  say=out.append)
+    assert names == ["ka9q-web", "psk-recorder", "wspr-recorder"]
+    text = "\n".join(out)
+    assert "hamsci-physics failed" in text
+    assert "smd restart ka9q-web psk-recorder wspr-recorder" in text
+
+
+def test_blocked_run_with_nothing_stale_says_so(monkeypatch):
+    from sigmond import align_apply
+    mod = smd
+    monkeypatch.setattr(mod, "_align_services", lambda *a, **k: {})
+    monkeypatch.setattr(mod, "_align_staleness", lambda *a, **k: {
+        "stale": {}, "running": set(), "radiod_consumers": []})
+    out = []
+    assert mod._align_report_stale_after_failure(
+        [align_apply.Step("hf-timestd", "failed", "")], base="/x", catalog=None,
+        say=out.append) == []
+    assert "no service is running old code" in out[0]
+
+
+def test_make_live_reports_stale_before_returning_on_a_block():
+    src = (Path(__file__).resolve().parent.parent / "bin" / "smd").read_text()
+    i = src.index("def _align_make_live(")
+    body = src[i:src.index("\ndef ", i + 10)]
+    block = body[body.index("if any(s.outcome in _ALIGN_BLOCKING for s in move_steps):"):]
+    block = block[:block.index("return 1")]
+    assert "_align_report_stale_after_failure(" in block

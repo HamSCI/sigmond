@@ -9138,6 +9138,41 @@ def _align_print_summary(steps) -> None:
           f"restarted {counts['restarted']}, fetched {fetched_mib:.1f} MiB")
 
 
+def _align_report_stale_after_failure(move_steps, *, base, catalog, say=print) -> list:
+    """A blocked run restarts nothing (bring-up did not run), but must not
+    leave the operator guessing: name every service now running code older
+    than its checkout, and the command that restarts them.
+
+    KJ6MKI (bare metal, 2026-11-12): hamsci-physics failed, ka9q-web,
+    psk-recorder and wspr-recorder had moved, and the run printed only
+    "restarted 0"; the operator found and restarted them by hand.  Since
+    a11d245 one failure no longer stops the other moves, so this case is
+    the common one.  Returns the names it reported."""
+    failed = sorted({s.component for s in move_steps if s.outcome in _ALIGN_BLOCKING})
+    try:
+        services = _align_services()
+        staleness = _align_staleness(base, services, catalog or None)
+    except Exception as exc:                                   # noqa: BLE001
+        say(f"  nothing restarted ({', '.join(failed)} failed), and this "
+            f"station's services could not be read ({exc.__class__.__name__}) — "
+            f"check `smd status` for services still on old code")
+        return []
+    radiod_first, comps, uploader = _align_plan_restarts(
+        move_steps, [], staleness, say=lambda m: None)
+    names = (['radiod'] if radiod_first else []) + list(comps)
+    if uploader:
+        names.append('hs-uploader')
+    if not names:
+        say(f"  nothing restarted ({', '.join(failed)} failed); no service is "
+            f"running old code")
+        return []
+    say(f"  nothing restarted because {', '.join(failed)} failed — these still run "
+        f"old code: {', '.join(names)}")
+    say(f"    fix the failure and re-run `smd align --apply`, or restart them now: "
+        f"smd restart {' '.join(names)}")
+    return names
+
+
 def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
     """Everything `--apply` does after the moves, in order (Plan 2b):
 
@@ -9167,6 +9202,7 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
     if any(s.outcome in _ALIGN_BLOCKING for s in move_steps):
         align_apply.record(rel, move_steps, manifest_path=MANIFEST_PATH,
                            history=history, now=now)
+        _align_report_stale_after_failure(move_steps, base=base, catalog=catalog)
         _align_print_summary(move_steps)
         return 1
 
