@@ -30768,6 +30768,10 @@ def _build_parser() -> argparse.ArgumentParser:
                    help='override radiod CPU max frequency (default: from topology.toml or 3200)')
     p.add_argument('--other-max-mhz', type=int, metavar='MHZ',
                    help='override other CPU max frequency (default: from topology.toml or 1400)')
+    p.add_argument('--save', action='store_true',
+                   help='write the --radiod-max-mhz / --other-max-mhz values into '
+                        'topology.toml [cpu_freq] (root), so the boot-time '
+                        'smd-cpu-freq.service keeps them; without it they apply once')
 
     p = diag_sub.add_parser('net',
                              help='classify network for multi-host radiod (IGMP, multicast)')
@@ -32488,6 +32492,24 @@ def main() -> int:
                 topo['cpu_freq']['radiod_max_mhz'] = args.radiod_max_mhz
             if getattr(args, 'other_max_mhz', None):
                 topo['cpu_freq']['other_max_mhz'] = args.other_max_mhz
+            if getattr(args, 'save', False):
+                # The overrides used to apply once; the boot-time unit runs
+                # `--apply` without them and restored the old cap (AC0G-SIGMA,
+                # 2026-11-12).  --save writes them into topology.toml.
+                if _need_root('admin diag cpu-freq --save'):
+                    return 1
+                from sigmond.topology import set_cpu_freq
+                tpath = Path(args.topology) if args.topology else TOPOLOGY_PATH
+                vals = {'radiod_max_mhz': getattr(args, 'radiod_max_mhz', None),
+                        'other_max_mhz': getattr(args, 'other_max_mhz', None)}
+                if not any(vals.values()):
+                    _err('--save needs --radiod-max-mhz and/or --other-max-mhz')
+                    return 1
+                changed = set_cpu_freq(vals, tpath)
+                (_ok if changed else _info)(
+                    f'{tpath} [cpu_freq]: '
+                    + ', '.join(f'{k} = {v}' for k, v in vals.items() if v)
+                    + ('' if changed else ' (already so)'))
             args._topology_override = topo
             return cmd_diag_cpu_freq(args)
         if diag_cmd == 'net':

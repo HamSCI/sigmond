@@ -223,6 +223,63 @@ def enabled_components(topology: Topology, only: Optional[list] = None) -> list:
 # ---------------------------------------------------------------------------
 
 
+def set_cpu_freq(values: dict, path: Path = TOPOLOGY_PATH) -> bool:
+    """Write integer keys of the [cpu_freq] table (radiod_max_mhz,
+    other_max_mhz) into topology.toml, keeping comments and every other
+    table.  Returns True only when the file changed.
+
+    `smd admin diag cpu-freq --save` uses it: its MHz overrides applied once
+    and were never saved, so the boot-time smd-cpu-freq.service restored the
+    old cap at the next reboot (AC0G-SIGMA, 2026-11-12)."""
+    allowed = {"radiod_max_mhz", "other_max_mhz"}
+    values = {k: int(v) for k, v in values.items() if k in allowed and v is not None}
+    original = path.read_text() if path.exists() else ''
+    lines = original.splitlines()
+    out: list[str] = []
+    in_table, found, done = False, False, set()
+
+    def close_table():
+        for k, v in values.items():
+            if k not in done:
+                out.append(f'{k} = {v}')
+                done.add(k)
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith('[') and stripped.endswith(']'):
+            if in_table:
+                # keep a blank line before the next table, after the inserts
+                trail = []
+                while out and out[-1].strip() == '':
+                    trail.append(out.pop())
+                close_table()
+                out.extend(trail)
+            in_table = stripped == '[cpu_freq]'
+            found = found or in_table
+        elif in_table and '=' in stripped and not stripped.startswith('#'):
+            key = stripped.split('=', 1)[0].strip()
+            if key in values:
+                out.append(f'{key} = {values[key]}')
+                done.add(key)
+                continue
+        out.append(line)
+    if in_table:
+        close_table()
+    if not found and values:
+        while out and out[-1].strip() == '':
+            out.pop()
+        if out:
+            out.append('')
+        out.append('[cpu_freq]')
+        close_table()
+    new_text = '\n'.join(out) + '\n'
+    if new_text == original or not values:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(new_text)
+    return True
+
+
 def set_component_enabled(name: str,
                           enabled: bool,
                           path: Path = TOPOLOGY_PATH,
