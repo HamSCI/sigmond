@@ -183,3 +183,136 @@ class TestGateAndApply(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeSystemd:
+    """Stands in for systemctl/systemd-run: tunnel units, and an armed timer."""
+
+    def __init__(self, units):
+        self.active = dict(units)          # unit -> active
+        self.calls = []
+        self.deadman = None
+
+    def systemctl(self, *args):
+        self.calls.append(args)
+        out = ""
+        if args[0] == "list-units":
+            out = "".join(f"{u} loaded {'active' if a else 'inactive'} running x\n"
+                          for u, a in self.active.items())
+        elif args[0] in ("start", "stop"):
+            for u in args[1:]:
+                if u in self.active:
+                    self.active[u] = args[0] == "start"
+                if u == f"{m.DEADMAN}.timer" and args[0] == "stop":
+                    self.deadman = None
+        return type("R", (), {"stdout": out, "returncode": 0})()
+
+    def run(self, argv, **kw):
+        assert argv[0] == "systemd-run"
+        secs = int(next(a for a in argv if a.startswith("--on-active=")).split("=")[1][:-1])
+        self.deadman = (secs, argv[argv.index("start") + 1:])
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+
+class TestRacGuard(unittest.TestCase):
+    GAP = T("2026-11-12T11:00:00")          # gap 10:29 -> 14:36
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        m.SCHEDULE = self.tmp / "link-schedule.json"
+        m.RAC_STATE = self.tmp / "link-rac.json"
+        m.SCHEDULE.write_text(json.dumps(_doc()))
+        self.sd = FakeSystemd({"sigmond-rac-host@gw2.service": True})
+        self._orig = (m._systemctl, m.subprocess.run, m.probe_targets)
+        m._systemctl = self.sd.systemctl
+        m.subprocess.run = self.sd.run
+        m.probe_targets = lambda units: [("gw2.wsprdaemon.org", 35736)]
+        self.cfg = m.read_settings(self.tmp / "absent.toml")
+        self.cfg["enabled"] = True
+        self.probes = []
+
+    def tearDown(self):
+        m._systemctl, m.subprocess.run, m.probe_targets = self._orig
+
+    def tick(self, t, answer=False):
+        def probe(h, p):
+            self.probes.append(t)
+            return answer
+        return m.rac_tick(self.cfg, t, probe=probe)
+
+    def running(self):
+        return self.sd.active["sigmond-rac-host@gw2.service"]
+
+    def test_suspends_in_a_gap_and_arms_the_dead_man_for_its_end(self):
+        self.tick(self.GAP)
+        self.assertFalse(self.running())
+        secs, units = self.sd.deadman
+        self.assertEqual(secs, int((T("2026-11-12T14:36:00") - self.GAP).total_seconds()) + 60)
+        self.assertEqual(units, ["sigmond-rac-host@gw2.service"])
+
+    def test_resumes_when_the_pass_opens(self):
+        self.tick(self.GAP)
+        self.tick(T("2026-11-12T14:36:30"))
+        self.assertTrue(self.running())
+        self.assertIsNone(self.sd.deadman)
+
+    def test_never_suspends_inside_a_pass_or_without_a_schedule(self):
+        self.tick(T("2026-11-12T16:00:00"))
+        self.assertTrue(self.running())
+        m.SCHEDULE.unlink()
+        self.tick(self.GAP)
+        self.assertTrue(self.running())
+
+    def test_probes_once_per_interval_and_an_answer_brings_rac_back(self):
+        self.tick(self.GAP)
+        for i in range(1, 25):                       # 24 one-minute ticks
+            self.tick(self.GAP + dt.timedelta(minutes=i))
+        self.assertEqual(len(self.probes), 2)       # at +10 and +20 min only
+        self.assertFalse(self.running())
+        self.tick(self.GAP + dt.timedelta(minutes=30), answer=True)
+        self.assertTrue(self.running())
+        # it stays up for the rest of the gap; no more suspending or probing
+        self.tick(self.GAP + dt.timedelta(minutes=45))
+        self.assertTrue(self.running())
+        self.assertEqual(len(self.probes), 3)
+
+    def test_ceiling_runs_rac_after_max_suspend_whatever_the_schedule(self):
+        long_gap = {"version": 1, "fetched_at": "2026-11-12T00:00:00+00:00",
+                    "horizon": ["2026-11-12T00:00:00+00:00", "2026-11-13T00:00:00+00:00"],
+                    "windows": [{"start": "2026-11-12T23:00:00+00:00",
+                                 "end": "2026-11-12T23:30:00+00:00", "sats": []}]}
+        m.SCHEDULE.write_text(json.dumps(long_gap))
+        t0 = T("2026-11-12T01:00:00")
+        self.tick(t0)
+        self.assertFalse(self.running())
+        self.assertEqual(self.sd.deadman[0], 6 * 3600 + 60)   # capped
+        self.tick(t0 + dt.timedelta(hours=6))
+        self.assertTrue(self.running())
+        self.tick(t0 + dt.timedelta(hours=6, minutes=29))
+        self.assertTrue(self.running())                        # the 30-min hold
+        self.tick(t0 + dt.timedelta(hours=6, minutes=31))
+        self.assertFalse(self.running())                       # then suspends again
+
+    def test_disabling_resumes(self):
+        self.tick(self.GAP)
+        self.cfg["enabled"] = False
+        self.tick(self.GAP + dt.timedelta(minutes=1))
+        self.assertTrue(self.running())
+
+    def test_a_fault_starts_the_tunnels(self):
+        self.tick(self.GAP)
+        m.RAC_STATE.write_text('{"suspended": true, "since": "garbage", '
+                               '"units": ["sigmond-rac-host@gw2.service"]}')
+        orig = m.now
+        m.now = lambda: self.GAP + dt.timedelta(minutes=1)
+        try:
+            self.assertEqual(m.cmd_rac(self.cfg), 0)
+        finally:
+            m.now = orig
+        self.assertTrue(self.running())
+
+    def test_no_dead_man_no_suspension(self):
+        self.sd.run = lambda argv, **kw: type("R", (), {"returncode": 1})()
+        m.subprocess.run = self.sd.run
+        self.tick(self.GAP)
+        self.assertTrue(self.running())

@@ -1,0 +1,8 @@
+[Unit]
+Description=sigmond link schedule — suspend remote access (frpc) during a scheduled satellite gap
+Documentation=https://github.com/HamSCI/sigmond/blob/main/tasks/plan-constrained-link-delivery.md
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/sigmond-link rac
+SyslogIdentifier=sigmond-link

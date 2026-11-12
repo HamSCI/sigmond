@@ -1035,6 +1035,10 @@ done
 command -v pdftotext >/dev/null 2>&1 || $SUDO apt-get install -y -q poppler-utils >/dev/null 2>&1 \
     || warn "poppler-utils not installed: sigmond-link cannot read the USAP schedule"
 $SUDO /usr/local/sbin/sigmond-link apply || true
+$SUDO install -m 0644 "$REPO_DIR/systemd/sigmond-link-rac.service" "$REPO_DIR/systemd/sigmond-link-rac.timer" /etc/systemd/system/
+$SUDO systemctl daemon-reload
+$SUDO systemctl enable --now sigmond-link-rac.timer 2>/dev/null && ok "sigmond-link-rac.timer enabled" \
+    || warn "could not enable sigmond-link-rac.timer"
 # Enforce chrony now (extra pools, makestep, waitsync) — non-fatal: the helper
 # says loudly what is wrong and the timer keeps saying it.
 $SUDO /usr/local/sbin/sigmond-time-sync --apply --wait 30 || warn "clock not synchronised yet — see /var/log/sigmond/time-sync.log"

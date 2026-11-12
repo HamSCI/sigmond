@@ -21,6 +21,22 @@ See tasks/plan-constrained-link-delivery.md (Phase 4).
       cleanly (no failure) during a gap
   sigmond-link apply
       write or remove the ExecCondition drop-ins for gated_units
+  sigmond-link rac
+      the RAC guard's tick (every minute).  In a scheduled gap it stops the
+      remote-access tunnels (frpc retries every few seconds otherwise) and
+      starts them again when the next pass opens.  Remote access is how
+      these stations are supported, so a schedule error must never cost it
+      for long.  Four nets, any one of which brings RAC back:
+        1. a dead man: at suspension, a transient systemd timer is armed to
+           start the tunnels at the gap's end (capped at max_suspend_hours),
+           so the restart does not depend on this tool surviving
+        2. a probe: every rac_probe_min, ONE tcp connect to each tunnel's
+           gateway.  If it answers, the link is up whatever the schedule
+           says: RAC runs for the rest of the gap
+        3. a ceiling: suspended for max_suspend_hours, RAC runs regardless for
+           rac_resume_hold_min, then the schedule may suspend it again
+        4. fail open: disabled, no/stale/bad schedule, or any error in the
+           tick starts every tunnel it knows of
 
 The schedule file, read by hs-uploader's LinkGate and by `gate`:
   /var/lib/sigmond/link-schedule.json
@@ -32,7 +48,7 @@ and finds out for itself whether the link works.  Fail open: no file, a bad
 file, a stale file (fetched more than max_age_days ago) or `now` outside the
 horizon all read as "go ahead".  A schedule must never become a gag.
 
-topology.toml:
+topology.toml (or, on a Proxmox host, which has none, /etc/sigmond/link.toml):
   [link_schedule]
   enabled       = false        # true at a site with a scheduled link
   source        = "usap"       # the USAP weekly PDF (TDRS + DSCS + Skynet),
@@ -43,6 +59,11 @@ topology.toml:
   refresh_hours = 6
   max_age_days  = 8
   gated_units   = [...]        # default DEFAULT_GATED below
+  rac_suspend   = true         # the RAC guard; false leaves the tunnels alone
+  rac_units     = [...]        # default DEFAULT_RAC_UNITS below (globs)
+  rac_probe_min = 10
+  max_suspend_hours   = 6
+  rac_resume_hold_min = 30
 """
 from __future__ import annotations
 
@@ -59,6 +80,9 @@ from pathlib import Path
 
 TOPOLOGY = Path("/etc/sigmond/topology.toml")
 SCHEDULE = Path("/var/lib/sigmond/link-schedule.json")
+HOST_CONF = Path("/etc/sigmond/link.toml")
+RAC_STATE = Path("/var/lib/sigmond/link-rac.json")
+DEADMAN = "sigmond-link-rac-resume"
 DROPIN_NAME = "50-sigmond-link.conf"
 SYSTEMD_DIR = Path("/etc/systemd/system")
 SELF = "/usr/local/sbin/sigmond-link"
@@ -80,6 +104,9 @@ DEFAULT_GATED = [
     "timestd-events.service",               # ships event windows
 ]
 
+# The remote-access tunnels: the host's per-gateway frpc, and the guest's.
+DEFAULT_RAC_UNITS = ["sigmond-rac-host@*.service", "sigmond-rac-host.service", "wd-rac.service"]
+
 
 def _log(msg: str) -> None:
     print(f"sigmond-link: {msg}", flush=True)
@@ -97,26 +124,36 @@ def fmt(t: dt.datetime | None) -> str:
     return f"{t:%Y-%m-%d %H:%M}Z ({t.astimezone():%H:%M %Z})"
 
 
-def read_settings(path: Path = TOPOLOGY) -> dict:
+def read_settings(path: Path | None = None) -> dict:
     cfg = {"enabled": False, "source": "usap", "satellites": "all", "margin_min": 0.0,
-           "refresh_hours": 6.0, "max_age_days": 8.0, "gated_units": list(DEFAULT_GATED)}
-    try:
-        import tomllib
-        with path.open("rb") as fh:
-            ls = tomllib.load(fh).get("link_schedule", {}) or {}
-    except Exception:
+           "refresh_hours": 6.0, "max_age_days": 8.0, "gated_units": list(DEFAULT_GATED),
+           "rac_suspend": True, "rac_units": list(DEFAULT_RAC_UNITS), "rac_probe_min": 10.0,
+           "max_suspend_hours": 6.0, "rac_resume_hold_min": 30.0}
+    import tomllib
+    ls = None
+    for p in ([path] if path else [TOPOLOGY, HOST_CONF]):
+        try:
+            with p.open("rb") as fh:
+                ls = tomllib.load(fh).get("link_schedule")
+        except FileNotFoundError:
+            continue
+        if ls is not None:
+            break
+    if not ls:
         return cfg
-    for k in ("enabled",):
+    for k in ("enabled", "rac_suspend"):
         if k in ls:
             cfg[k] = bool(ls[k])
     for k in ("source", "satellites"):
         if k in ls:
             cfg[k] = ls[k]
-    for k in ("margin_min", "refresh_hours", "max_age_days"):
+    for k in ("margin_min", "refresh_hours", "max_age_days", "rac_probe_min",
+              "max_suspend_hours", "rac_resume_hold_min"):
         if k in ls:
             cfg[k] = float(ls[k])
-    if "gated_units" in ls:
-        cfg["gated_units"] = [str(u) for u in ls["gated_units"]]
+    for k in ("gated_units", "rac_units"):
+        if k in ls:
+            cfg[k] = [str(u) for u in ls[k]]
     return cfg
 
 
@@ -407,6 +444,16 @@ def cmd_status(cfg: dict, as_json: bool) -> int:
     for w in nxt:
         s, e = dt.datetime.fromisoformat(w["start"]), dt.datetime.fromisoformat(w["end"])
         print(f"  pass  {fmt(s)} -> {fmt(e)}  {'+'.join(w.get('sats', []))}")
+    rs = _rac_load()
+    if rs.get("suspended"):
+        print(f"RAC            SUSPENDED since {fmt(dt.datetime.fromisoformat(rs['since']))}: "
+              f"{' '.join(rs.get('units', []))}; last probe "
+              f"{fmt(dt.datetime.fromisoformat(rs['last_probe'])) if rs.get('last_probe') else '-'}")
+    elif rs.get("hold_until"):
+        print(f"RAC            running until {fmt(dt.datetime.fromisoformat(rs['hold_until']))} "
+              f"({rs.get('hold_why')})")
+    else:
+        print(f"RAC            {'guarded' if cfg['enabled'] and cfg['rac_suspend'] else 'not guarded'}, running")
     return 0
 
 
@@ -448,6 +495,161 @@ def cmd_apply(cfg: dict, root: Path = SYSTEMD_DIR) -> int:
     return 0
 
 
+# ─── the RAC guard ────────────────────────────────────────────────────────────
+
+def _systemctl(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["systemctl", *args], capture_output=True, text=True)
+
+
+def rac_units(cfg: dict) -> list:
+    """Loaded tunnel units matching rac_units -> [(unit, active)]."""
+    out = _systemctl("list-units", "--type=service", "--all", "--no-legend", "--plain",
+                     *cfg["rac_units"]).stdout
+    res = []
+    for line in out.splitlines():
+        f = line.split()
+        if len(f) >= 3 and f[0].endswith(".service") and f[1] == "loaded":
+            res.append((f[0], f[2] == "active"))
+    return res
+
+
+def probe_targets(units: list) -> list:
+    """(host, port) of each tunnel's gateway, read from its frpc config."""
+    targets = []
+    for u in units:
+        m = re.match(r"sigmond-rac-host@(.+)\.service$", u)
+        conf = (Path(f"/etc/sigmond/frpc-host-{m.group(1)}.toml") if m
+                else Path("/etc/sigmond/frpc-host.toml") if u == "sigmond-rac-host.service"
+                else Path("/etc/sigmond/frpc.toml"))
+        try:
+            txt = conf.read_text()
+            host = re.search(r'^\s*serverAddr\s*=\s*"([^"]+)"', txt, re.M).group(1)
+            port = int(re.search(r"^\s*serverPort\s*=\s*(\d+)", txt, re.M).group(1))
+            if (host, port) not in targets:
+                targets.append((host, port))
+        except Exception:
+            continue
+    return targets
+
+
+def tcp_probe(host: str, port: int, timeout: float = 8.0) -> bool:
+    """One connection attempt; a completed handshake means the link is up."""
+    import socket
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _rac_load() -> dict:
+    try:
+        d = json.loads(RAC_STATE.read_text())
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _rac_save(d: dict) -> None:
+    RAC_STATE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = RAC_STATE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d, indent=1))
+    os.replace(tmp, RAC_STATE)
+
+
+def _arm_deadman(units: list, seconds: float) -> bool:
+    """A transient systemd timer that starts the tunnels in `seconds`, whatever
+    becomes of this tool.  Replaces any earlier one."""
+    _systemctl("stop", f"{DEADMAN}.timer")
+    _systemctl("reset-failed", f"{DEADMAN}.service")
+    r = subprocess.run(["systemd-run", f"--unit={DEADMAN}", f"--on-active={int(seconds)}s",
+                        "--timer-property=AccuracySec=5s",
+                        "--description=sigmond-link: restart remote access at the end of a gap",
+                        "/usr/bin/systemctl", "start", *units], capture_output=True, text=True)
+    return r.returncode == 0
+
+
+def _rac_resume(state: dict, why: str) -> None:
+    units = state.get("units") or []
+    if units:
+        _systemctl("start", *units)
+    _systemctl("stop", f"{DEADMAN}.timer")
+    _log(f"RAC resumed ({why}): {' '.join(units) or '-'}")
+    state.update(suspended=False, units=[], since=None)
+
+
+def rac_tick(cfg: dict, t: dt.datetime | None = None, probe=tcp_probe) -> int:
+    t = t or now()
+    state = _rac_load()
+    hold = state.get("hold_until")
+    hold = dt.datetime.fromisoformat(hold) if hold else None
+    if hold and hold <= t:
+        state.pop("hold_until", None)
+        state.pop("hold_why", None)
+        hold = None
+    st = (evaluate(load(), t, cfg["max_age_days"])
+          if cfg["enabled"] and cfg["rac_suspend"] else {"up": True, "reason": "guard off"})
+    if st["up"] or hold:
+        if state.get("suspended"):
+            _rac_resume(state, state.get("hold_why") if hold else st["reason"])
+        _rac_save(state)
+        return 0
+
+    until = dt.datetime.fromisoformat(st["until"]) if st.get("until") else t
+    max_s = cfg["max_suspend_hours"] * 3600
+    if not state.get("suspended"):
+        units = [u for u, active in rac_units(cfg) if active]
+        if not units:
+            return 0
+        armed = _arm_deadman(units, min((until - t).total_seconds(), max_s) + 60)
+        if not armed:
+            _log("WARNING: could not arm the dead-man restart; leaving RAC running")
+            return 0
+        _systemctl("stop", *units)
+        state.update(suspended=True, since=t.isoformat(), units=units, last_probe=t.isoformat())
+        _log(f"RAC suspended ({st['reason']}) until {fmt(until)}: {' '.join(units)}")
+        _rac_save(state)
+        return 0
+
+    since = dt.datetime.fromisoformat(state["since"])
+    if (t - since).total_seconds() >= max_s:
+        state.update(hold_until=(t + dt.timedelta(minutes=cfg["rac_resume_hold_min"])).isoformat(),
+                     hold_why=f"suspended {cfg['max_suspend_hours']:g} h: trying regardless")
+        _log(f"WARNING: RAC suspended for {cfg['max_suspend_hours']:g} h; "
+             f"running it for {cfg['rac_resume_hold_min']:g} min whatever the schedule says")
+        _rac_resume(state, state["hold_why"])
+        _rac_save(state)
+        return 0
+    last = dt.datetime.fromisoformat(state.get("last_probe") or state["since"])
+    if (t - last).total_seconds() >= cfg["rac_probe_min"] * 60:
+        state["last_probe"] = t.isoformat()
+        targets = probe_targets(state.get("units", []))
+        hit = next((f"{h}:{p}" for h, p in targets if probe(h, p)), None)
+        if hit:
+            state.update(hold_until=until.isoformat(),
+                         hold_why=f"probe reached {hit} inside a scheduled gap")
+            _log(f"WARNING: {hit} answered during a scheduled gap: the schedule is wrong "
+                 f"or the link came early; RAC runs until {fmt(until)}")
+            _rac_resume(state, state["hold_why"])
+    _rac_save(state)
+    return 0
+
+
+def cmd_rac(cfg: dict) -> int:
+    try:
+        return rac_tick(cfg)
+    except Exception as e:  # fail open: every tunnel we know of starts
+        _log(f"WARNING: RAC guard fault, starting the tunnels: {type(e).__name__}: {e}")
+        try:
+            units = [u for u, _ in rac_units(cfg)] + _rac_load().get("units", [])
+            if units:
+                _systemctl("start", *sorted(set(units)))
+            RAC_STATE.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="sigmond-link", description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd")
@@ -457,13 +659,14 @@ def main(argv=None) -> int:
     s.add_argument("--json", action="store_true")
     sub.add_parser("gate")
     sub.add_parser("apply")
+    sub.add_parser("rac")
     a = ap.parse_args(argv)
     try:
         cfg = read_settings()
     except Exception as e:
         _log(f"WARNING: cannot read {TOPOLOGY} ({e}); treating the link schedule as disabled")
-        cfg = {"enabled": False}
-        if a.cmd != "gate":
+        cfg = read_settings(Path("/nonexistent"))     # defaults: disabled
+        if a.cmd not in ("gate", "rac"):
             return 1
     if a.cmd == "fetch":
         return cmd_fetch(cfg, a.force)
@@ -475,6 +678,8 @@ def main(argv=None) -> int:
             return 0
     if a.cmd == "apply":
         return cmd_apply(cfg)
+    if a.cmd == "rac":
+        return cmd_rac(cfg)
     return cmd_status(cfg, getattr(a, "json", False))
 
 
