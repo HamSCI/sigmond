@@ -46,9 +46,15 @@ PSWS_HOST = "pswsnetwork.eng.ua.edu"
 # Asking uploader_manifest for the path keeps the report and the uploads on
 # the same file by construction.
 def host_key() -> str:
-    """Path of this machine's PSWS upload key (hs-uploader's host key)."""
-    from .uploader_manifest import host_key_file
-    return host_key_file()
+    """Path of this machine's PSWS upload key: hs-uploader's own host key,
+    never a site override of the manifest's ``[identity]`` key.
+
+    ⛔ A station converted from WsprDaemon keeps ``id_rsa_wsprdaemon`` in
+    ``[identity]`` because the WD gateways know it, while PSWS was enrolled
+    with this machine's ``id_ed25519_host`` (KJ6MKI, 2026-11-12).  The PSWS
+    pipelines carry this key on their own transport."""
+    from .uploader_manifest import _default_key_file
+    return _default_key_file()
 
 
 PSWS_PORT = 22

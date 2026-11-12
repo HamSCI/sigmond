@@ -851,6 +851,34 @@ def _sigmond_drift(text: Optional[str]) -> bool:
 
 # ---- the step ----------------------------------------------------------------
 
+def _dropin_overrides(text: str, d: Optional[Path] = None) -> list:
+    """One line per client the render gives pipelines to that also has a
+    hand-placed ``pipelines.d/<client>.toml``.  hs-uploader drops every
+    legacy entry of such a client (pipelines_d: "once pipelines.d/<client>.toml
+    exists ... every legacy entry whose client reads that name drops out"),
+    so the drop-in, not the render, is what runs (KJ6MKI, 2026-11-12)."""
+    import tomllib
+    d = d if d is not None else um.PIPELINES_D
+    try:
+        data = tomllib.loads(text)
+    except ValueError:
+        return []
+    clients = sorted({p.get("client") for p in data.get("pipeline", [])
+                      if isinstance(p, dict) and p.get("client")})
+    out = []
+    for c in clients:
+        if c == "sigmond":
+            continue
+        f = d / f"{c}.toml"
+        if f.exists():
+            names = [p.get("name") for p in data.get("pipeline", [])
+                     if isinstance(p, dict) and p.get("client") == c]
+            out.append(f"uploader: {f} stands, so hs-uploader runs it and "
+                       f"ignores the rendered {', '.join(map(str, names))} "
+                       f"for {c}; remove the file to let the render rule")
+    return out
+
+
 def _manifest_step(*, write: bool, enable: bool, daemon_ready) -> int:
     """The manifest step proper, after the daemon install; under the
     install lock when it writes."""
@@ -931,6 +959,9 @@ def _manifest_step(*, write: bool, enable: bool, daemon_ready) -> int:
         else:
             print("uploader: SITE SINK HOLD (LEGACY) ([uploads] enabled = false) "
                   "— not rendered: " + ", ".join(suppressed))
+
+    for line in _dropin_overrides(text):
+        print(line)
 
     path = um.MANIFEST_PATH
     installed = path.read_text() if path.exists() else ""

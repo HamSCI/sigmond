@@ -118,7 +118,7 @@ class DropServerDelivered(unittest.TestCase):
         self.assertEqual(out, self.PIPES)
 
 
-class SiteKeyOverride(unittest.TestCase):
+class _KeyDirs(unittest.TestCase):
 
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
@@ -137,6 +137,10 @@ class SiteKeyOverride(unittest.TestCase):
     def write_identity(self, key):
         self.manifest.write_text(
             f'[identity]\ncall = "KJ6MKI"\nssh_key_file = "{key}"\n')
+
+
+
+class SiteKeyOverride(_KeyDirs):
 
     def test_no_manifest_uses_the_default(self):
         self.assertEqual(um.host_key_file(),
@@ -170,6 +174,68 @@ class SiteKeyOverride(unittest.TestCase):
                                return_value=None):
             ident = um.build_identity(coord, 'KJ6MKI')
         self.assertEqual(ident['ssh_key_file'], str(self.wd_key))
+
+
+class PswsKeepsTheMachineKey(_KeyDirs):
+    """KJ6MKI, 2026-11-12: [identity] keeps id_rsa_wsprdaemon for the WD
+    gateways; PSWS was enrolled with id_ed25519_host."""
+
+    GRAPE = {'name': 'grape-psws',
+             'transport': {'type': 'psws_dataset', 'sftp_user': 'S000115'}}
+
+    def setUp(self):
+        super().setUp()
+        self.wd_key.write_text('k')
+        self.write_identity(self.wd_key)
+        self.host = str(self.keys / 'id_ed25519_host')
+
+    def test_psws_host_key_ignores_the_identity_override(self):
+        from sigmond import psws
+        self.assertEqual(um.host_key_file(), str(self.wd_key))
+        self.assertEqual(psws.host_key(), self.host)
+
+    def test_a_psws_pipeline_names_the_psws_key(self):
+        out = um._pin_psws_key(self.GRAPE, 'hamsci-physics')
+        self.assertEqual(out['transport']['ssh_key_file'], self.host)
+        self.assertNotIn('ssh_key_file', self.GRAPE['transport'])
+
+    def test_a_declared_key_is_kept(self):
+        decl = {'name': 'g', 'transport': {'type': 'psws_dataset',
+                                           'ssh_key_file': '/x'}}
+        self.assertEqual(um._pin_psws_key(decl, 'hamsci-physics'), decl)
+
+    def test_other_clients_inherit_identity(self):
+        tar = {'name': 'wspr-wsprdaemon', 'transport': {'type': 'wsprdaemon'}}
+        self.assertEqual(um._pin_psws_key(tar, 'wspr-recorder'), tar)
+
+    def test_without_an_override_nothing_is_added(self):
+        self.manifest.unlink()
+        self.assertEqual(um._pin_psws_key(self.GRAPE, 'hamsci-physics'),
+                         self.GRAPE)
+
+    def test_psws_token_is_the_psws_key(self):
+        coord = mock.Mock()
+        coord.host.grid = 'CM87'
+        coord.radiods = {}
+        with mock.patch.object(um.psws, 'read_state',
+                               side_effect=OSError('none')):
+            tok = um.resolve_tokens('hamsci-physics', coord, 'KJ6MKI')
+        self.assertEqual(tok['ssh_key_file'], self.host)
+
+
+class DropinOverrides(unittest.TestCase):
+
+    def test_names_a_client_whose_dropin_rules(self):
+        from sigmond.commands import uploader as up
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            (d / 'hamsci-physics.toml').write_text('')
+            text = ('[[pipeline]]\nname = "grape-psws"\nclient = "hamsci-physics"\n'
+                    '[[pipeline]]\nname = "wspr-wsprdaemon"\nclient = "wspr-recorder"\n')
+            lines = up._dropin_overrides(text, d)
+        self.assertEqual(len(lines), 1)
+        self.assertIn('grape-psws', lines[0])
+        self.assertIn('hamsci-physics.toml', lines[0])
 
 
 if __name__ == '__main__':

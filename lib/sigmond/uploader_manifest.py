@@ -224,6 +224,8 @@ def resolve_tokens(client: str, coord: Coordination,
         "ssh_key_file": host_key_file(),
     }
     if psws.is_psws_recorder(client):
+        # PSWS knows this machine's own key, whatever [identity] keeps.
+        tokens["ssh_key_file"] = psws.host_key()
         try:
             st = psws.read_state(client)
         except Exception:
@@ -820,6 +822,7 @@ def collect_pipelines(topology: Optional[Topology] = None,
                         "the shared %s pipeline; update hs-uploader",
                         store_version, SPLIT_STORE_VERSION, SHARED_PSK_PIPELINE)
                     warned_lag = True
+            rendered = _pin_psws_key(rendered, client)
             rendered = dict(rendered, client=client)
             # Dedup by name: below the split, two clients declare the SAME
             # shared pipeline (psk-recorder + meteor-scatter both declare
@@ -840,6 +843,27 @@ def collect_pipelines(topology: Optional[Topology] = None,
         warn_hidden_pipelines(topology, is_running)
     return apply_sender_key(apply_merge(apply_proxying(pipelines, coord), target),
                             features)
+
+
+def _pin_psws_key(rendered: dict, client: str) -> dict:
+    """A PSWS pipeline names the PSWS key on its own transport when the
+    manifest's ``[identity]`` keeps a different one (a site override,
+    :func:`installed_key_override`); otherwise it inherits, as before.
+    A declaration that names its own ``ssh_key_file`` keeps it.
+
+    ⛔ KJ6MKI, 2026-11-12: [identity] kept ``id_rsa_wsprdaemon`` for the WD
+    gateways, and grape-psws, naming no key, inherited it; PSWS knows only
+    the station's ``id_ed25519_host``, so every GRAPE upload would fail."""
+    if not psws.is_psws_recorder(client):
+        return rendered
+    t = rendered.get("transport")
+    if not isinstance(t, dict) or t.get("ssh_key_file"):
+        return rendered
+    if not str(t.get("type", "")).startswith("psws"):
+        return rendered
+    if installed_key_override() is None:
+        return rendered
+    return dict(rendered, transport=dict(t, ssh_key_file=psws.host_key()))
 
 
 def apply_sender_key(pipelines: list, features: Optional[frozenset]) -> list:
