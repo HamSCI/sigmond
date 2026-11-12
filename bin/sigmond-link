@@ -21,8 +21,32 @@ See tasks/plan-constrained-link-delivery.md (Phase 4).
       cleanly (no failure) during a gap
   sigmond-link apply
       write or remove the ExecCondition drop-ins for gated_units
-  sigmond-link rac
-      the RAC guard's tick (every minute).  In a scheduled gap it stops the
+  sigmond-link tick   (alias: rac)
+      the every-minute timer: the gateway probe, then the RAC guard.
+  sigmond-link probe [--now]
+      the probe alone (--now ignores probe_min); prints what answered
+
+The probe (every probe_min minutes, ALWAYS, in a pass or a gap): ONE tcp
+connect to each gateway in turn until one answers — vpn1/vpn2 at a HamSCI
+station, gw1/gw2 at a wsprdaemon-RAC one.  An answer is proof the link is up,
+whatever the schedule says: it opens a "probe window" in the schedule file
+lasting probe_min * probe_fail_count + 1 minutes from the answer, and each
+further answer extends it.  The gated units, hs-uploader's LinkGate and the
+RAC guard all read that file, so all of them go ahead while the gateways
+answer, and the schedule's gap comes back on its own probe_fail_count rounds
+after they stop.  The probe can only OPEN the link in schedule mode, never
+close it, so a gateway outage cannot gag a station whose link is fine.
+  mode = "probe" drops the schedule entirely: the link is up while the probe
+answers and down after probe_fail_count rounds without an answer.  It also
+fails open: no targets, or the tick stopping, lets everything run within
+probe_min * (probe_fail_count + 1) minutes.
+  probe_min = 0 never sends a probe (a site whose IT objects to them); the
+schedule alone then decides, and RAC keeps its dead man and ceiling.
+  Targets: probe_targets, else the gateways this machine's frpc configs name,
+else DEFAULT_PROBE_TARGETS (both HamSCI and both wsprdaemon gateways; a guest
+VM has no frpc config of its own).  Results: /var/lib/sigmond/link-probe.json.
+
+The RAC guard (the second half of every tick).  In a scheduled gap it stops the
       remote-access tunnels (frpc retries every few seconds otherwise) and
       starts them again when the next pass opens.  Remote access is how
       these stations are supported, so a schedule error must never cost it
@@ -30,9 +54,8 @@ See tasks/plan-constrained-link-delivery.md (Phase 4).
         1. a dead man: at suspension, a transient systemd timer is armed to
            start the tunnels at the gap's end (capped at max_suspend_hours),
            so the restart does not depend on this tool surviving
-        2. a probe: every rac_probe_min, ONE tcp connect to each tunnel's
-           gateway.  If it answers, the link is up whatever the schedule
-           says: RAC runs for the rest of the gap
+        2. the probe (above): while a gateway answers, the link is up
+           whatever the schedule says, so RAC runs
         3. a ceiling: suspended for max_suspend_hours, RAC runs regardless for
            rac_resume_hold_min, then the schedule may suspend it again
         4. fail open: disabled, no/stale/bad schedule, or any error in the
@@ -61,7 +84,10 @@ topology.toml (or, on a Proxmox host, which has none, /etc/sigmond/link.toml):
   gated_units   = [...]        # default DEFAULT_GATED below
   rac_suspend   = true         # the RAC guard; false leaves the tunnels alone
   rac_units     = [...]        # default DEFAULT_RAC_UNITS below (globs)
-  rac_probe_min = 10
+  mode          = "schedule"   # or "probe": no schedule, the probe decides
+  probe_min     = 5            # 0 = never probe (was rac_probe_min)
+  probe_targets = []           # ["host:port", ...]; [] = auto, see above
+  probe_fail_count = 2         # unanswered rounds before a probe window closes
   max_suspend_hours   = 6
   rac_resume_hold_min = 30
 """
@@ -82,6 +108,7 @@ TOPOLOGY = Path("/etc/sigmond/topology.toml")
 SCHEDULE = Path("/var/lib/sigmond/link-schedule.json")
 HOST_CONF = Path("/etc/sigmond/link.toml")
 RAC_STATE = Path("/var/lib/sigmond/link-rac.json")
+PROBE_STATE = Path("/var/lib/sigmond/link-probe.json")
 DEADMAN = "sigmond-link-rac-resume"
 DROPIN_NAME = "50-sigmond-link.conf"
 SYSTEMD_DIR = Path("/etc/systemd/system")
@@ -107,6 +134,11 @@ DEFAULT_GATED = [
 # The remote-access tunnels: the host's per-gateway frpc, and the guest's.
 DEFAULT_RAC_UNITS = ["sigmond-rac-host@*.service", "sigmond-rac-host.service", "wd-rac.service"]
 
+# When this machine has no frpc config (a guest VM: its host owns the tunnels),
+# probe these in order; any answer means the link is up.  The frps TLS port.
+DEFAULT_PROBE_TARGETS = ["vpn1.hamsci.org:35736", "vpn2.hamsci.org:35736",
+                         "gw2.wsprdaemon.org:35736", "gw1.wsprdaemon.org:35736"]
+
 
 def _log(msg: str) -> None:
     # once: under systemd both streams land in the journal
@@ -127,8 +159,9 @@ def fmt(t: dt.datetime | None) -> str:
 def read_settings(path: Path | None = None) -> dict:
     cfg = {"enabled": False, "source": "usap", "satellites": "all", "margin_min": 0.0,
            "refresh_hours": 6.0, "max_age_days": 8.0, "gated_units": list(DEFAULT_GATED),
-           "rac_suspend": True, "rac_units": list(DEFAULT_RAC_UNITS), "rac_probe_min": 10.0,
-           "max_suspend_hours": 6.0, "rac_resume_hold_min": 30.0}
+           "rac_suspend": True, "rac_units": list(DEFAULT_RAC_UNITS),
+           "max_suspend_hours": 6.0, "rac_resume_hold_min": 30.0,
+           "mode": "schedule", "probe_min": 5.0, "probe_targets": [], "probe_fail_count": 2.0}
     import tomllib
     ls = None
     for p in ([path] if path else [TOPOLOGY, HOST_CONF]):
@@ -144,16 +177,20 @@ def read_settings(path: Path | None = None) -> dict:
     for k in ("enabled", "rac_suspend"):
         if k in ls:
             cfg[k] = bool(ls[k])
-    for k in ("source", "satellites"):
+    for k in ("source", "satellites", "mode"):
         if k in ls:
             cfg[k] = ls[k]
-    for k in ("margin_min", "refresh_hours", "max_age_days", "rac_probe_min",
-              "max_suspend_hours", "rac_resume_hold_min"):
+    if "rac_probe_min" in ls and "probe_min" not in ls:
+        cfg["probe_min"] = float(ls["rac_probe_min"])      # the old name
+    for k in ("margin_min", "refresh_hours", "max_age_days", "probe_min",
+              "max_suspend_hours", "rac_resume_hold_min", "probe_fail_count"):
         if k in ls:
             cfg[k] = float(ls[k])
-    for k in ("gated_units", "rac_units"):
+    for k in ("gated_units", "rac_units", "probe_targets"):
         if k in ls:
             cfg[k] = [str(u) for u in ls[k]]
+    if cfg["mode"] not in ("schedule", "probe"):
+        raise ValueError(f"[link_schedule] mode must be \"schedule\" or \"probe\", not {cfg['mode']!r}")
     return cfg
 
 
@@ -356,9 +393,15 @@ def evaluate(doc: dict | None, t: dt.datetime, max_age_days: float = 8.0) -> dic
         for w in sorted(doc["windows"], key=lambda w: w["start"]):
             s, e = dt.datetime.fromisoformat(w["start"]), dt.datetime.fromisoformat(w["end"])
             if s <= t < e:
-                return r(True, True, "pass " + "+".join(w.get("sats", [])), e)
+                sats = w.get("sats", [])
+                why = ("gateway answered (" + ", ".join(x[6:] for x in sats if x.startswith("probe:")) + ")"
+                       if sats and all(x.startswith("probe:") for x in sats)
+                       else "pass " + "+".join(sats))
+                return r(True, True, why, e)
             if s > t:
                 return r(False, True, "between passes", s)
+        if doc.get("source") == "probe":
+            return r(False, True, "no gateway answers the probe", h1)
         return r(False, True, "after the last pass", h1)
     except Exception as e:
         return r(True, False, f"schedule unreadable ({type(e).__name__}: {e})")
@@ -374,7 +417,31 @@ def save(doc: dict, path: Path | None = None) -> None:
     os.replace(tmp, path)
 
 
+def merge_windows(wins: list) -> list:
+    """Overlapping or touching windows -> one, their sats joined."""
+    out: list = []
+    for w in sorted(wins, key=lambda w: w["start"]):
+        s, e = dt.datetime.fromisoformat(w["start"]), dt.datetime.fromisoformat(w["end"])
+        if out and s <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], e)
+            out[-1][2] += [x for x in w.get("sats", []) if x not in out[-1][2]]
+        else:
+            out.append([s, e, list(w.get("sats", []))])
+    return [{"start": s.isoformat(), "end": e.isoformat(), "sats": x} for s, e, x in out]
+
+
+def compose(doc: dict) -> dict:
+    """"windows" — what every reader obeys — is the schedule's own windows
+    plus the probe's.  The schedule's are kept apart in "sched_windows"."""
+    if "sched_windows" not in doc:
+        doc["sched_windows"] = doc.get("windows", [])
+    doc["windows"] = merge_windows(doc["sched_windows"] + doc.get("probe_windows", []))
+    return doc
+
+
 def cmd_fetch(cfg: dict, force: bool) -> int:
+    if cfg["enabled"] and cfg["mode"] == "probe":
+        return 0                # no schedule to fetch: the probe writes the file
     if not cfg["enabled"]:
         if SCHEDULE.exists():
             SCHEDULE.unlink()
@@ -404,6 +471,9 @@ def cmd_fetch(cfg: dict, force: bool) -> int:
                    "horizon": got["horizon"], "windows": got["windows"]}
         doc["fetched_at"] = t.isoformat()
         doc["notes"] = notes
+        doc["sched_windows"] = doc["windows"]
+        doc["probe_windows"] = (old or {}).get("probe_windows", [])
+        compose(doc)
         evaluate(doc, t)        # never write a file the readers cannot read
         save(doc)
         _log(f"schedule refreshed: {len(doc['windows'])} windows, "
@@ -444,11 +514,26 @@ def cmd_status(cfg: dict, as_json: bool) -> int:
     for w in nxt:
         s, e = dt.datetime.fromisoformat(w["start"]), dt.datetime.fromisoformat(w["end"])
         print(f"  pass  {fmt(s)} -> {fmt(e)}  {'+'.join(w.get('sats', []))}")
+    ps = _jload(PROBE_STATE)
+    if not cfg["enabled"] or cfg["probe_min"] <= 0:
+        print("probe          off" + ("" if cfg["enabled"] else " (link schedule disabled)"))
+    else:
+        tg = ps.get("targets") or [f"{h}:{p}" for h, p in gateway_targets(cfg)]
+        print(f"probe          every {cfg['probe_min']:g} min, mode {cfg['mode']}: {', '.join(tg)}")
+        if ps.get("last_probe"):
+            lp = dt.datetime.fromisoformat(ps["last_probe"])
+            print(f"               last {fmt(lp)}: "
+                  + (f"{ps['last_hit']} answered" if ps.get("last_hit") else "no answer")
+                  + (f"; {'reachable' if ps.get('reachable') else 'unreachable'} since "
+                     f"{fmt(dt.datetime.fromisoformat(ps['since']))}" if ps.get("since") else ""))
+            h = ps.get("history", [])
+            day = [x for x in h if dt.datetime.fromisoformat(x[0]) > t - dt.timedelta(hours=24)]
+            if day:
+                print(f"               last 24 h: {sum(1 for x in day if x[1])}/{len(day)} rounds answered")
     rs = _rac_load()
     if rs.get("suspended"):
         print(f"RAC            SUSPENDED since {fmt(dt.datetime.fromisoformat(rs['since']))}: "
-              f"{' '.join(rs.get('units', []))}; last probe "
-              f"{fmt(dt.datetime.fromisoformat(rs['last_probe'])) if rs.get('last_probe') else '-'}")
+              f"{' '.join(rs.get('units', []))}")
     elif rs.get("hold_until"):
         print(f"RAC            running until {fmt(dt.datetime.fromisoformat(rs['hold_until']))} "
               f"({rs.get('hold_why')})")
@@ -513,23 +598,31 @@ def rac_units(cfg: dict) -> list:
     return res
 
 
-def probe_targets(units: list) -> list:
-    """(host, port) of each tunnel's gateway, read from its frpc config."""
+def frpc_gateways(confdir: Path = Path("/etc/sigmond")) -> list:
+    """(host, port) of every gateway this machine's frpc configs name."""
     targets = []
-    for u in units:
-        m = re.match(r"sigmond-rac-host@(.+)\.service$", u)
-        conf = (Path(f"/etc/sigmond/frpc-host-{m.group(1)}.toml") if m
-                else Path("/etc/sigmond/frpc-host.toml") if u == "sigmond-rac-host.service"
-                else Path("/etc/sigmond/frpc.toml"))
+    for conf in sorted(confdir.glob("frpc*.toml")):
         try:
             txt = conf.read_text()
             host = re.search(r'^\s*serverAddr\s*=\s*"([^"]+)"', txt, re.M).group(1)
             port = int(re.search(r"^\s*serverPort\s*=\s*(\d+)", txt, re.M).group(1))
-            if (host, port) not in targets:
-                targets.append((host, port))
         except Exception:
             continue
+        if (host, port) not in targets:
+            targets.append((host, port))
     return targets
+
+
+def _hostport(x: str) -> tuple:
+    host, _, port = x.strip().rpartition(":")
+    return host.strip("[]"), int(port)
+
+
+def gateway_targets(cfg: dict) -> list:
+    """probe_targets, else this machine's frpc gateways, else the defaults."""
+    if cfg["probe_targets"]:
+        return [_hostport(x) for x in cfg["probe_targets"]]
+    return frpc_gateways() or [_hostport(x) for x in DEFAULT_PROBE_TARGETS]
 
 
 def tcp_probe(host: str, port: int, timeout: float = 8.0) -> bool:
@@ -540,6 +633,97 @@ def tcp_probe(host: str, port: int, timeout: float = 8.0) -> bool:
             return True
     except OSError:
         return False
+
+
+# ─── the gateway probe ────────────────────────────────────────────────────────
+
+def _jload(path: Path) -> dict:
+    try:
+        d = json.loads(path.read_text())
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _jsave(path: Path, d: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d, indent=1))
+    os.replace(tmp, path)
+
+
+def probe_tick(cfg: dict, t: dt.datetime | None = None, probe=None, force: bool = False) -> dict:
+    """Probe the gateways if a round is due, and keep the probe windows in
+    the schedule file.  -> the probe state."""
+    t = t or now()
+    probe = probe or tcp_probe
+    ps = _jload(PROBE_STATE)
+    on = cfg["enabled"] and cfg["probe_min"] > 0
+    if not on:
+        doc = load()
+        if doc and doc.get("probe_windows"):
+            doc["probe_windows"] = []
+            save(compose(doc))
+        if cfg["enabled"] and cfg["mode"] == "probe" and SCHEDULE.exists():
+            SCHEDULE.unlink()          # probe mode without a probe: fail open
+        return ps
+    period = dt.timedelta(minutes=cfg["probe_min"])
+    last = ps.get("last_probe")
+    if not force and last and t - dt.datetime.fromisoformat(last) < period - dt.timedelta(seconds=20):
+        return ps
+
+    targets = gateway_targets(cfg)
+    hit = None
+    for h, port in targets:
+        if probe(h, port):
+            hit = f"{h}:{port}"
+            break
+    ps["last_probe"] = t.isoformat()
+    ps["targets"] = [f"{h}:{port}" for h, port in targets]
+    ps["last_hit"] = hit
+    if hit:
+        ps["last_answer"] = t.isoformat()
+    hist = ps.get("history", [])
+    hist.append([t.isoformat(), hit])
+    ps["history"] = hist[-300:]                     # ~25 h at 5 min
+    was = ps.get("reachable")
+    ps["reachable"] = bool(hit)
+    if was is None or was != bool(hit):
+        ps["since"] = t.isoformat()
+        if targets:
+            _log(f"gateways {'reachable: ' + hit if hit else 'unreachable: ' + ', '.join(ps['targets'])}")
+    _jsave(PROBE_STATE, ps)
+
+    hold = period * cfg["probe_fail_count"] + dt.timedelta(minutes=1)
+    doc = load()
+    if cfg["mode"] == "probe":
+        if not targets:
+            if SCHEDULE.exists():
+                SCHEDULE.unlink()
+            _log("WARNING: probe mode with no gateway to probe: nothing gates")
+            return ps
+        doc = doc if doc and doc.get("source") == "probe" else {"version": 1, "source": "probe"}
+        doc["fetched_at"] = t.isoformat()
+        # the horizon ends soon after the next rounds: if the tick stops, the
+        # file stops covering `now` and every reader fails open
+        doc["horizon"] = [(t - dt.timedelta(days=1)).isoformat(),
+                          (t + period * (cfg["probe_fail_count"] + 1)).isoformat()]
+        doc["sched_windows"] = []
+    elif doc is None:
+        return ps                       # no schedule: nothing is gated anyway
+    pw = [w for w in doc.get("probe_windows", [])
+          if dt.datetime.fromisoformat(w["end"]) > t - dt.timedelta(days=1)]
+    if hit:
+        end, tag = t + hold, f"probe:{hit}"
+        if pw and dt.datetime.fromisoformat(pw[-1]["end"]) >= t:
+            pw[-1]["end"] = max(dt.datetime.fromisoformat(pw[-1]["end"]), end).isoformat()
+            if tag not in pw[-1]["sats"]:
+                pw[-1]["sats"].append(tag)
+        else:
+            pw.append({"start": t.isoformat(), "end": end.isoformat(), "sats": [tag]})
+    doc["probe_windows"] = pw
+    save(compose(doc))
+    return ps
 
 
 def _rac_load() -> dict:
@@ -578,7 +762,7 @@ def _rac_resume(state: dict, why: str) -> None:
     state.update(suspended=False, units=[], since=None)
 
 
-def rac_tick(cfg: dict, t: dt.datetime | None = None, probe=tcp_probe) -> int:
+def rac_tick(cfg: dict, t: dt.datetime | None = None) -> int:
     t = t or now()
     state = _rac_load()
     hold = state.get("hold_until")
@@ -595,8 +779,9 @@ def rac_tick(cfg: dict, t: dt.datetime | None = None, probe=tcp_probe) -> int:
         _rac_save(state)
         return 0
 
-    until = dt.datetime.fromisoformat(st["until"]) if st.get("until") else t
     max_s = cfg["max_suspend_hours"] * 3600
+    until = (dt.datetime.fromisoformat(st["until"]) if st.get("until") and cfg["mode"] == "schedule"
+             else t + dt.timedelta(seconds=max_s))
     if not state.get("suspended"):
         units = [u for u, active in rac_units(cfg) if active]
         if not units:
@@ -606,7 +791,7 @@ def rac_tick(cfg: dict, t: dt.datetime | None = None, probe=tcp_probe) -> int:
             _log("WARNING: could not arm the dead-man restart; leaving RAC running")
             return 0
         _systemctl("stop", *units)
-        state.update(suspended=True, since=t.isoformat(), units=units, last_probe=t.isoformat())
+        state.update(suspended=True, since=t.isoformat(), units=units)
         _log(f"RAC suspended ({st['reason']}) until {fmt(until)}: {' '.join(units)}")
         _rac_save(state)
         return 0
@@ -620,22 +805,16 @@ def rac_tick(cfg: dict, t: dt.datetime | None = None, probe=tcp_probe) -> int:
         _rac_resume(state, state["hold_why"])
         _rac_save(state)
         return 0
-    last = dt.datetime.fromisoformat(state.get("last_probe") or state["since"])
-    if (t - last).total_seconds() >= cfg["rac_probe_min"] * 60:
-        state["last_probe"] = t.isoformat()
-        targets = probe_targets(state.get("units", []))
-        hit = next((f"{h}:{p}" for h, p in targets if probe(h, p)), None)
-        if hit:
-            state.update(hold_until=until.isoformat(),
-                         hold_why=f"probe reached {hit} inside a scheduled gap")
-            _log(f"WARNING: {hit} answered during a scheduled gap: the schedule is wrong "
-                 f"or the link came early; RAC runs until {fmt(until)}")
-            _rac_resume(state, state["hold_why"])
     _rac_save(state)
     return 0
 
 
-def cmd_rac(cfg: dict) -> int:
+def cmd_rac(cfg: dict, probe: bool = True) -> int:
+    if probe:
+        try:
+            probe_tick(cfg)
+        except Exception as e:      # a probe fault must not cost RAC its guard tick
+            _log(f"WARNING: probe fault: {type(e).__name__}: {e}")
     try:
         return rac_tick(cfg)
     except Exception as e:  # fail open: every tunnel we know of starts
@@ -659,14 +838,17 @@ def main(argv=None) -> int:
     s.add_argument("--json", action="store_true")
     sub.add_parser("gate")
     sub.add_parser("apply")
-    sub.add_parser("rac")
+    sub.add_parser("rac", help="alias of tick")
+    sub.add_parser("tick")
+    pr = sub.add_parser("probe")
+    pr.add_argument("--now", action="store_true", help="ignore probe_min")
     a = ap.parse_args(argv)
     try:
         cfg = read_settings()
     except Exception as e:
         _log(f"WARNING: cannot read {TOPOLOGY} ({e}); treating the link schedule as disabled")
         cfg = read_settings(Path("/nonexistent"))     # defaults: disabled
-        if a.cmd not in ("gate", "rac"):
+        if a.cmd not in ("gate", "rac", "tick"):
             return 1
     if a.cmd == "fetch":
         return cmd_fetch(cfg, a.force)
@@ -678,8 +860,12 @@ def main(argv=None) -> int:
             return 0
     if a.cmd == "apply":
         return cmd_apply(cfg)
-    if a.cmd == "rac":
+    if a.cmd in ("rac", "tick"):
         return cmd_rac(cfg)
+    if a.cmd == "probe":
+        ps = probe_tick(cfg, force=a.now)
+        print(json.dumps({k: v for k, v in ps.items() if k != "history"}, indent=1))
+        return 0
     return cmd_status(cfg, getattr(a, "json", False))
 
 

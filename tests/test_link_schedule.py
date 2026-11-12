@@ -181,9 +181,6 @@ class TestGateAndApply(unittest.TestCase):
         self.assertEqual(list(root.glob("*.d/*")), [])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class FakeSystemd:
     """Stands in for systemctl/systemd-run: tunnel units, and an armed timer."""
@@ -221,24 +218,29 @@ class TestRacGuard(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         m.SCHEDULE = self.tmp / "link-schedule.json"
         m.RAC_STATE = self.tmp / "link-rac.json"
+        m.PROBE_STATE = self.tmp / "link-probe.json"
         m.SCHEDULE.write_text(json.dumps(_doc()))
         self.sd = FakeSystemd({"sigmond-rac-host@gw2.service": True})
-        self._orig = (m._systemctl, m.subprocess.run, m.probe_targets)
+        self._orig = (m._systemctl, m.subprocess.run, m.frpc_gateways)
         m._systemctl = self.sd.systemctl
         m.subprocess.run = self.sd.run
-        m.probe_targets = lambda units: [("gw2.wsprdaemon.org", 35736)]
+        m.frpc_gateways = lambda *a: [("gw2.wsprdaemon.org", 35736)]
         self.cfg = m.read_settings(self.tmp / "absent.toml")
         self.cfg["enabled"] = True
         self.probes = []
 
     def tearDown(self):
-        m._systemctl, m.subprocess.run, m.probe_targets = self._orig
+        m._systemctl, m.subprocess.run, m.frpc_gateways = self._orig
 
     def tick(self, t, answer=False):
         def probe(h, p):
-            self.probes.append(t)
+            self.probes.append((t, h))
             return answer
-        return m.rac_tick(self.cfg, t, probe=probe)
+        m.probe_tick(self.cfg, t, probe=probe)
+        return m.rac_tick(self.cfg, t)
+
+    def up(self, t):
+        return m.evaluate(m.load(), t)["up"]
 
     def running(self):
         return self.sd.active["sigmond-rac-host@gw2.service"]
@@ -263,18 +265,87 @@ class TestRacGuard(unittest.TestCase):
         self.tick(self.GAP)
         self.assertTrue(self.running())
 
-    def test_probes_once_per_interval_and_an_answer_brings_rac_back(self):
+    def test_probes_every_interval_at_all_times(self):
+        t0 = T("2026-11-12T16:00:00")               # inside a pass
+        for i in range(0, 30):
+            self.tick(t0 + dt.timedelta(minutes=i), answer=True)
+        self.assertEqual([t for t, _ in self.probes],
+                         [t0 + dt.timedelta(minutes=i) for i in (0, 5, 10, 15, 20, 25)])
+        self.assertTrue(self.running())
+
+    def test_an_answer_in_a_gap_opens_the_link_until_the_answers_stop(self):
         self.tick(self.GAP)
-        for i in range(1, 25):                       # 24 one-minute ticks
-            self.tick(self.GAP + dt.timedelta(minutes=i))
-        self.assertEqual(len(self.probes), 2)       # at +10 and +20 min only
         self.assertFalse(self.running())
-        self.tick(self.GAP + dt.timedelta(minutes=30), answer=True)
+        self.assertFalse(self.up(self.GAP))
+        t = self.GAP + dt.timedelta(minutes=5)
+        self.tick(t, answer=True)                    # the gateway answers in the gap
+        self.assertTrue(self.up(t))
         self.assertTrue(self.running())
-        # it stays up for the rest of the gap; no more suspending or probing
-        self.tick(self.GAP + dt.timedelta(minutes=45))
+        self.assertIsNone(self.sd.deadman)
+        st = m.evaluate(m.load(), t)
+        self.assertIn("gateway answered (gw2.wsprdaemon.org:35736)", st["reason"])
+        self.tick(t + dt.timedelta(minutes=5), answer=True)   # each answer extends it
+        last = t + dt.timedelta(minutes=5)
+        self.tick(last + dt.timedelta(minutes=5))             # then silence
+        self.tick(last + dt.timedelta(minutes=10))
+        self.assertTrue(self.up(last + dt.timedelta(minutes=10)))   # 2 rounds + 1 min
+        self.tick(last + dt.timedelta(minutes=11))
+        self.assertFalse(self.up(last + dt.timedelta(minutes=11)))
+        self.assertFalse(self.running())                      # the gap is back
+        # the schedule's own windows are untouched
+        self.assertEqual(m.load()["sched_windows"], _doc()["windows"])
+
+    def test_probe_tries_gateways_in_turn_and_stops_at_the_first_answer(self):
+        m.frpc_gateways = lambda *a: []
+        seen = []
+        m.probe_tick(self.cfg, self.GAP, probe=lambda h, p: seen.append(h) or h == "vpn2.hamsci.org")
+        self.assertEqual(seen, ["vpn1.hamsci.org", "vpn2.hamsci.org"])
+        self.cfg["probe_targets"] = ["[fd00::1]:7000"]
+        seen.clear()
+        m.probe_tick(self.cfg, self.GAP + dt.timedelta(minutes=5), probe=lambda h, p: seen.append((h, p)))
+        self.assertEqual(seen, [("fd00::1", 7000)])
+
+    def test_probe_min_zero_never_probes(self):
+        self.cfg["probe_min"] = 0
+        for i in range(0, 60, 5):
+            self.tick(self.GAP + dt.timedelta(minutes=i), answer=True)
+        self.assertEqual(self.probes, [])
+        self.assertFalse(self.running())
+        self.assertNotIn("probe_windows", m.load())
+
+    def test_probe_mode_needs_no_schedule(self):
+        m.SCHEDULE.unlink()
+        self.cfg["mode"] = "probe"
+        t0 = T("2026-11-12T16:00:00")
+        self.tick(t0, answer=True)
+        self.assertTrue(self.up(t0) and self.running())
+        self.assertEqual(m.cmd_fetch(self.cfg, force=True), 0)   # never fetches
+        for i in (5, 10):
+            self.tick(t0 + dt.timedelta(minutes=i))
+        self.assertTrue(self.up(t0 + dt.timedelta(minutes=10)))
+        self.tick(t0 + dt.timedelta(minutes=12))
+        self.assertFalse(self.up(t0 + dt.timedelta(minutes=12)))
+        self.assertFalse(self.running())
+        self.assertEqual(self.sd.deadman[0], 6 * 3600 + 60)    # no gap end: the ceiling
+        self.tick(t0 + dt.timedelta(minutes=15), answer=True)
         self.assertTrue(self.running())
-        self.assertEqual(len(self.probes), 3)
+        # if the ticks stop, the horizon runs out and everything fails open
+        self.assertTrue(self.up(t0 + dt.timedelta(minutes=31)))
+
+    def test_fetch_keeps_the_probe_windows(self):
+        self.tick(self.GAP + dt.timedelta(minutes=5), answer=True)
+        pw = m.load()["probe_windows"]
+        self.assertEqual(len(pw), 1)
+        m.now = lambda: self.GAP + dt.timedelta(minutes=6)
+        self.cfg["source"] = "https://example.invalid/windows.json"
+        orig = m.http_get
+        m.http_get = lambda url, binary=False: json.dumps(_doc())
+        try:
+            self.assertEqual(m.cmd_fetch(self.cfg, force=True), 0)
+        finally:
+            m.http_get = orig
+        self.assertEqual(m.load()["probe_windows"], pw)
+        self.assertTrue(self.up(self.GAP + dt.timedelta(minutes=6)))
 
     def test_ceiling_runs_rac_after_max_suspend_whatever_the_schedule(self):
         long_gap = {"version": 1, "fetched_at": "2026-11-12T00:00:00+00:00",
@@ -316,3 +387,31 @@ class TestRacGuard(unittest.TestCase):
         m.subprocess.run = self.sd.run
         self.tick(self.GAP)
         self.assertTrue(self.running())
+
+
+class TestTargets(unittest.TestCase):
+    def test_frpc_configs_name_the_gateways(self):
+        d = Path(tempfile.mkdtemp())
+        (d / "frpc-host-gw2.toml").write_text('serverAddr = "gw2.wsprdaemon.org"\nserverPort = 35736\n')
+        (d / "frpc-host.toml").write_text('serverAddr = "gw2.wsprdaemon.org"\nserverPort = 35736\n')
+        (d / "frpc-host-vpn1.toml").write_text('  serverAddr = "vpn1.hamsci.org"\n  serverPort = 35736\n')
+        (d / "frpc.toml.template").write_text('serverAddr = "{{X}}"\n')
+        self.assertEqual(m.frpc_gateways(d), [("gw2.wsprdaemon.org", 35736), ("vpn1.hamsci.org", 35736)])
+
+    def test_settings(self):
+        d = Path(tempfile.mkdtemp())
+        f = d / "link.toml"
+        f.write_text('[link_schedule]\nenabled = true\nrac_probe_min = 10\n')
+        self.assertEqual(m.read_settings(f)["probe_min"], 10)
+        f.write_text('[link_schedule]\nenabled = true\nprobe_min = 0\nmode = "probe"\n'
+                     'probe_targets = ["vpn1.hamsci.org:35736"]\n')
+        c = m.read_settings(f)
+        self.assertEqual((c["probe_min"], c["mode"], c["probe_targets"]),
+                         (0, "probe", ["vpn1.hamsci.org:35736"]))
+        f.write_text('[link_schedule]\nmode = "sometimes"\n')
+        with self.assertRaises(ValueError):
+            m.read_settings(f)
+
+
+if __name__ == "__main__":
+    unittest.main()

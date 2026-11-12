@@ -1,5 +1,5 @@
 [Unit]
-Description=Check every minute whether remote access should pause for a satellite gap
+Description=Every minute: probe the gateways (every probe_min), pause remote access during a satellite gap
 
 [Timer]
 OnBootSec=1min
