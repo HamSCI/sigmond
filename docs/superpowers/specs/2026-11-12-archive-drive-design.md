@@ -73,6 +73,12 @@ These would count as failure even if the code works:
 - An F16 file on the drive without dtype and scale beside it.
 - A file counted as archived that does not decode to the source's samples within rounding.
 - A drive erased after its health check said it was failing, without the operator overriding by name.
+- A station that boots an old drive instead of its own system. Found on AI6VN-1, 2026-11-12: at power-on
+  the host's firmware sees every USB port (the VM gets the controller only after Proxmox starts), and a
+  plugged-in drive that still held a live-USB system booted instead of Proxmox. `add`'s wipe ends that for
+  good, but until `add` runs, or when it refuses a drive, the drive can take the boot. The operator doc
+  says: plug the drive in while the station runs, and set the firmware to put new boot devices last.
+  A drive `add` refuses because of its health should be unplugged.
 
 ## Part 1 — drive health (sigmond)
 
@@ -272,6 +278,12 @@ announces on the bus first.
 
 If Rob plugs in more than one old drive, each gets step 1, to try the health report on drives of different
 ages and bridges.
+
+## Field results (AI6VN-1, 2026-11-12 21:46Z)
+
+The first real-drive `add` (Seagate Portable 2 TB on USB 2, controller passed through) worked in 37 s and
+found three bugs, fixed in sigmond: `add` searches `/usr/sbin` and `/sbin` for its tools; it creates
+`<mount>/timestd` owned by `timestd`; all of its output goes to one stream, in order.
 
 ## Who builds what
 

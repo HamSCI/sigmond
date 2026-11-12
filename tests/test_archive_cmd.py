@@ -153,3 +153,39 @@ def test_a_mount_that_lands_elsewhere_is_detached_and_fails(env):
     env.landed = ["/var/lib/sigmond/moved"]
     assert cmd.cmd_archive(_args()) == 1
     assert ["umount2", "/var/lib/sigmond/moved"] in env.ran
+
+
+def test_sbin_joins_an_operators_path(monkeypatch):
+    # AI6VN-1, 2026-11-12: hamsci's PATH has no sbin, so `--dry-run` stopped
+    # on "wipefs not found".
+    monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+    cmd._with_sbin_on_path()
+    assert os.environ["PATH"].split(os.pathsep)[-2:] == ["/usr/sbin", "/sbin"]
+    cmd._with_sbin_on_path()
+    assert os.environ["PATH"].count("/usr/sbin") == 1
+
+
+def test_add_gives_the_archiver_its_own_folder(env, monkeypatch):
+    me = types.SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid())
+    monkeypatch.setattr(cmd.pwd, "getpwnam",
+                        lambda u: me if u == "timestd" else (_ for _ in ()).throw(KeyError(u)))
+    assert cmd.cmd_archive(_args()) == 0
+    d = ar.MOUNT / "timestd"
+    assert d.is_dir() and d.stat().st_uid == os.getuid()
+
+
+def test_add_without_the_client_user_makes_no_folder(env, monkeypatch):
+    def nobody(u):
+        raise KeyError(u)
+    monkeypatch.setattr(cmd.pwd, "getpwnam", nobody)
+    assert cmd.cmd_archive(_args()) == 0
+    assert not (ar.MOUNT / "timestd").exists()
+
+
+def test_everything_add_says_goes_to_one_stream(env, capsys):
+    # Piped stdout printed "found …" and the command list after the success
+    # lines; all of it goes to stderr now, in order.
+    assert cmd.cmd_archive(_args()) == 0
+    out, errtext = capsys.readouterr()
+    assert out == ""
+    assert errtext.index("found") < errtext.index("$ wipefs") < errtext.index("archive drive mounted")

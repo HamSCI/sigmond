@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import datetime as _dt
 import os
+import pwd
 import shutil
 import subprocess
+import sys
 import time
 from typing import Dict, List, Optional
 
@@ -22,6 +24,44 @@ from ..ui import err, info, ok, warn
 
 # Who must own the mount point.  Root, always; the tests point it at themselves.
 _MOUNT_OWNER_UID = 0
+
+# The drive's top level stays root's; each client that writes to the archive
+# gets its own folder, owned by its service user (design 2026-11-12, part 2).
+CLIENT_DIRS = {"timestd": "timestd"}
+
+# wipefs, sfdisk and mkfs.ext4 live in /usr/sbin, which an operator's PATH
+# often lacks (AI6VN-1, 2026-11-12: `--dry-run` as hamsci stopped on
+# "wipefs not found").
+_SBIN_DIRS = ("/usr/sbin", "/sbin")
+
+
+def _say(msg: str = "") -> None:
+    """One stream for everything `smd archive` tells the operator: the ui
+    helpers write to stderr, so plain lines go there too and keep their order
+    when stdout is a pipe."""
+    print(msg, file=sys.stderr, flush=True)
+
+
+def _with_sbin_on_path() -> None:
+    parts = os.environ.get("PATH", "").split(os.pathsep)
+    missing = [d for d in _SBIN_DIRS if d not in parts]
+    if missing:
+        os.environ["PATH"] = os.pathsep.join([p for p in parts if p] + missing)
+
+
+def _make_client_dirs(root) -> None:
+    """Create each client's folder on the mounted drive, owned by its user.
+    A client whose user does not exist on this station gets no folder."""
+    for name, user in CLIENT_DIRS.items():
+        try:
+            pw = pwd.getpwnam(user)
+        except KeyError:
+            continue
+        d = root / name
+        if not d.exists():
+            os.mkdir(d, 0o755)
+        os.chown(d, pw.pw_uid, pw.pw_gid)
+        ok(f"{d} owned by {user}")
 
 
 def cmd_archive(args) -> int:
@@ -36,7 +76,7 @@ def cmd_archive(args) -> int:
 # ---------------------------------------------------------------- helpers
 
 def _run(cmd: List[str], dry: bool, stdin: Optional[str] = None) -> int:
-    print(f"    $ {' '.join(cmd)}" + (f"   <<< {stdin.strip()!r}" if stdin else ""))
+    _say(f"    $ {' '.join(cmd)}" + (f"   <<< {stdin.strip()!r}" if stdin else ""))
     if dry:
         return 0
     r = subprocess.run(cmd, input=stdin, text=True, capture_output=True)
@@ -82,7 +122,7 @@ def _mount_verified(part: str) -> int:
             err(f"refusing to mount: {ar.MOUNT} is not owned by root")
             return 1
         target = f"/proc/self/fd/{fd}"
-        print(f"    $ mount(2) {part} on {ar.MOUNT} (via {target}), ext4, noatime")
+        _say(f"    $ mount(2) {part} on {ar.MOUNT} (via {target}), ext4, noatime")
         rc = _libc_mount(part, target)
         if rc != 0:
             err(f"mount {part} on {ar.MOUNT}: {os.strerror(rc)}")
@@ -159,6 +199,7 @@ def _channels_in_buffer() -> int:
 # ---------------------------------------------------------------- add
 
 def _add(args) -> int:
+    _with_sbin_on_path()
     dry = bool(getattr(args, 'dry_run', False))
     name = getattr(args, 'device', None)
     if name:
@@ -172,7 +213,7 @@ def _add(args) -> int:
         before = ar.list_disks()
         info("Disks present now:")
         for d in before.values():
-            print(f"    {_describe(d)}")
+            _say(f"    {_describe(d)}")
         try:
             input("\nPlug in the archive drive now, then press Enter. ")
         except EOFError:
@@ -190,7 +231,7 @@ def _add(args) -> int:
             return 1
         disk = new[0]
 
-    print(f"\n  found  {_describe(disk)}")
+    _say(f"\n  found  {_describe(disk)}")
     placement = ar.judge_placement(disk, ar.rx888_devpaths())
     if placement.verdict == 'refuse':
         err(placement.reason)
@@ -208,7 +249,7 @@ def _add(args) -> int:
         return 1
 
     channels = _channels_in_buffer()
-    print(f"\n  At about 15 GB per channel per day, {channels} channels fill this drive "
+    _say(f"\n  At about 15 GB per channel per day, {channels} channels fill this drive "
           f"in about {ar.days_fit(disk.size_bytes, channels):.0f} days.")
     warn(f"FORMATTING ERASES EVERYTHING ON /dev/{disk.name}.")
     confirm = getattr(args, 'confirm', None)
@@ -253,10 +294,10 @@ def _add(args) -> int:
     fstab_new = ar.fstab_with_archive(fstab_old, uuid)
     now = _dt.datetime.now(_dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     if dry:
-        print(f"    would mkdir {ar.MOUNT}")
-        print(f"    would set /etc/fstab's archive line to: {ar.fstab_line(uuid)}")
-        print(f"    would write {ar.CONFIG}")
-        print(f"    would run: systemctl daemon-reload; mount(2) {part} on {ar.MOUNT}, "
+        _say(f"    would mkdir {ar.MOUNT}")
+        _say(f"    would set /etc/fstab's archive line to: {ar.fstab_line(uuid)}")
+        _say(f"    would write {ar.CONFIG}")
+        _say(f"    would run: systemctl daemon-reload; mount(2) {part} on {ar.MOUNT}, "
               "ext4, noatime, through a handle opened without following links")
         info("dry run: nothing changed")
         return 0
@@ -282,6 +323,7 @@ def _add(args) -> int:
     if _mount_verified(part) != 0:
         err(f"the fstab line stands (backup {backup}); mount {ar.MOUNT} by hand to see why")
         return 1
+    _make_client_dirs(ar.MOUNT)
     st = shutil.disk_usage(ar.MOUNT)
     ok(f"archive drive mounted at {ar.MOUNT}: {ar.human_bytes(st.free)} free, "
        f"about {ar.days_fit(st.free, channels):.0f} days at {channels} channels")
@@ -307,7 +349,7 @@ def _status() -> int:
     if not cfg:
         info("no archive drive (`smd archive add` attaches one)")
         return 0
-    print(f"  drive    {cfg.get('model') or '?'}  serial {cfg.get('serial') or '?'}  "
+    _say(f"  drive    {cfg.get('model') or '?'}  serial {cfg.get('serial') or '?'}  "
           f"UUID {cfg.get('uuid')}  added {cfg.get('added_utc')}")
     mounted = {m: s for s, m in ar.mounted_sources().items()}
     if str(ar.MOUNT) not in mounted:
@@ -323,9 +365,9 @@ def _status() -> int:
     days = sorted({p.name for p in ar.MOUNT.glob('*/raw_buffer/*/[0-9]*')
                    if p.is_dir() and p.name.isdigit()})
     if days:
-        print(f"  holds    {len(days)} day(s), {days[0]} to {days[-1]}")
+        _say(f"  holds    {len(days)} day(s), {days[0]} to {days[-1]}")
     else:
-        print("  holds    nothing yet (the archiver comes with hf-timestd, phase 2)")
+        _say("  holds    nothing yet (the archiver comes with hf-timestd, phase 2)")
     return 0
 
 
