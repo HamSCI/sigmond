@@ -94,6 +94,7 @@ def write_config(tmp_path, existing):
         mgmt_vm_ip(){{ echo 10.99.0.2; }}
     """) + shell_func("rac_gateway_set") + shell_func("rac_write_config") + \
         shell_func("rac_ka9q_webs") + shell_func("rac_webs_in_config") + shell_func("rac_web_channels") + \
+        shell_func("rac_station_runs") + \
         "\nrac_write_config\nls -1 %s | tr '\\n' ' '\necho\n" % etc
 
 

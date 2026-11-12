@@ -9,7 +9,7 @@ radiod gets 8083, since gmag-webui holds 8082), so none is expected.
 import re
 import subprocess
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional
 
 from sigmond import gmag_webui
 
@@ -58,8 +58,50 @@ def installed_port(unit: str, port: int, root: Path = Path("/")) -> int:
     return int(m.group(1)) if m else port
 
 
+def reporter_labels(coord) -> dict:
+    """{status_dns: instance key} for each radiod whose client instances
+    share one reporter ID.
+
+    A ka9q-web link reads better as the reporter the radiod serves than as
+    its multicast name: KFS shows KFS-OMNI and KFS-SW (reporter IDs KFS/OMNI
+    and KFS/SW), while AC0G-B2 showed ac0g-b1-a-status.local where AC0G-B1A
+    belongs (2026-11-11).  The key form (`/` -> `-`, instance.instance_key)
+    matches the service names.  A radiod whose instances disagree, or that
+    feeds none (a station-wide "" or "default" instance), gets no entry and
+    keeps its radiod name.
+    """
+    from sigmond.instance import instance_key
+    out = {}
+    for rid, r in (getattr(coord, "radiods", None) or {}).items():
+        keys = set()
+        for c in coord.instances_bound_to(rid):
+            if c.instance in ("", "default"):
+                continue
+            try:
+                keys.add(instance_key(c.instance))
+            except Exception:
+                continue
+        dns = getattr(r, "effective_status_dns", None)
+        if len(keys) == 1 and dns:
+            out[dns] = keys.pop()
+    return out
+
+
+def rac_lines(rows: list) -> str:
+    """`<label> <port>` per ka9q-web row, primary first: what sigmond-rac
+    tunnels and the dashboard shows as each link's name."""
+    lines = []
+    for r in rows:
+        if r["name"] == "ka9q-web" or r["name"].startswith("ka9q-web-"):
+            label = r.get("reporter") or re.sub(r"-status\.local$", "",
+                                                r.get("radiod") or "-")
+            lines.append(f"{label} {r['port']}")
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
 def list_viewers(ka9q_targets: list, gmag_installed: bool,
-                 is_active: Callable[[str], str]) -> list:
+                 is_active: Callable[[str], str],
+                 reporters: Optional[dict] = None) -> list:
     def state(unit: str) -> str:
         try:
             return is_active(unit) or UNKNOWN
@@ -67,10 +109,14 @@ def list_viewers(ka9q_targets: list, gmag_installed: bool,
             return UNKNOWN
 
     rows = []
+    reporters = reporters or {}
     for i, (unit, status_dns, port) in enumerate(ka9q_targets, start=1):
+        reporter = reporters.get(status_dns)
         rows.append({
             "name": "ka9q-web" if i == 1 else f"ka9q-web-{i}",
-            "label": f"Spectrum and waterfall ({status_dns})",
+            "label": f"Spectrum and waterfall ({reporter or status_dns})",
+            "radiod": status_dns,
+            "reporter": reporter,
             "port": port,
             "unit": unit,
             "active": state(unit),

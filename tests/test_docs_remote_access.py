@@ -403,13 +403,15 @@ def test_the_page_says_a_multi_radiod_decoder_adds_a_web_channel_per_radiod():
     assert "no gateway band for a 4th ka9q-web page" in WIZARD
 
 
-def test_the_station_heredoc_declares_exactly_four_channels():
-    # Station mode spells its names ${SITE}-vm-*, with braces, so the
-    # six-channel count above does not see them.
-    start = WIZARD.index("<<STNTOMLEOF")
+def test_the_station_config_declares_at_most_four_channels():
+    # Station mode spells its names ${SITE}-vm-* in the heredoc (with braces,
+    # so the six-channel count above does not see them) and %s-vm-* in the
+    # blocks it adds only for pages the machine runs (rac_station_runs).
+    start = WIZARD.index('_stn_web=""; _stn_stn=""')
     block = WIZARD[start:WIZARD.index("\nSTNTOMLEOF", start)]
-    declared = re.findall(r'name = "\$\{SITE\}-([a-z-]+)"', block)
+    declared = re.findall(r'name = "(?:\$\{SITE\}|%s)-([a-z-]+)"', block)
     assert sorted(declared) == ["vm-gmag", "vm-ssh", "vm-station", "vm-web"]
+    assert "carries ssh alone" in flat(PAGE)
 
 
 def test_the_pairing_checks_the_page_promises_are_the_hosts_units():

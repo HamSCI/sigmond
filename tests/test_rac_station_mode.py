@@ -103,10 +103,13 @@ HOST_REPLY = dict(STATION_REPLY, ports={"vm_ssh": 35817, "vm_web": 45817,
 
 
 def pre(tmp_path, port, *, station, relays=True, **kw):
+    kw = dict(kw); runs = kw.pop("runs", None)
     s = rr.host(tmp_path, tiers=rr.tier(port), relays=relays,
                 configured=None if station else "AC0G/B4 EM38ww 2026-10-09", **kw)
     if station:
-        s += "RAC_MODE=station\n"
+        # The devbox's own systemd knows none of the station's web units;
+        # tests that care about which pages a machine serves say so.
+        s += "RAC_MODE=station\n" + (runs or "rac_station_runs(){ return 0; }\n")
     return s
 
 
@@ -456,3 +459,46 @@ def test_station_without_a_ka9q_web_unit_still_names_the_primary_port(tmp_path):
     body = pre(tmp_path, 1, station=True) + "rac_ka9q_webs\n"
     r = sh(body, tmp_path, {"SIGMOND_KA9Q_WEB_ENV_DIR": str(tmp_path / "absent")})
     assert r.stdout == "- 8081\n", r.stdout + r.stderr
+
+
+
+def test_station_runs_reads_systemd(tmp_path):
+    """A unit systemd calls disabled, masked or absent serves no page; any
+    other answer, or none, keeps the channel."""
+    for answer, rc in (("enabled", 0), ("static", 0), ("", 0),
+                       ("disabled", 1), ("masked", 1), ("not-found", 1)):
+        body = pre(tmp_path, 1, station=True, runs="\n")
+        body += f"systemctl(){{ [ \"$1\" = is-enabled ] && printf '%s' '{answer}'; }}\n"
+        body += "rac_station_runs ka9q-web.service; echo rc=$?\n"
+        r = sh(body, tmp_path)
+        assert f"rc={rc}" in r.stdout, (answer, r.stdout + r.stderr)
+
+
+def test_radiod_only_station_tunnels_ssh_alone(tmp_path):
+    """AC0G-B1 (2026-11-11): radiod only, no ka9q-web, station-web or
+    gmag-webui, so its frpc carries SSH and nothing else."""
+    reg = rr.Registrar(reply=STATION_REPLY)
+    try:
+        r = sh(pre(tmp_path, reg.port, station=True,
+                   runs="rac_station_runs(){ return 1; }\n")
+               + "rac_register fresh; echo rc=$? fail=$RAC_FAIL\n", tmp_path)
+    finally:
+        reg.close()
+    assert "rc=0 fail=" in r.stdout, r.stdout + r.stderr
+    toml = (tmp_path / "frpc-host-gw2.toml").read_text()
+    assert proxies(toml) == [
+        {"name": "AC0G-SIGMA-vm-ssh", "local": 22, "remote": 35817}], toml
+    assert "(1 channels" in r.stdout, r.stdout
+
+
+def test_station_pages_come_from_smd_first(tmp_path):
+    """`smd admin viewers --rac-lines` names each page after its reporter;
+    sigmond-rac runs under sudo, so the call must carry SIGMOND_ALLOW_SUDO."""
+    fake = tmp_path / "smd"
+    fake.write_text('#!/bin/sh\n[ "$SIGMOND_ALLOW_SUDO" = 1 ] || exit 1\n'
+                    '[ "$*" = "admin viewers --rac-lines" ] || exit 1\n'
+                    'printf "AC0G-B1A 8081\\nAC0G-B1B 8083\\n"\n')
+    fake.chmod(0o755)
+    r = sh(pre(tmp_path, 1, station=True) + "rac_ka9q_webs\n", tmp_path,
+           {"SIGMOND_RAC_SMD": str(fake)})
+    assert r.stdout == "AC0G-B1A 8081\nAC0G-B1B 8083\n", r.stdout + r.stderr

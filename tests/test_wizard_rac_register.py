@@ -27,7 +27,8 @@ TEXT = WIZARD.read_text()
 FUNCS = ("build_rac_tiers", "rac_gateway_set", "rac_load_pin", "rac_save_pin",
          "rac_site_name", "rac_payload_ready", "rac_ladder", "rac_write_config",
          "rac_register_locked", "rac_register", "rac_ka9q_webs", "mgmt_vm_ip",
-         "rac_webs_in_config", "rac_web_channels", "rac_refresh_webs")
+         "rac_webs_in_config", "rac_web_channels", "rac_refresh_webs",
+         "rac_station_runs")
 
 PUBKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeFakeFakeFakeFakeFakeFakeFakeFakeFakeFake root@test"
 

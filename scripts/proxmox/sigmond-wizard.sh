@@ -660,11 +660,28 @@ $RAC_TIERS
 TIEREOF
 }
 
+rac_station_runs(){
+    # Station mode: 0 when this machine runs the unit $1 (or cannot say),
+    # 1 when systemd reports it disabled or absent.  A radiod-only machine
+    # (AC0G-B1, 2026-11-11: no ka9q-web, station-web or gmag-webui) must not
+    # publish tunnels to pages it does not serve; the dashboard showed three
+    # dead links for it.  No systemctl, or no answer, keeps the channel.
+    command -v systemctl >/dev/null 2>&1 || return 0
+    case "$(systemctl is-enabled "$1" 2>/dev/null)" in
+        disabled|masked|not-found) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
 rac_ka9q_webs(){
     # One line per ka9q-web page the decoder serves, "<radiod> <port>": first
     # the primary (ka9q-web.service; "-" when its command line names no
     # radiod), then every ka9q-web@<radiod> instance, in name order, from the
-    # env files `smd install ka9q-web` writes.  On a Proxmox host the question
+    # env files `smd install ka9q-web` writes.  `smd admin viewers --rac-lines`
+    # answers first when this sigmond has it: it names each page after the
+    # reporter its radiod serves (AC0G-B1A, KFS-OMNI), not the multicast
+    # name.  sigmond-rac runs under sudo, where smd refuses to run unless
+    # SIGMOND_ALLOW_SUDO=1; this read-only listing sets it.  On a Proxmox host the question
     # crosses to the VM through the guest agent (nothing but ASCII, see
     # gexec); on bare metal it is asked of this machine.  Empty when the VM
     # cannot be asked: the tunnel then carries the six channels it always has.
@@ -674,9 +691,12 @@ rac_ka9q_webs(){
         return 0
     fi
     local _q
-    _q='d=${SIGMOND_KA9Q_WEB_ENV_DIR:-/etc/sigmond/ka9q-web}
+    _q='l=$(SIGMOND_ALLOW_SUDO=1 ${SIGMOND_RAC_SMD:-smd} admin viewers --rac-lines 2>/dev/null)
+if [ -n "$l" ]; then printf "%s\n" "$l"; else
+d=${SIGMOND_KA9Q_WEB_ENV_DIR:-/etc/sigmond/ka9q-web}
 systemctl show -p ExecStart --value ka9q-web.service 2>/dev/null | sed -n "s/.* -m \([^ ]*\)-status\.local.* -p \([0-9][0-9]*\).*/\1 \2/p" | head -1 | grep . || echo "- 8081"
 for f in "$d"/*.env; do [ -f "$f" ] || continue; p=$(sed -n "s/^KA9Q_WEB_PORT=//p" "$f" | head -1); [ -n "$p" ] && echo "$(basename "$f" .env | sed "s/-status\.local\$//") $p"; done
+fi
 true'
     if [ "${RAC_MODE:-host}" = station ]; then
         ( eval "$_q" ) 2>/dev/null      # a subshell: the caller's variables stay as they are
@@ -881,7 +901,21 @@ rac_write_config(){
         [ -n "$_first" ] || _first="$_toml"
         RAC_UNITS="${RAC_UNITS:+$RAC_UNITS }sigmond-rac-host@$_gwname.service"
         if [ "${RAC_MODE:-host}" = station ]; then
-            say "writing $_toml ($((4+RAC_WEB_N)) channels, gateway $_gwname at $_gwhost:$_gwport)"
+            _stn_web=""; _stn_stn=""; _stn_gmag=""; _stn_n=1
+            if rac_station_runs ka9q-web.service; then
+                _stn_web=$(printf '\n[[proxies]]\nname = "%s-vm-web"\ntype = "tcp"\nlocalIP = "127.0.0.1"\nlocalPort = 8081\nremotePort = %s%s%s\n' \
+                    "$SITE" "$P_VMWEB" "$RAC_WEB_META" "$RAC_WEB_EXTRA")
+                _stn_n=$((_stn_n + 1 + RAC_WEB_N))
+            fi
+            if rac_station_runs station-web.service; then
+                _stn_stn=$(printf '\n[[proxies]]\nname = "%s-vm-station"\ntype = "tcp"\nlocalIP = "127.0.0.1"\nlocalPort = 8000\nremotePort = %s\n' "$SITE" "$P_VMSTN")
+                _stn_n=$((_stn_n + 1))
+            fi
+            if rac_station_runs gmag-webui.service; then
+                _stn_gmag=$(printf '\n[[proxies]]\nname = "%s-vm-gmag"\ntype = "tcp"\nlocalIP = "127.0.0.1"\nlocalPort = 8082\nremotePort = %s\n' "$SITE" "$P_VMGMAG")
+                _stn_n=$((_stn_n + 1))
+            fi
+            say "writing $_toml ($_stn_n channels, gateway $_gwname at $_gwhost:$_gwport)"
         else
             say "writing $_toml ($((6+RAC_WEB_N)) channels, gateway $_gwname at $_gwhost:$_gwport)"
         fi
@@ -894,7 +928,7 @@ rac_write_config(){
         # Braces in ${SITE}-vm-* keep the host's six-channel test from counting these.
         ( umask 077; cat > "$_toml.new" <<STNTOMLEOF
 # Written by sigmond-rac $(date -u +%F) — RAC #$RACN, site $SITE (station mode).
-# ONE frpc on this machine carries four channels, straight to its own services.
+# ONE frpc on this machine carries its channels, straight to its own services.
 serverAddr = "$_gwhost"
 serverPort = $_gwport
 user = "$RUSER"
@@ -923,26 +957,7 @@ remotePort = $P_VMSSH
 [proxies.metadatas]
 user = "${RAC_VM_LOGIN:-hamsci}"
 
-[[proxies]]
-name = "${SITE}-vm-web"
-type = "tcp"
-localIP = "127.0.0.1"
-localPort = 8081
-remotePort = $P_VMWEB${RAC_WEB_META}${RAC_WEB_EXTRA}
-
-[[proxies]]
-name = "${SITE}-vm-station"
-type = "tcp"
-localIP = "127.0.0.1"
-localPort = 8000
-remotePort = $P_VMSTN
-
-[[proxies]]
-name = "${SITE}-vm-gmag"
-type = "tcp"
-localIP = "127.0.0.1"
-localPort = 8082
-remotePort = $P_VMGMAG
+${_stn_web}${_stn_stn}${_stn_gmag}
 STNTOMLEOF
         ) && mv -f "$_toml.new" "$_toml" && _stn_ok=1 || _stn_ok=0
         if [ "$_stn_ok" != 1 ]; then

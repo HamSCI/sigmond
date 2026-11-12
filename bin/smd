@@ -6616,6 +6616,8 @@ _PRELOAD_MODULES = {
                'sigmond.inprocess_senders', 'sigmond.instance',
                'sigmond.lifecycle', 'sigmond.psws', 'sigmond.site_profile',
                'sigmond.snapshot', 'sigmond.uploader_manifest',
+               # lifecycle's shim lookup (fallback_shim_path)
+               'sigmond.component_state',
                # site_profile's locally_managed name check
                'sigmond.installer', 'sigmond.lan_order'),
     'align': ('sigmond.align', 'sigmond.align_apply', 'sigmond.align_live',
@@ -27068,8 +27070,16 @@ def cmd_admin_viewers(args) -> int:
         gmag_installed = False
     targets = [(u, s, viewers.installed_port(u, p))
                for u, s, p in _ka9q_web_targets()]
+    try:
+        from sigmond.coordination import load_coordination
+        reporters = viewers.reporter_labels(load_coordination())
+    except Exception:
+        reporters = {}
     rows = viewers.list_viewers(targets, gmag_installed,
-                                viewers.systemctl_is_active)
+                                viewers.systemctl_is_active, reporters)
+    if getattr(args, 'rac_lines', False):
+        sys.stdout.write(viewers.rac_lines(rows))
+        return 0
     if getattr(args, 'json', False):
         import json
         print(json.dumps({'viewers': rows,
@@ -30660,6 +30670,9 @@ def _build_parser() -> argparse.ArgumentParser:
              'ports, units, state and port conflicts')
     p_viewers.add_argument('--json', action='store_true',
         help='print {"viewers": [...], "conflicts": [...]}')
+    p_viewers.add_argument('--rac-lines', action='store_true',
+        help='print "<label> <port>" per ka9q-web page, primary first '
+             '(what sigmond-rac tunnels; label = reporter ID key)')
 
     # A lib that will not import must not cost every smd verb its parser;
     # the literal list stands in, and tests/test_snapshot.py pins it to

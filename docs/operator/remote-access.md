@@ -34,9 +34,10 @@ recognise are in the [glossary](glossary.md).
 > - **The tunnel and the switch both live on your machine.**  Type `smd remote status`,
 >   `smd remote off` and `smd remote on` as yourself, never with `sudo`; smd asks for root through
 >   sudo on its own and may ask for your password.
-> - **It carries four channels, not six:** ssh (port 22), the ka9q-web page (8081), the station
->   pages (8000) and the magnetometer page (8082), all on your machine.  The host's ssh and the
->   Proxmox UI do not exist here.
+> - **It carries at most four channels, not six:** ssh (port 22) always, and the ka9q-web page
+>   (8081, plus one more per extra radiod), the station pages (8000) and the magnetometer page
+>   (8082) only when your machine runs them.  A machine that runs only radiod carries ssh alone.
+>   The host's ssh and the Proxmox UI do not exist here.
 > - **Its name** joins your callsign and hostname in upper case, as in `AC0G-SIGMA`; once
 >   registered, the name sticks.
 > - **A machine that runs only radiod** never runs bring-up.  Activate it once by hand:

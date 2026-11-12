@@ -49,9 +49,9 @@ class ListViewersTests(unittest.TestCase):
         self.assertEqual(rows[1]["port"], 8082)
         self.assertEqual(rows[1]["unit"], "gmag-webui.service")
         self.assertEqual(rows[1]["active"], "active")
-        for r in rows:
-            self.assertEqual(set(r), {"name", "label", "port", "unit",
-                                      "active", "description"})
+        base = {"name", "label", "port", "unit", "active", "description"}
+        self.assertEqual(set(rows[0]), base | {"radiod", "reporter"})
+        self.assertEqual(set(rows[1]), base)
 
     def test_two_radiods_name_the_second_with_a_suffix(self):
         rows = viewers.list_viewers(TWO, False, _active)
@@ -107,6 +107,52 @@ class SystemctlActiveTests(unittest.TestCase):
         with mock.patch("subprocess.run",
                         side_effect=subprocess.TimeoutExpired("systemctl", 5)):
             self.assertEqual(viewers.systemctl_is_active("x.service"), "unknown")
+
+
+class ReporterLabelTests(unittest.TestCase):
+    """Each ka9q-web page is named after the reporter its radiod serves
+    (AC0G-B2 showed ac0g-b1-a-status.local where AC0G-B1A belongs)."""
+
+    def _coord(self, clients):
+        from sigmond.coordination import ClientInstance, Radiod
+        radiods = {
+            "ac0g-b1-a-status.local": Radiod(id="ac0g-b1-a-status.local", host="ac0g-b1",
+                                             status_dns="ac0g-b1-a-status.local"),
+            "ac0g-b1-b-status.local": Radiod(id="ac0g-b1-b-status.local", host="ac0g-b1",
+                                             status_dns="ac0g-b1-b-status.local"),
+        }
+        coord = mock.Mock(radiods=radiods)
+        coord.instances_bound_to = lambda rid: [c for c in clients if c.radiod_id == rid]
+        return coord
+
+    def test_b2_pages_take_their_reporter_ids(self):
+        from sigmond.coordination import ClientInstance as C
+        coord = self._coord([
+            C(client_type="wspr-recorder", instance="AC0G=B1A", radiod_id="ac0g-b1-a-status.local"),
+            C(client_type="psk-recorder", instance="AC0G=B1A", radiod_id="ac0g-b1-a-status.local"),
+            C(client_type="hf-timestd", instance="", radiod_id="ac0g-b1-a-status.local"),
+            C(client_type="wspr-recorder", instance="AC0G=B1B", radiod_id="ac0g-b1-b-status.local"),
+        ])
+        labels = viewers.reporter_labels(coord)
+        self.assertEqual(labels, {"ac0g-b1-a-status.local": "AC0G-B1A",
+                                  "ac0g-b1-b-status.local": "AC0G-B1B"})
+        rows = viewers.list_viewers(
+            [("ka9q-web.service", "ac0g-b1-a-status.local", 8081),
+             ("ka9q-web@ac0g-b1-b-status.local.service", "ac0g-b1-b-status.local", 8083)],
+            True, _active, labels)
+        self.assertEqual(rows[0]["label"], "Spectrum and waterfall (AC0G-B1A)")
+        self.assertEqual(viewers.rac_lines(rows), "AC0G-B1A 8081\nAC0G-B1B 8083\n")
+
+    def test_disagreeing_or_absent_reporters_keep_the_radiod_name(self):
+        from sigmond.coordination import ClientInstance as C
+        coord = self._coord([
+            C(client_type="wspr-recorder", instance="AC0G=B1A", radiod_id="ac0g-b1-a-status.local"),
+            C(client_type="psk-recorder", instance="AC0G=X", radiod_id="ac0g-b1-a-status.local"),
+        ])
+        self.assertEqual(viewers.reporter_labels(coord), {})
+        rows = viewers.list_viewers(
+            [("ka9q-web.service", "ac0g-b1-a-status.local", 8081)], False, _active, {})
+        self.assertEqual(viewers.rac_lines(rows), "ac0g-b1-a 8081\n")
 
 
 class InstalledPortTests(unittest.TestCase):
