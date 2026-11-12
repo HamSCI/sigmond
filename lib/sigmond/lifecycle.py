@@ -160,12 +160,15 @@ def _resolve_component_units(component: str) -> list[UnitRef]:
 
     conf_dir = systemd_config.get('conf_dir', '')
     env_dir = systemd_config.get('env_dir', '')
+    instances_from = systemd_config.get(
+        'instances_from', CONFIG_RADIOD_DEFAULTS.get(component, ''))
 
     # Process templated units: expand per instance
     for template in templated_units:
         kind = _unit_kind(template)
         expanded = _expand_template(component, template, source, kind,
-                                    conf_dir=conf_dir, env_dir=env_dir)
+                                    conf_dir=conf_dir, env_dir=env_dir,
+                                    instances_from=instances_from)
         units.extend(expanded)
 
     # Host-local singletons: only where enabled on this host.
@@ -175,6 +178,37 @@ def _resolve_component_units(component: str) -> list[UnitRef]:
     return units
 
 
+# Clients that run one <client>@<radiod> per radiod named in their own config
+# (2026-11-12): a checkout older than its deploy.toml `instances_from` key
+# still gets its instances.  Without them `smd start` started nothing for
+# codar-sounder and hfdl-recorder@default (AC1SN, W2NAF, UACNJ, AC0G/ND, SIGMA).
+CONFIG_RADIOD_DEFAULTS = {
+    "hfdl-recorder": "config-radiods",
+    "codar-sounder": "config-radiods",
+}
+_PLACEHOLDER_STATUS = "<configure-via-config-init>"
+
+
+def _config_radiods(component: str) -> set:
+    """Radiod status names in /etc/<component>/<component>-config.toml's
+    [[radiod]] blocks, the install-time placeholder left out."""
+    cfg = Path(f"/etc/{component}") / f"{component}-config.toml"
+    try:
+        with open(cfg, "rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError, TypeError):
+        return set()
+    blocks = data.get("radiod") or []
+    if isinstance(blocks, dict):
+        blocks = [blocks]
+    out = set()
+    for b in blocks:
+        st = str((b or {}).get("status", "")).strip() if isinstance(b, dict) else ""
+        if st and st != _PLACEHOLDER_STATUS and not st.startswith("<"):
+            out.add(st)
+    return out
+
+
 def _expand_template(
     component: str,
     template: str,
@@ -182,8 +216,14 @@ def _expand_template(
     kind: str,
     conf_dir: str = "",
     env_dir: str = "",
+    instances_from: str = "",
 ) -> list[UnitRef]:
     """Expand a templated unit (e.g., 'psk-recorder@.service') into per-instance UnitRefs.
+
+    ``instances_from = "config-radiods"`` adds one instance per radiod named
+    in ``/etc/<component>/<component>-config.toml``'s ``[[radiod]] status``
+    (placeholders skipped): hfdl-recorder and codar-sounder run one
+    ``<client>@<radiod>`` per radiod they record.
 
     ``env_dir`` names a second directory of ``<instance>.env`` files to
     discover instances from, for a component whose unit writer keeps them
@@ -285,6 +325,9 @@ def _expand_template(
                         configured.add(unescape_systemd_instance(stem))
         except PermissionError:
             pass
+
+    if instances_from == "config-radiods":
+        configured |= _config_radiods(component)
 
     # systemctl reports instance names in ESCAPED form ('=' -> \x3d), while
     # env-file/config discovery above yields the raw form ('AC0G=B4').  Decode
