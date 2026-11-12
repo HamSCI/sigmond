@@ -213,7 +213,6 @@ def _expand_template(
     from .instance import systemd_escape, unescape_systemd_instance
 
     configured = set()
-    conf_configured = set()     # instances with a conf in conf_dir (radiod@)
     env_dirs = [Path(f"/etc/{component}/env")]
     if env_dir:
         env_dirs.append(Path(env_dir))
@@ -248,7 +247,6 @@ def _expand_template(
                             cf.stem[len(base) + 1:])
                         if instance_name:
                             configured.add(instance_name)
-                            conf_configured.add(instance_name)
             except PermissionError:
                 pass
 
@@ -364,7 +362,9 @@ def _expand_template(
         # so start/bringup never enable or start it (KJ6MKI, 2026-11-12:
         # radiod@rx888-wsprdaemon, enabled during install after the WD
         # handover moved its conf away, looped 59 times in 10 minutes).
-        if conf_dir and instance not in conf_configured:
+        # (Any configuring source counts -- a conf, an env file or a TOML;
+        # the bool(configured) guard above does not apply here.)
+        if conf_dir and instance not in configured:
             orphaned = True
         units.append(
             UnitRef(

@@ -169,3 +169,14 @@ def test_diag_net_listen_elevates():
     assert "_need_root('admin diag net --listen')" in body
     assert "IGMP queriers: passive listen skipped (re-run with sudo" not in src
     assert "re-run with sudo" not in (REPO / "lib/sigmond/net_diag.py").read_text()
+
+
+def test_confless_radiod_is_orphaned_even_with_no_conf_at_all(tmp_path, monkeypatch):
+    from sigmond import lifecycle
+    conf = tmp_path / "radio"; conf.mkdir()
+    lu = json.dumps([{"unit": "radiod@rx888-wsprdaemon.service"}])
+    monkeypatch.setattr(lifecycle.subprocess, "run",
+                        lambda argv, **k: _ok(argv, lu if "list-units" in argv else ""))
+    units = lifecycle._expand_template("ka9q-radio", "radiod@.service", "templated",
+                                       "service", conf_dir=str(conf))
+    assert [(u.instance, u.orphaned) for u in units] == [("rx888-wsprdaemon", True)]
