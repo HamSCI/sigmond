@@ -441,7 +441,8 @@ def run_install_script(
     return r.returncode == 0
 
 
-def apply_systemd_enables(repo_dir: Path, dry_run: bool = False) -> list[str]:
+def apply_systemd_enables(repo_dir: Path, dry_run: bool = False,
+                          *, start_timers: bool = True) -> list[str]:
     """Ensure every non-template unit in `[systemd] units` is enabled.
 
     A unit can be installed (link/copy step in deploy.toml writes the file
@@ -460,6 +461,13 @@ def apply_systemd_enables(repo_dir: Path, dry_run: bool = False) -> list[str]:
     Idempotent — already-enabled units are skipped.  Static / masked /
     alias / generated / transient units are left alone (no [Install]
     section to act on, or operator-locked).
+
+    A ``.timer`` it enables is also started (``start_timers``): enabling
+    adds the ``timers.target`` want, which only acts at the next boot, so
+    the timer would otherwise sit inactive until a reboot (KJ6MKI,
+    2026-11-12: grape-daily.timer linked, never enabled or started after
+    `smd install hamsci-physics` — no GRAPE dataset, no PSWS upload).  A
+    timer only schedules its service; services are never started here.
     """
     deploy_toml = repo_dir / 'deploy.toml'
     if not deploy_toml.exists():
@@ -525,6 +533,16 @@ def apply_systemd_enables(repo_dir: Path, dry_run: bool = False) -> list[str]:
         )
         if r2.returncode == 0:
             msgs.append(f"  enabled {unit} (was: {state})")
+            if start_timers and unit.endswith('.timer'):
+                r3 = subprocess.run(['systemctl', 'start', unit],
+                                    capture_output=True, text=True,
+                                    check=False)
+                if r3.returncode == 0:
+                    msgs.append(f"  started {unit}")
+                else:
+                    err = ((r3.stderr or r3.stdout).strip().splitlines() or
+                           ['unknown error'])[-1]
+                    msgs.append(f"  warning: could not start {unit}: {err}")
         else:
             err = (r2.stderr or r2.stdout).strip().splitlines()[-1] if (r2.stderr or r2.stdout) else 'unknown error'
             msgs.append(f"  warning: could not enable {unit}: {err}")
@@ -853,4 +871,9 @@ def install_client(
 
     if reload_needed:
         subprocess.run(['systemctl', 'daemon-reload'], capture_output=True)
+    if ok and not dry_run:
+        # `smd apply` reconciles this at boot-readiness; an install that
+        # stops short of apply must leave its declared units wanted too.
+        for msg in apply_systemd_enables(repo_dir):
+            print(msg)
     return ok
