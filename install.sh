@@ -1017,8 +1017,8 @@ ok "ts1 console helper → /usr/local/bin/ts1"
 # mDNS guard + time-sync: ported from wsprdaemon after N8GA (avahi stuck in
 # REGISTERING, radiod's .local names gone, stations silent for days) and
 # N8UR (timesyncd on a dead DHCP server, clock 7 s slow), both 2026-09-06.
-info "Installing mDNS guard and time-sync → /usr/local/sbin/"
-for _h in sigmond-mdns sigmond-time-sync; do
+info "Installing mDNS guard, time-sync and link schedule → /usr/local/sbin/"
+for _h in sigmond-mdns sigmond-time-sync sigmond-link; do
     $SUDO chmod a+x "$REPO_DIR/bin/$_h"
     $SUDO ln -sf "$REPO_DIR/bin/$_h" "/usr/local/sbin/$_h"
     for _u in "$_h.service" "$_h.timer"; do
@@ -1026,9 +1026,15 @@ for _h in sigmond-mdns sigmond-time-sync; do
     done
 done
 $SUDO systemctl daemon-reload
-for _t in sigmond-mdns.timer sigmond-time-sync.timer; do
+for _t in sigmond-mdns.timer sigmond-time-sync.timer sigmond-link.timer; do
     $SUDO systemctl enable --now "$_t" 2>/dev/null && ok "$_t enabled" || warn "could not enable $_t"
 done
+# Link schedule (South Pole satellite passes, tasks/plan-constrained-link-delivery.md):
+# idle unless topology.toml [link_schedule] enabled = true.  The USAP schedule is a
+# PDF, so it needs pdftotext; apply writes or removes the gated units' drop-ins.
+command -v pdftotext >/dev/null 2>&1 || $SUDO apt-get install -y -q poppler-utils >/dev/null 2>&1 \
+    || warn "poppler-utils not installed: sigmond-link cannot read the USAP schedule"
+$SUDO /usr/local/sbin/sigmond-link apply || true
 # Enforce chrony now (extra pools, makestep, waitsync) — non-fatal: the helper
 # says loudly what is wrong and the timer keeps saying it.
 $SUDO /usr/local/sbin/sigmond-time-sync --apply --wait 30 || warn "clock not synchronised yet — see /var/log/sigmond/time-sync.log"

@@ -1,0 +1,12 @@
+[Unit]
+Description=sigmond link schedule — refresh the satellite-pass schedule while the link is up
+Documentation=https://github.com/HamSCI/sigmond/blob/main/tasks/plan-constrained-link-delivery.md
+After=network-online.target
+
+[Service]
+Type=oneshot
+Nice=10
+ExecStart=/usr/local/sbin/sigmond-link fetch
+ExecStartPost=/usr/local/sbin/sigmond-link apply
+SuccessExitStatus=0 1
+SyslogIdentifier=sigmond-link

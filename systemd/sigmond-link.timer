@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh the satellite-pass schedule (fetches only while the link is up and the schedule is old)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

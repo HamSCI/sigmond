@@ -1,0 +1,482 @@
+#!/usr/bin/env python3
+"""sigmond-link — know when a scheduled link (South Pole satellite passes) is down.
+
+The South Pole reaches the outside world only during satellite passes, and
+USAP publishes them in advance.  A station that knows the schedule does not
+have to find each gap by timing out: the uploader holds, the fetch timers
+skip, and the backlog ships when the next pass opens.
+See tasks/plan-constrained-link-delivery.md (Phase 4).
+
+  sigmond-link fetch [--force]
+      the timer's mode (every 15 min).  Refreshes the schedule when it is
+      older than refresh_hours, and ONLY while the link is up by the current
+      schedule (or there is none): a fetch in a gap is exactly the attempt
+      this tool exists to prevent.  Disabled: removes the schedule file, and
+      every consumer stops gating.
+  sigmond-link status [--json]
+      up/down now, the reason, the next change, the next windows
+  sigmond-link gate
+      exit 0 = go ahead, 1 = the link is down by schedule.  Used as
+      ExecCondition= by the units in gated_units, so systemd skips their run
+      cleanly (no failure) during a gap
+  sigmond-link apply
+      write or remove the ExecCondition drop-ins for gated_units
+
+The schedule file, read by hs-uploader's LinkGate and by `gate`:
+  /var/lib/sigmond/link-schedule.json
+  {"version": 1, "fetched_at": ISO, "source": ..., "horizon": [ISO, ISO],
+   "windows": [{"start": ISO, "end": ISO, "sats": [...]}, ...]}   (all UTC)
+
+Trust the schedule's "no", verify its "yes": inside a window everything runs
+and finds out for itself whether the link works.  Fail open: no file, a bad
+file, a stale file (fetched more than max_age_days ago) or `now` outside the
+horizon all read as "go ahead".  A schedule must never become a gag.
+
+topology.toml:
+  [link_schedule]
+  enabled       = false        # true at a site with a scheduled link
+  source        = "usap"       # the USAP weekly PDF (TDRS + DSCS + Skynet),
+                               # cross-checked against cel.txt; or the URL of
+                               # a windows.json in the format above
+  satellites    = "all"        # or a list, e.g. ["TDRS-6"]
+  margin_min    = 0            # trimmed off both ends of every pass
+  refresh_hours = 6
+  max_age_days  = 8
+  gated_units   = [...]        # default DEFAULT_GATED below
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import urllib.request
+from pathlib import Path
+
+TOPOLOGY = Path("/etc/sigmond/topology.toml")
+SCHEDULE = Path("/var/lib/sigmond/link-schedule.json")
+DROPIN_NAME = "50-sigmond-link.conf"
+SYSTEMD_DIR = Path("/etc/systemd/system")
+SELF = "/usr/local/sbin/sigmond-link"
+
+USAP_INDEX = "https://www.usap.gov/technology/1935/"
+USAP_BASE = "https://www.usap.gov"
+USAP_CEL = "https://www.usap.gov/technology/documents/cel.txt"
+UA = "sigmond-link/1 (HamSCI station; South Pole schedule)"
+UTC = dt.timezone.utc
+
+# Units whose whole job is to reach the internet, so a run in a gap can only
+# time out.  The uploader is not here: hs-uploader reads the schedule itself
+# and holds per pipeline.
+DEFAULT_GATED = [
+    "sigmond-component-fetch.service",      # git fetch of every component
+    "apt-daily.service",                    # package lists
+    "apt-daily-upgrade.service",            # unattended upgrades
+    "hamsci-physics-ionex-download.service",
+    "timestd-events.service",               # ships event windows
+]
+
+
+def _log(msg: str) -> None:
+    print(f"sigmond-link: {msg}", flush=True)
+    if msg.startswith(("ERROR", "WARNING")):
+        print(f"sigmond-link: {msg}", file=sys.stderr, flush=True)
+
+
+def now() -> dt.datetime:
+    return dt.datetime.now(UTC).replace(microsecond=0)
+
+
+def fmt(t: dt.datetime | None) -> str:
+    if t is None:
+        return "-"
+    return f"{t:%Y-%m-%d %H:%M}Z ({t.astimezone():%H:%M %Z})"
+
+
+def read_settings(path: Path = TOPOLOGY) -> dict:
+    cfg = {"enabled": False, "source": "usap", "satellites": "all", "margin_min": 0.0,
+           "refresh_hours": 6.0, "max_age_days": 8.0, "gated_units": list(DEFAULT_GATED)}
+    try:
+        import tomllib
+        with path.open("rb") as fh:
+            ls = tomllib.load(fh).get("link_schedule", {}) or {}
+    except Exception:
+        return cfg
+    for k in ("enabled",):
+        if k in ls:
+            cfg[k] = bool(ls[k])
+    for k in ("source", "satellites"):
+        if k in ls:
+            cfg[k] = ls[k]
+    for k in ("margin_min", "refresh_hours", "max_age_days"):
+        if k in ls:
+            cfg[k] = float(ls[k])
+    if "gated_units" in ls:
+        cfg["gated_units"] = [str(u) for u in ls["gated_units"]]
+    return cfg
+
+
+# ─── the USAP schedule ────────────────────────────────────────────────────────
+
+MONTHS = {m: i for i, m in enumerate("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split(), 1)}
+TOK = re.compile(
+    r"(?P<nopass>No Pass)"
+    r"|(?:(?P<mon>[A-Z][a-z]{2}) (?P<day>\d{1,2}), +)?(?P<h>\d{1,2}):(?P<m>\d{2}) (?P<ap>[AP]M)"
+    r"|(?P<dur>\b\d{1,2}:\d{2}\b)")
+ROW = re.compile(r"^\s*(\d{2})/(\d{2})/(\d{2})\s+(.*)$")
+HDR = re.compile(r"(\S+) Pass (\d)")
+
+
+def _tok_time(day: dt.date, t: re.Match) -> dt.datetime:
+    d = day
+    if t.group("mon"):
+        mon = MONTHS[t.group("mon")]
+        d = dt.date(day.year + (1 if mon < day.month else 0), mon, int(t.group("day")))
+    h = int(t.group("h")) % 12 + (12 if t.group("ap") == "PM" else 0)
+    return dt.datetime(d.year, d.month, d.day, h, int(t.group("m")), tzinfo=UTC)
+
+
+def parse_spsat(text: str) -> tuple[dict, list]:
+    """The UTC table of the weekly PDF, as `pdftotext -layout` renders it.
+
+    -> ({"YYYY-MM-DD": [[sat, start, end], ...]}, [problems]).  The PDF has
+    one table per timezone; only the one headed "(UTC)" is read.
+    """
+    m = re.search(r"Satellite Schedule \(UTC\)(.*?)(Satellite Schedule \(|\Z)", text, re.S)
+    if not m:
+        raise ValueError("no UTC table in the schedule PDF")
+    slots, rows, problems = None, {}, []
+    for line in m.group(1).splitlines():
+        if slots is None and "Pass 1" in line:
+            slots = [s for s, _ in HDR.findall(line)]
+            continue
+        r = ROW.match(line)
+        if not r or slots is None:
+            continue
+        mm, dd, yy, rest = r.groups()
+        day = dt.date(2000 + int(yy), int(mm), int(dd))
+        toks = list(TOK.finditer(rest))
+        i, passes, ok = 0, [], True
+        for sat in slots:
+            if i >= len(toks):
+                ok = False
+                break
+            t = toks[i]
+            if t.group("nopass"):
+                i += 1
+            elif t.group("h") and i + 1 < len(toks) and toks[i + 1].group("h"):
+                s, e = _tok_time(day, toks[i]), _tok_time(day, toks[i + 1])
+                if e <= s:
+                    e += dt.timedelta(days=1)
+                passes.append([sat, s.isoformat(), e.isoformat()])
+                i += 2
+                if i < len(toks) and toks[i].group("dur"):
+                    i += 1          # the pass's own duration
+            else:
+                ok = False
+                break
+            if i < len(toks) and toks[i].group("dur"):
+                i += 1              # a "Total" column
+        if not ok or i != len(toks):
+            problems.append(f"{day}: unparsed row: {rest.strip()}")
+            continue
+        rows[day.isoformat()] = passes
+    if not rows:
+        raise ValueError("the UTC table had no parseable rows")
+    return rows, problems
+
+
+def parse_cel(text: str) -> list:
+    """cel.txt: 'MS Y TDS 26/315/144000 191000 043000 ...' — YY/DDD/HHMMSS, UTC."""
+    out = []
+    for m in re.finditer(r"TDS (\d{2})/(\d{3})/(\d{6}) (\d{6}) (\d{6})", text):
+        yy, doy, st, en, _ = m.groups()
+        base = dt.datetime(2000 + int(yy), 1, 1, tzinfo=UTC) + dt.timedelta(days=int(doy) - 1)
+        s = base + dt.timedelta(hours=int(st[:2]), minutes=int(st[2:4]), seconds=int(st[4:]))
+        e = base + dt.timedelta(hours=int(en[:2]), minutes=int(en[2:4]), seconds=int(en[4:]))
+        if e <= s:
+            e += dt.timedelta(days=1)
+        out.append((s.isoformat(), e.isoformat()))
+    return out
+
+
+def cross_check(rows: dict, cel: list) -> tuple[int, int]:
+    """(agree, differ) between the PDF's TDRS passes and cel.txt, over the
+    days both cover.  Both are UTC; zero agreement means a parser or
+    timezone error, which would invert every gap."""
+    pdf = {(s, e) for p in rows.values() for sat, s, e in p if sat.upper().startswith("TDRS")}
+    cel = set(cel)
+    if not pdf or not cel:
+        return 0, 0
+    lo = max(min(pdf)[0], min(cel)[0])
+    hi = min(max(pdf)[0], max(cel)[0])
+    a = {p for p in pdf if lo <= p[0] <= hi}
+    b = {p for p in cel if lo <= p[0] <= hi}
+    return len(a & b), len(a ^ b)
+
+
+def build(rows: dict, satellites, margin_min: float) -> dict:
+    """Rows -> the schedule document's horizon and merged windows."""
+    pick = None
+    if isinstance(satellites, str) and satellites.lower() != "all":
+        satellites = [s.strip() for s in satellites.split(",")]
+    if isinstance(satellites, list):
+        pick = {s.lower() for s in satellites}
+    margin = dt.timedelta(minutes=margin_min)
+    raw = []
+    for passes in rows.values():
+        for sat, s, e in passes:
+            if pick and sat.lower() not in pick:
+                continue
+            s, e = dt.datetime.fromisoformat(s) + margin, dt.datetime.fromisoformat(e) - margin
+            if e > s:
+                raw.append((s, e, sat))
+    raw.sort()
+    merged: list = []
+    for s, e, sat in raw:
+        if merged and s <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], e)
+            if sat not in merged[-1][2]:
+                merged[-1][2].append(sat)
+        else:
+            merged.append([s, e, [sat]])
+    days = sorted(rows)
+    h0 = dt.datetime.fromisoformat(days[0]).replace(tzinfo=UTC)
+    h1 = dt.datetime.fromisoformat(days[-1]).replace(tzinfo=UTC) + dt.timedelta(days=1)
+    return {"horizon": [h0.isoformat(), h1.isoformat()],
+            "windows": [{"start": s.isoformat(), "end": e.isoformat(), "sats": x}
+                        for s, e, x in merged]}
+
+
+def http_get(url: str, binary: bool = False):
+    req = urllib.request.Request(url.replace(" ", "%20"), headers={"User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        data = r.read()
+    return data if binary else data.decode("utf-8", "replace")
+
+
+def fetch_usap(old_rows: dict) -> tuple[dict, list]:
+    if not shutil.which("pdftotext"):
+        raise RuntimeError("pdftotext not installed (apt install poppler-utils)")
+    index = http_get(USAP_INDEX)
+    links = sorted(set(re.findall(r'href="(/technology/documents/SPSAT[^"?]*\.pdf)', index)))
+    if not links:
+        raise RuntimeError("no SPSAT pdf linked from " + USAP_INDEX)
+    rows, notes = dict(old_rows), []
+    for link in links[-2:]:
+        pdf = http_get(USAP_BASE + link, binary=True)
+        txt = subprocess.run(["pdftotext", "-layout", "-", "-"], input=pdf,
+                             capture_output=True, check=True).stdout.decode()
+        new, problems = parse_spsat(txt)
+        rows.update(new)        # the newer issue wins for the days it covers
+        notes.append(f"{os.path.basename(link)}: {len(new)} days")
+        notes += problems
+    try:
+        agree, differ = cross_check(rows, parse_cel(http_get(USAP_CEL)))
+        if agree == 0:
+            raise RuntimeError("no TDRS pass agrees between the PDF and cel.txt: "
+                               "refusing a schedule that may be in the wrong timezone")
+        notes.append(f"cel.txt cross-check: {agree} TDRS passes agree, {differ} differ")
+    except RuntimeError:
+        raise
+    except Exception as e:
+        notes.append(f"cel.txt cross-check skipped: {e}")
+    cutoff = (now() - dt.timedelta(days=21)).date().isoformat()
+    return {d: p for d, p in rows.items() if d >= cutoff}, notes
+
+
+# ─── reading the schedule (the same rules as hs-uploader's LinkGate) ─────────
+
+def load(path: Path | None = None) -> dict | None:
+    path = path or SCHEDULE
+    try:
+        doc = json.loads(path.read_text())
+        return doc if isinstance(doc, dict) else None
+    except (OSError, ValueError):
+        return None             # missing or corrupt: no schedule; the next fetch replaces it
+
+
+def evaluate(doc: dict | None, t: dt.datetime, max_age_days: float = 8.0) -> dict:
+    """-> {"up": bool, "scheduled": bool, "reason": str, "until": ISO|None}"""
+    def r(up, sch, why, until=None):
+        return {"up": up, "scheduled": sch, "reason": why,
+                "until": until.isoformat() if until else None}
+    if doc is None:
+        return r(True, False, "no schedule")
+    try:
+        fetched = dt.datetime.fromisoformat(doc["fetched_at"])
+        if fetched.tzinfo is None:
+            raise ValueError("naive fetched_at")
+        if (t - fetched).total_seconds() > max_age_days * 86400:
+            return r(True, False, f"schedule stale (fetched {fmt(fetched)})")
+        h0, h1 = (dt.datetime.fromisoformat(x) for x in doc["horizon"])
+        if not (h0 <= t < h1):
+            return r(True, False, "no schedule covers now")
+        for w in sorted(doc["windows"], key=lambda w: w["start"]):
+            s, e = dt.datetime.fromisoformat(w["start"]), dt.datetime.fromisoformat(w["end"])
+            if s <= t < e:
+                return r(True, True, "pass " + "+".join(w.get("sats", [])), e)
+            if s > t:
+                return r(False, True, "between passes", s)
+        return r(False, True, "after the last pass", h1)
+    except Exception as e:
+        return r(True, False, f"schedule unreadable ({type(e).__name__}: {e})")
+
+
+# ─── commands ─────────────────────────────────────────────────────────────────
+
+def save(doc: dict, path: Path | None = None) -> None:
+    path = path or SCHEDULE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(doc, indent=1))
+    os.replace(tmp, path)
+
+
+def cmd_fetch(cfg: dict, force: bool) -> int:
+    if not cfg["enabled"]:
+        if SCHEDULE.exists():
+            SCHEDULE.unlink()
+            _log("disabled: removed the schedule; nothing gates any more")
+        return 0
+    old = load()
+    t = now()
+    if old and not force:
+        try:
+            age = (t - dt.datetime.fromisoformat(old["fetched_at"])).total_seconds()
+        except Exception:
+            age = 1e12
+        if age < cfg["refresh_hours"] * 3600:
+            return 0
+        st = evaluate(old, t, cfg["max_age_days"])
+        if not st["up"]:
+            return 0            # a gap: do not try; the next pass refreshes it
+    try:
+        if cfg["source"] == "usap":
+            rows, notes = fetch_usap((old or {}).get("rows", {}))
+            doc = {"version": 1, "source": "usap", "rows": rows,
+                   **build(rows, cfg["satellites"], cfg["margin_min"])}
+        else:
+            got = json.loads(http_get(cfg["source"]))
+            notes = [f"{cfg['source']}: {len(got['windows'])} windows"]
+            doc = {"version": 1, "source": cfg["source"],
+                   "horizon": got["horizon"], "windows": got["windows"]}
+        doc["fetched_at"] = t.isoformat()
+        doc["notes"] = notes
+        evaluate(doc, t)        # never write a file the readers cannot read
+        save(doc)
+        _log(f"schedule refreshed: {len(doc['windows'])} windows, "
+             f"{doc['horizon'][0][:10]} .. {doc['horizon'][1][:10]}; " + "; ".join(notes[:4]))
+        return 0
+    except Exception as e:
+        _log(f"WARNING: schedule fetch failed, keeping the old one: {type(e).__name__}: {e}")
+        return 1
+
+
+def cmd_status(cfg: dict, as_json: bool) -> int:
+    doc = load() if cfg["enabled"] else None
+    t = now()
+    st = evaluate(doc, t, cfg["max_age_days"])
+    nxt = []
+    if doc and st["scheduled"]:
+        for w in doc["windows"]:
+            if dt.datetime.fromisoformat(w["end"]) > t:
+                nxt.append(w)
+            if len(nxt) >= 4:
+                break
+    if as_json:
+        print(json.dumps({"enabled": cfg["enabled"], "now": t.isoformat(), **st,
+                          "fetched_at": (doc or {}).get("fetched_at"),
+                          "next_windows": nxt}, indent=1))
+        return 0
+    print(f"link schedule  {'enabled' if cfg['enabled'] else 'disabled'} (source {cfg['source']})")
+    print(f"now            {fmt(t)}")
+    print(f"link           {'UP' if st['up'] else 'DOWN'}  ({st['reason']})")
+    if st["until"]:
+        u = dt.datetime.fromisoformat(st["until"])
+        mins = int((u - t).total_seconds() // 60)
+        print(f"changes        {fmt(u)}  in {mins // 60}h{mins % 60:02d}m")
+    if doc:
+        print(f"fetched        {fmt(dt.datetime.fromisoformat(doc['fetched_at']))}")
+        for n in doc.get("notes", [])[:6]:
+            print(f"               {n}")
+    for w in nxt:
+        s, e = dt.datetime.fromisoformat(w["start"]), dt.datetime.fromisoformat(w["end"])
+        print(f"  pass  {fmt(s)} -> {fmt(e)}  {'+'.join(w.get('sats', []))}")
+    return 0
+
+
+def cmd_gate(cfg: dict) -> int:
+    if not cfg["enabled"]:
+        return 0
+    st = evaluate(load(), now(), cfg["max_age_days"])
+    if not st["up"]:
+        _log(f"link down by schedule ({st['reason']}) until {st['until']}: skipping")
+        return 1
+    return 0
+
+
+def dropin_text() -> str:
+    return ("# Written by sigmond-link apply: skip this run while the link is down by\n"
+            "# schedule (South Pole satellite gap).  Exit 1 skips cleanly; it is not a failure.\n"
+            f"[Service]\nExecCondition={SELF} gate\n")
+
+
+def cmd_apply(cfg: dict, root: Path = SYSTEMD_DIR) -> int:
+    wanted = set(cfg["gated_units"]) if cfg["enabled"] else set()
+    changed = False
+    for d in root.glob(f"*.d/{DROPIN_NAME}"):
+        unit = d.parent.name[:-2]
+        if unit not in wanted:
+            d.unlink()
+            changed = True
+            _log(f"removed the gate from {unit}")
+    for unit in sorted(wanted):
+        p = root / f"{unit}.d" / DROPIN_NAME
+        if p.exists() and p.read_text() == dropin_text():
+            continue
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(dropin_text())
+        changed = True
+        _log(f"gated {unit}")
+    if changed and root == SYSTEMD_DIR:
+        subprocess.run(["systemctl", "daemon-reload"], check=False)
+    return 0
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog="sigmond-link", description=__doc__.split("\n")[0])
+    sub = ap.add_subparsers(dest="cmd")
+    f = sub.add_parser("fetch")
+    f.add_argument("--force", action="store_true")
+    s = sub.add_parser("status")
+    s.add_argument("--json", action="store_true")
+    sub.add_parser("gate")
+    sub.add_parser("apply")
+    a = ap.parse_args(argv)
+    try:
+        cfg = read_settings()
+    except Exception as e:
+        _log(f"WARNING: cannot read {TOPOLOGY} ({e}); treating the link schedule as disabled")
+        cfg = {"enabled": False}
+        if a.cmd != "gate":
+            return 1
+    if a.cmd == "fetch":
+        return cmd_fetch(cfg, a.force)
+    if a.cmd == "gate":
+        try:
+            return cmd_gate(cfg)
+        except Exception as e:  # a crash must read "go ahead", never "skip"
+            _log(f"WARNING: gate fault, letting the unit run: {type(e).__name__}: {e}")
+            return 0
+    if a.cmd == "apply":
+        return cmd_apply(cfg)
+    return cmd_status(cfg, getattr(a, "json", False))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
