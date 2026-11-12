@@ -65,6 +65,9 @@ SIGMOND_FILE = "sigmond.toml"
 PIPELINES_D_GROUP = "sigmond"
 # The feature word that says the daemon gates every send (spec §9.3).
 GATE_FEATURE = "gate"
+#: hs-uploader reads the wsprdaemon transport's ``sender`` key (the older
+#: ``receiver`` key still reads).
+SENDER_FEATURE = "sender-key"
 KEYS_DIR = Path("/etc/hs-uploader/keys")
 SINK_PATH = "/var/lib/sigmond/sink.db"
 # The interpreter hs-uploader.service runs (its unit's ExecStart venv).
@@ -782,7 +785,31 @@ def collect_pipelines(topology: Optional[Topology] = None,
             pipelines.append(rendered)
     if check_features:
         warn_hidden_pipelines(topology, is_running)
-    return apply_merge(apply_proxying(pipelines, coord), target)
+    return apply_sender_key(apply_merge(apply_proxying(pipelines, coord), target),
+                            features)
+
+
+def apply_sender_key(pipelines: list, features: Optional[frozenset]) -> list:
+    """Name the wsprdaemon transport's ``receiver`` key ``sender``.
+
+    The key names the machine that ships the tars (tar names, and the
+    fallback for a row with no source tags), not an HF receiver: each row is
+    filed under the reporter id and radiod of the source it came from.  KFS-
+    MAIN (2026-11-12) ships for four sources under one name.  Clients'
+    deploy.toml templates still say ``receiver``; the rendered manifest says
+    ``sender`` only when the installed hs-uploader offers ``sender-key``,
+    since an older one would ignore the key and lose the name.  Pure: the
+    caller's dicts are not changed."""
+    if not features or SENDER_FEATURE not in features:
+        return pipelines
+    out = []
+    for p in pipelines:
+        t = p.get("transport")
+        if isinstance(t, dict) and "receiver" in t and "sender" not in t:
+            t = {("sender" if k == "receiver" else k): v for k, v in t.items()}
+            p = dict(p, transport=t)
+        out.append(p)
+    return out
 
 
 def heartbeat_pipeline(coord: Coordination) -> Optional[dict]:
