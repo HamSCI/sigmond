@@ -894,6 +894,7 @@ def cmd_config_render(args) -> int:
         wsprnet_call=profile.effective_wsprnet_call,
         pskreporter_call=profile.effective_pskreporter_call,
         wsprnet_proxy=profile.wsprnet_proxy,
+        uploader_call=profile.uploader_call,
     )
 
     # [heartbeat] (sigmond#task-8) — copied through field-for-field ONLY
@@ -1112,6 +1113,65 @@ def cmd_config_psws(args) -> int:
         init=False, if_present=False, dry_run=False))
 
 
+def cmd_config_reporters(args) -> int:
+    """`smd config reporters --uploader-call NAME --wsprnet-proxy on|off`.
+
+    Sets the machine's upload name ([reporters] uploader_call: the operator's
+    choice, e.g. KFS-MAIN for a host decoding four radiods) and whether the
+    WsprDaemon servers post its WSPR spots to wsprnet.org (wsprnet_proxy),
+    in site-profile.toml, then renders.  `--uploader-call ""` clears the name
+    so it is derived again."""
+    import tomllib
+    from ..site_profile import set_reporters_keys
+    keys = {}
+    if getattr(args, 'uploader_call', None) is not None:
+        name = args.uploader_call.strip().upper()
+        if name and not re.fullmatch(r'[A-Z0-9][A-Z0-9/=_-]{0,31}', name):
+            err(f'config reporters: {name!r} is not a usable upload name '
+                f'(letters, digits, / = _ -); nothing written')
+            return 1
+        keys['uploader_call'] = name or None
+    if getattr(args, 'wsprnet_proxy', None) is not None:
+        # Off writes nothing, never `false`: absent is what the chain reads
+        # as unset (see CLAUDE.md, Proxied uploads).
+        keys['wsprnet_proxy'] = True if args.wsprnet_proxy == 'on' else None
+    if not keys:
+        err('config reporters: name --uploader-call and/or --wsprnet-proxy')
+        return 1
+    if not SITE_PROFILE_PATH.exists():
+        err(f'config reporters: no {SITE_PROFILE_PATH}; create one first '
+            f'(smd config identity, or bring-up)')
+        return 1
+    old_text = SITE_PROFILE_PATH.read_text()
+    text = set_reporters_keys(old_text, **keys)
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        err(f'config reporters: {exc}; {SITE_PROFILE_PATH} unchanged')
+        return 1
+    if getattr(args, 'dry_run', False):
+        heading('config reporters (dry-run)')
+        print(text, end='')
+        return 0
+    if text == old_text:
+        ok(f'{SITE_PROFILE_PATH}: already set')
+    else:
+        try:
+            _write_site_profile(text)
+        except PermissionError:
+            err(f'permission denied writing {SITE_PROFILE_PATH}; re-run smd as root')
+            return 1
+        prof = load_site_profile(SITE_PROFILE_PATH)
+        ok(f'updated {SITE_PROFILE_PATH}: uploader_call='
+           f'{prof.uploader_call or "(derived)"} wsprnet_proxy={prof.wsprnet_proxy}')
+    if getattr(args, 'no_render', False):
+        info('not rendered (--no-render); run: smd config render')
+        return 0
+    import types
+    return cmd_config_render(types.SimpleNamespace(
+        init=False, if_present=False, dry_run=False))
+
+
 def plan_psws_updates(profile, recorder: str, state) -> list:
     """(section, key, value) writes that bring one PSWS recorder's own
     config file in line with the site profile.
@@ -1203,6 +1263,8 @@ def _patch_station_block(path: Path, station: Station) -> None:
         body.append(f'wsprnet_call = "{station.wsprnet_call}"')
     if station.pskreporter_call:
         body.append(f'pskreporter_call = "{station.pskreporter_call}"')
+    if station.uploader_call:
+        body.append(f'uploader_call = "{station.uploader_call}"')
     if station.wsprnet_proxy:
         # ⛔ Written ONLY when true.  An explicit `false` in every station's
         # coordination.toml would read as a decision each operator made,

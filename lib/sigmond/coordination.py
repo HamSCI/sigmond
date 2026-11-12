@@ -56,6 +56,10 @@ class Station:
     # this operator's call, so it is the operator's decision, never a
     # default inherited from a site profile.
     wsprnet_proxy: bool = False
+    # The name this machine uploads under (hs-uploader [identity] call).
+    # Operator's choice; blank derives it (uploader_manifest.reporter_call).
+    # A host decoding for several radiods names itself, e.g. KFS-MAIN.
+    uploader_call: str = ""
 
 
 @dataclass
@@ -269,6 +273,7 @@ def parse_coordination(raw: dict, source_path: Optional[Path] = None) -> Coordin
         wsprnet_call=str(station_raw.get('wsprnet_call', '') or ''),
         wsprnet_proxy=bool(station_raw.get('wsprnet_proxy', False)),
         pskreporter_call=str(station_raw.get('pskreporter_call', '') or ''),
+        uploader_call=str(station_raw.get('uploader_call', '') or ''),
     )
 
     radiods: dict = {}
@@ -500,9 +505,14 @@ def write_station_identity(reporter_id: str = '',
     for key, val in (('psws_id', cur.psws_id),
                      ('instrument_id', cur.instrument_id),
                      ('wsprnet_call', cur.wsprnet_call),
-                     ('pskreporter_call', cur.pskreporter_call)):
+                     ('pskreporter_call', cur.pskreporter_call),
+                     ('uploader_call', cur.uploader_call)):
         if val:
             fields.append(f'{key} = "{val}"')
+    # Operator decisions survive this merge: dropping wsprnet_proxy here
+    # silently put a proxied station back on direct wsprnet posting.
+    if cur.wsprnet_proxy:
+        fields.append('wsprnet_proxy = true')
     if not fields:
         return False
     block = '[station]\n' + '\n'.join(fields) + '\n'

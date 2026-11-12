@@ -120,7 +120,7 @@ try:
     from sigmond.commands.timing      import cmd_timing
     from sigmond.commands.timing_show import cmd_timing_show
     from sigmond.commands.ka9q_watch  import cmd_ka9q_watch
-    from sigmond.commands.config      import cmd_config_show, cmd_config_migrate, cmd_config_identity, cmd_config_refresh, cmd_config_render, cmd_config_psws, cmd_config_upload, cmd_config_location, cmd_config_uploads, cmd_config_profile_install
+    from sigmond.commands.config      import cmd_config_show, cmd_config_migrate, cmd_config_identity, cmd_config_refresh, cmd_config_render, cmd_config_psws, cmd_config_reporters, cmd_config_upload, cmd_config_location, cmd_config_uploads, cmd_config_profile_install
     from sigmond.commands.client_config import cmd_config_init, cmd_config_edit_client
     from sigmond.commands.environment import (
         cmd_environment_list,
@@ -31413,6 +31413,20 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument('--dry-run', action='store_true',
                    help='print the profile that would be written')
 
+    p = config_sub.add_parser('reporters',
+                              help="set this machine's upload name and the wsprnet "
+                                   'proxy in site-profile.toml [reporters], then render')
+    p.add_argument('--uploader-call', metavar='NAME', dest='uploader_call',
+                   help='the name this machine uploads under (e.g. KFS-MAIN); '
+                        'empty string clears it so it is derived again')
+    p.add_argument('--wsprnet-proxy', choices=['on', 'off'], dest='wsprnet_proxy',
+                   help='on: the WsprDaemon servers post this station\'s WSPR '
+                        'spots to wsprnet.org; off: the station posts them')
+    p.add_argument('--no-render', action='store_true', dest='no_render',
+                   help='write site-profile.toml only; skip `smd config render`')
+    p.add_argument('--dry-run', action='store_true',
+                   help='print the profile that would be written')
+
     p = config_sub.add_parser('profile-install',
                               help='install a new site-profile.toml (the wizard writes '
                                    'it beside the old one), keeping a site sink switch '
@@ -31429,10 +31443,13 @@ def _build_parser() -> argparse.ArgumentParser:
     g = p.add_mutually_exclusive_group()
     g.add_argument('--on', action='store_true', help='enable upload for the instance')
     g.add_argument('--off', action='store_true', help='disable upload for the instance')
-    p.add_argument('--via', choices=['direct', 'server-merge', 'server-raw'],
-                   help='psk-recorder delivery pipeline when enabling '
-                        '(default: direct = POST straight to pskreporter.info; '
-                        'server-merge feeds a wsprdaemon server in a merge fleet)')
+    p.add_argument('--via',
+                   choices=['direct', 'server-merge', 'server-raw', 'deposit', 'off'],
+                   help='delivery when enabling.  psk-recorder: direct (default; '
+                        'POST straight to pskreporter.info), server-merge (feed a '
+                        'wsprdaemon server in a merge fleet) or server-raw.  '
+                        'meteor-scatter: deposit (wsprdaemon server forwards), '
+                        'direct or off; left as is when omitted')
 
     p = config_sub.add_parser(
         'catalog-prune',
@@ -32340,6 +32357,10 @@ def main() -> int:
             if not getattr(args, 'dry_run', False) and _need_root('config psws'):
                 return 1
             return cmd_config_psws(args)
+        if sub_cmd == 'reporters':
+            if not getattr(args, 'dry_run', False) and _need_root('config reporters'):
+                return 1
+            return cmd_config_reporters(args)
         if sub_cmd == 'render':
             # --dry-run / --init(scaffold) read-only-ish; writing path needs root.
             writing = not getattr(args, 'dry_run', False)

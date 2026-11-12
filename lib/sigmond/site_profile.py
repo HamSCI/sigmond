@@ -67,6 +67,12 @@ pskreporter_call = ""
 # ⚠ This puts THIS station's callsign on uploads sent from a WD server's
 # address, so it is the operator's decision, never a site-profile default.
 wsprnet_proxy    = false
+# The name this machine uploads under to wsprdaemon.org (hs-uploader's
+# [identity] call: tar names, heartbeat).  Each report still carries the
+# reporter id of the radiod and antenna it came from.  Blank = derived: the
+# reporter id on a one-receiver host.  A host that decodes for several
+# radiods names itself here, e.g. "KFS-MAIN"; the operator chooses.
+uploader_call    = ""
 
 [host]
 hostname = ""                      # radiod instance/mDNS names derive from this
@@ -136,6 +142,7 @@ class SiteProfile:
     wsprnet_call: str = ""
     pskreporter_call: str = ""
     wsprnet_proxy: bool = False
+    uploader_call: str = ""
     hostname: str = ""
     sdr: str = ""
     sdr_serial: str = ""
@@ -312,6 +319,7 @@ def load_site_profile(path: Optional[Path] = None) -> Optional[SiteProfile]:
         wsprnet_call=_clean(rep.get("wsprnet_call")).upper(),
         wsprnet_proxy=bool(rep.get("wsprnet_proxy", False)),
         pskreporter_call=_clean(rep.get("pskreporter_call")).upper(),
+        uploader_call=_clean(rep.get("uploader_call")).upper(),
         hostname=_clean(host.get("hostname")),
         sdr=_clean(hw.get("sdr")),
         sdr_serial=_clean(hw.get("sdr_serial")),
@@ -656,6 +664,43 @@ def set_psws_identity(text, *, station_id: str = "", instruments=None,
     rest, _ = _split_block(text, "psws")
     return (rest.rstrip("\n") + "\n\n"
             + _psws_block(sid, legacy, ins, sts))
+
+
+def set_reporters_keys(text: str, **keys) -> str:
+    """``text`` with the named [reporters] keys set; every other line stays.
+
+    ``keys`` maps a key to a str (written quoted), a bool (written as
+    true/false) or None (the key's line removed).  A missing [reporters]
+    table is appended.  Only top-level scalar keys of the table are touched.
+    `smd config reporters` uses it so an operator sets the machine's upload
+    name and the wsprnet proxy without editing the file by hand."""
+    def _fmt(v):
+        return "true" if v is True else "false" if v is False else _q(str(v))
+    lines = text.splitlines(keepends=True)
+    head = next((i for i, ln in enumerate(lines)
+                 if re.match(r"\s*\[\s*reporters\s*\]", ln)), None)
+    if head is None:
+        out = text.rstrip("\n") + "\n\n[reporters]\n"
+        for k, v in keys.items():
+            if v is not None:
+                out += f"{k} = {_fmt(v)}\n"
+        return out
+    end = head + 1
+    while end < len(lines) and not lines[end].lstrip().startswith("["):
+        end += 1
+    body = lines[head + 1:end]
+    for k, v in keys.items():
+        pat = re.compile(r"\s*" + re.escape(k) + r"\s*=")
+        idx = next((i for i, ln in enumerate(body) if pat.match(ln)), None)
+        if v is None:
+            if idx is not None:
+                del body[idx]
+        elif idx is not None:
+            body[idx] = f"{k} = {_fmt(v)}\n"
+        else:
+            last = max((i for i, ln in enumerate(body) if ln.strip()), default=-1)
+            body.insert(last + 1, f"{k} = {_fmt(v)}\n")
+    return "".join(lines[:head + 1] + body + lines[end:])
 
 
 #: [station] keys that carry the location; set_station_location replaces them.

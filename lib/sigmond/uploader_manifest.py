@@ -121,7 +121,16 @@ def reporter_call(coord: Coordination,
 
     The wspr-recorder instance's reporter id is canonical (one per
     radiod+antenna); a single-rx host has exactly one.  Falls back to the
-    coordination ``[host].call`` when no wspr instance exists."""
+    coordination ``[host].call`` when no wspr instance exists.
+
+    An operator's ``[station] uploader_call`` wins over both: the name a
+    machine uploads under is the operator's decision.  A host decoding for
+    several radiods otherwise took the first reporter id in sort order
+    (KFS-MAIN, 2026-11-12, would have uploaded as KFS/NW for four
+    receivers)."""
+    chosen = (getattr(coord.station, "uploader_call", "") or "").strip()
+    if chosen:
+        return chosen
     if instances is None:
         try:
             instances = list_instances()

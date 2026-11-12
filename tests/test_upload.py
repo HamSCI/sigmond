@@ -111,6 +111,27 @@ class TestUploadEnable(unittest.TestCase):
             upload.apply_enable("wspr-recorder", "AC0G/S", True,
                                 base=str(self.base), delivery="direct")
 
+    def test_meteor_via_deposit_sends_only_to_the_wsprdaemon_server(self):
+        """KFS-MAIN 2026-11-12: decodes go only to wsprdaemon.org, so meteor
+        rows must ride the tar flagged for the server's forwarder."""
+        upload.apply_enable("meteor-scatter", "KFS/NW", True,
+                            base=str(self.base), delivery="deposit")
+        body = self._env("meteor-scatter", "KFS-NW").read_text()
+        self.assertIn("METEOR_SCATTER_USE_HS_UPLOADER=1", body)
+        self.assertIn("METEOR_SCATTER_DELIVERY_MODE=deposit", body)
+
+    def test_meteor_on_alone_leaves_the_mode_as_it_stands(self):
+        upload.apply_enable("meteor-scatter", "KFS/NW", True,
+                            base=str(self.base), delivery="deposit")
+        upload.apply_enable("meteor-scatter", "KFS/NW", True, base=str(self.base))
+        body = self._env("meteor-scatter", "KFS-NW").read_text()
+        self.assertIn("METEOR_SCATTER_DELIVERY_MODE=deposit", body)
+
+    def test_meteor_refuses_a_psk_pipeline_name(self):
+        with self.assertRaises(ValueError):
+            upload.apply_enable("meteor-scatter", "KFS/NW", True,
+                                base=str(self.base), delivery="server-merge")
+
     def test_disable_leaves_pipeline_untouched(self):
         upload.apply_enable("psk-recorder", "AC0G/S", True, base=str(self.base))
         upload.apply_enable("psk-recorder", "AC0G/S", False, base=str(self.base))

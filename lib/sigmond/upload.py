@@ -35,12 +35,21 @@ UPLOAD_ENABLE: dict[str, Tuple[str, List[str]]] = {
 # wsprdaemon-server SFTP) the boolean alone delivers nothing.  ``direct`` is
 # the standalone-correct lever: the client POSTs straight to pskreporter.info.
 # Enabling sets the default; merge-fleet nodes override (`--via server-merge`).
-# meteor-scatter is direct-only by design (the knob was removed), and
-# wspr-recorder's wsprnet path needs no pipeline selection — so neither
-# appears here.  client -> (env var, default pipeline, valid choices).
-DELIVERY_ON_ENABLE: dict[str, Tuple[str, str, List[str]]] = {
+# meteor-scatter has METEOR_SCATTER_DELIVERY_MODE (core/recorder.py):
+# ``deposit`` rides the wsprdaemon tar and the server owns the PSKReporter
+# hop (forward_to_pskreporter=True), ``direct`` posts from this host, ``off``
+# leaves the rows to this host's hs-uploader psk-pskreporter pipeline.  Its
+# default is None: `--on` alone leaves the mode as it stands (sigmond seeds
+# ``off``), and only an explicit `--via` sets it.  KFS-MAIN (2026-11-12)
+# needed ``deposit`` to send meteor decodes only to wsprdaemon.org, as its
+# radiod VMs did, and had no verb for it.  wspr-recorder's wsprnet path needs
+# no pipeline selection, so it does not appear here.
+# client -> (env var, default pipeline or None, valid choices).
+DELIVERY_ON_ENABLE: dict[str, Tuple[str, "str | None", List[str]]] = {
     "psk-recorder": ("PSK_DELIVERY_PIPELINES", "direct",
                      ["direct", "server-merge", "server-raw"]),
+    "meteor-scatter": ("METEOR_SCATTER_DELIVERY_MODE", None,
+                       ["deposit", "direct", "off"]),
 }
 
 
@@ -133,11 +142,12 @@ def apply_enable(client: str, instance: str, on: bool, base: str = "/etc",
     if on and client in DELIVERY_ON_ENABLE:
         dkey, ddefault, dchoices = DELIVERY_ON_ENABLE[client]
         val = delivery or ddefault
-        if val not in dchoices:
-            raise ValueError(
-                f"{dkey} must be one of {', '.join(dchoices)}; got {val!r}")
-        set_env_flag(path, dkey, val)
-        delivery_set = (dkey, val)
+        if val is not None:
+            if val not in dchoices:
+                raise ValueError(
+                    f"{dkey} must be one of {', '.join(dchoices)}; got {val!r}")
+            set_env_flag(path, dkey, val)
+            delivery_set = (dkey, val)
     elif delivery is not None:
         # --via passed for a client with no pipeline knob (or while disabling).
         raise ValueError(
