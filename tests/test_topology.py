@@ -28,8 +28,8 @@ class DefaultsTests(unittest.TestCase):
             'write_kernel_isolation': False,
         })
         self.assertEqual(t.cpu_freq,
-                         {'radiod_max_mhz': 3200, 'other_max_mhz': 1400,
-                          'fast_mode': 'radiod'})
+                         {'enabled': True, 'radiod_max_mhz': 3200,
+                          'other_max_mhz': 1400, 'fast_mode': 'radiod'})
 
     def test_empty_file_uses_defaults(self):
         with tempfile.TemporaryDirectory() as d:

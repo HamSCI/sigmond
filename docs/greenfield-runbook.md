@@ -209,15 +209,24 @@ What `apply` already put in place (confirm via validate / the files):
 
 Manual extras:
 
-- **CPU clock policy (optional)** — `smd admin diag cpu-freq --apply` writes
+- **CPU clock policy (default on bare metal)** — `smd admin diag cpu-freq --apply` writes
   per-core `scaling_max_freq` from `[cpu_freq]` in topology.toml, moves capped
   cores off the `performance` governor (a cap is inert under it), sets per-core
   boost where the driver exposes it, and installs `smd-cpu-freq.service` so the
   policy is re-applied at every boot. `fast_mode = "fft-pair"` keeps only the
   SMT pair holding each radiod's fft thread fast and caps the rest of radiod's
   cores too — the thermal win measured at K6FOD (84 → 62 C, zero drops).
-  Usually unnecessary on a cool host: radiod cores default to hardware max, and
-  capping decoder cores only spends their slack.
+  **On by default on bare metal** (since 2026-11-12): bring-up's `smd apply`
+  and `smd align --apply` apply it and install `smd-cpu-freq.service` once
+  (radiod cores 3200 MHz on `performance`, the rest capped at 1400 MHz on
+  `powersave`).  Most sites want low power, long CPU life and low temperature,
+  and radiod has no use for boost: on KJ6MKI (Ryzen 5 5560U) radiod's fft ran
+  at 44 % of a core uncapped (~3.8 GHz) and 49 % capped at 3.2 GHz, with zero
+  sample loss.  Opt out with `[cpu_freq] enabled = false`.  Not applied on a
+  Proxmox guest or host: the host's hookscript owns the clocks there.  On
+  amd-pstate (Zen 3 mobile) a busy capped core runs no lower than its CPPC
+  nominal (~2.4 GHz on a 5560U); `diag cpu-freq` reports that floor.  The cap
+  still stops boost.
 - **`isolcpus` (optional, needs a reboot)** — bring-up now stages this itself: on an image-built
   host it writes the line; on a repo install it prints it and writes it only when
   `[cpu_affinity] write_kernel_isolation = true` sits in `/etc/sigmond/topology.toml`

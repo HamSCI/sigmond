@@ -42,6 +42,14 @@ _DEFAULT_CPU_AFFINITY = {
     'write_kernel_isolation': False,
 }
 _DEFAULT_CPU_FREQ = {
+    # Bare metal applies the clock policy by default (bring-up's `smd apply`
+    # and `smd align --apply` install smd-cpu-freq.service).  rob,
+    # 2026-11-12: most sites want low power, long CPU life and low
+    # temperature; radiod's fft uses under half a core at 3.2 GHz (KJ6MKI,
+    # 5560U: 48.8 % capped vs 44.0 % at ~3.8 GHz, zero sample loss).
+    # `enabled = false` opts a station out.  A Proxmox guest never applies
+    # it: the host's hookscript owns the clocks.
+    'enabled':        True,
     'radiod_max_mhz': 3200,
     'other_max_mhz':  1400,
     # Which CPUs get radiod_max_mhz: 'radiod' = every CPU radiod owns (the
@@ -182,6 +190,11 @@ def load_topology(path: Path = TOPOLOGY_PATH,
             cpu_freq['other_max_mhz'] = int(cf['other_max_mhz'])
         except (TypeError, ValueError):
             warn(f"topology cpu_freq.other_max_mhz not an int: {cf['other_max_mhz']!r}")
+    if 'enabled' in cf:
+        if isinstance(cf['enabled'], bool):
+            cpu_freq['enabled'] = cf['enabled']
+        else:
+            warn(f"topology cpu_freq.enabled not a bool: {cf['enabled']!r} — using true")
     if 'fast_mode' in cf:
         mode = str(cf['fast_mode']).strip().lower()
         if mode in CPU_FREQ_FAST_MODES:

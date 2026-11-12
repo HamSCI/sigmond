@@ -8920,6 +8920,25 @@ def _align_bringup(*, run=subprocess.run, say=print, site_timing_refreshed: bool
         return steps
     steps.append(align_apply.Step('doctor --fix', 'ran', detail))
 
+    # Bare metal carries the [cpu_freq] clock policy by default (rob,
+    # 2026-11-12): a station aligned from before the default gets it once.
+    # Never blocks the run -- a clock policy that did not apply is a
+    # warning in its detail, not a failed bring-up.
+    try:
+        topo = _load_topology(TOPOLOGY_PATH) or {}
+        wanted, _why = _cpu_freq_policy_wanted(topo)
+        if wanted and not _cpu_freq_unit_enabled(
+                run=lambda a: _align_run(a, run=run, timeout=15, action=' '.join(a),
+                                         stdin=subprocess.DEVNULL)):
+            r = _align_run([sys.executable, str(_SCRIPT), 'admin', 'diag', 'cpu-freq',
+                            '--apply'], run=run, timeout=120,
+                           action='admin diag cpu-freq --apply', stdin=subprocess.DEVNULL)
+            detail = _tail(r) if r.returncode == 0 else \
+                f'not applied (exit {r.returncode}): {_tail(r)}'
+            steps.append(align_apply.Step('admin diag cpu-freq --apply', 'ran', detail))
+    except Exception:                                          # noqa: BLE001
+        pass
+
     return steps
 
 
@@ -14441,6 +14460,14 @@ def cmd_apply(args) -> int:
         except Exception:
             pass  # non-fatal; affinity is best-effort
 
+    # Bare metal: the [cpu_freq] clock policy is the default (rob,
+    # 2026-11-12).  Best-effort, never fails the apply.
+    if _HAS_SIGMOND_LIB and not dry_run:
+        try:
+            _ensure_cpu_freq_policy(topology)
+        except Exception:
+            pass
+
     # Disable hf-timestd's radiod-affinity watcher if it ever got enabled
     # (typically by a re-run of hf-timestd's deploy.sh on a host where the
     # operator forgot TIMESTD_SKIP_AFFINITY=1).  Sigmond owns radiod
@@ -16200,6 +16227,60 @@ def cmd_diag_cpu_affinity(args) -> int:
     return 0
 
 
+_CPU_SYSFS = Path('/sys/devices/system/cpu')
+_PVE_DIR = Path('/etc/pve')
+_CPU_FREQ_UNIT = 'smd-cpu-freq.service'
+
+
+def _cpu_freq_policy_wanted(topology) -> tuple:
+    """(wanted, reason): should this host carry the [cpu_freq] clock policy
+    by default?
+
+    rob, 2026-11-12: bare metal applies it by default, as the Proxmox
+    hookscript does for a guest -- low power, long CPU life, low
+    temperature; radiod's fft needs under half a core at 3.2 GHz.  Not on a
+    guest (no cpufreq sysfs: the host's hookscript owns the clocks), not on a
+    Proxmox host itself (/etc/pve: the hookscript again), and not where the
+    operator set [cpu_freq] enabled = false."""
+    cfg = (topology.get('cpu_freq', {}) or {}) if isinstance(topology, dict) else {}
+    if cfg.get('enabled', True) is False:
+        return False, '[cpu_freq] enabled = false'
+    if not (_CPU_SYSFS / 'cpu0' / 'cpufreq').exists():
+        return False, 'no cpufreq sysfs (a VM guest: the host sets clocks)'
+    if _PVE_DIR.exists():
+        return False, 'Proxmox host: its hookscript sets clocks'
+    return True, ''
+
+
+def _cpu_freq_unit_enabled(run=None) -> bool:
+    r = (run or _run)(['systemctl', 'is-enabled', _CPU_FREQ_UNIT])
+    return (getattr(r, 'stdout', '') or '').strip() == 'enabled'
+
+
+def _ensure_cpu_freq_policy(topology, *, dry_run: bool = False) -> bool:
+    """Apply the clock policy once and install its boot unit when this host
+    wants it and does not have it yet.  Idempotent: once
+    smd-cpu-freq.service is enabled it re-applies at every boot and this is
+    a no-op.  The policy's values are the operator's [cpu_freq] (defaults
+    3200 / 1400 MHz).  Returns True when it changed something."""
+    wanted, why = _cpu_freq_policy_wanted(topology)
+    if not wanted or _cpu_freq_unit_enabled():
+        return False
+    if dry_run:
+        _info(f'would apply the CPU clock policy and enable {_CPU_FREQ_UNIT}')
+        return False
+    _info('CPU clock policy: applying the [cpu_freq] defaults '
+          '(set [cpu_freq] enabled = false to opt out)')
+    ns = argparse.Namespace(apply=True, topology=None, reapply=False,
+                            _topology_override=topology)
+    try:
+        cmd_diag_cpu_freq(ns)
+    except Exception as exc:                               # noqa: BLE001
+        _warn(f'CPU clock policy not applied: {exc}')
+        return False
+    return True
+
+
 def _install_cpu_freq_boot_unit() -> None:
     """smd-cpu-freq.service: re-apply the clock policy at every boot.
 
@@ -16240,6 +16321,45 @@ def _install_cpu_freq_boot_unit() -> None:
             _ok('smd-cpu-freq.service enabled — clock policy re-applied at every boot')
     except OSError as e:
         _warn(f'could not persist the clock policy at boot: {e}')
+
+
+def _cpufreq_nominal_khz(freq_dir: Path) -> int:
+    """The CPPC nominal frequency (kHz) amd-pstate will not hold a busy core
+    below, or 0 when this driver has none.  amd-pstate exposes it as
+    cpufreq/amd_pstate_nominal_freq (kHz); acpi_cppc/nominal_freq (MHz) is
+    the fallback.  Only amd-pstate drivers count: acpi-cpufreq and
+    intel_pstate honour a lower cap."""
+    try:
+        driver = (freq_dir / 'scaling_driver').read_text().strip()
+    except OSError:
+        driver = ''
+    if not driver.startswith('amd-pstate'):
+        return 0
+    try:
+        return int((freq_dir / 'amd_pstate_nominal_freq').read_text().strip())
+    except (OSError, ValueError):
+        pass
+    try:
+        cppc = freq_dir.parent / 'acpi_cppc' / 'nominal_freq'
+        return int(cppc.read_text().strip()) * 1000
+    except (OSError, ValueError):
+        return 0
+
+
+def _read_settled_khz(path: Path, want: int, tries: int = 10, wait_s: float = 0.1) -> int:
+    """Read a cpufreq kHz value, re-reading briefly until it equals ``want``
+    (or the tries run out); return the last value read."""
+    val = want
+    for i in range(tries):
+        try:
+            val = int(path.read_text().strip())
+        except (OSError, ValueError):
+            return want
+        if val == want:
+            return val
+        if i + 1 < tries:
+            time.sleep(wait_s)
+    return val
 
 
 def cmd_diag_cpu_freq(args) -> int:
@@ -16397,6 +16517,7 @@ def cmd_diag_cpu_freq(args) -> int:
 
     changes = 0
     errors  = 0
+    below_nominal: list = []     # [(cpu, nominal kHz)] where the cap sits under it
     # Per-core boost (cpb) is the HARD lever on acpi-cpufreq AMD hosts: their
     # P-state table is discrete and everything above the top P-state is turbo,
     # which scaling_max_freq cannot cap — but cpb=0 pins a core at its top
@@ -16459,6 +16580,36 @@ def cmd_diag_cpu_freq(args) -> int:
         current_mhz = current_khz  // 1000
         applied_mhz = applied_khz // 1000
 
+        # The effective floor: amd-pstate (Zen 3 mobile) runs a busy core at
+        # its CPPC nominal however low scaling_max_freq is set -- min=max=1.4
+        # GHz still ran KJ6MKI's 5560U at ~2.42 GHz (2026-11-12).  The cap
+        # still stops boost; report what it really holds the core to.
+        floor_khz = _cpufreq_nominal_khz(freq_dir)
+        if floor_khz and applied_khz < floor_khz:
+            below_nominal.append((cpu, floor_khz))
+
+        if do_apply:
+            # Governor FIRST: a cap is INERT under 'performance' (that
+            # governor drives the core to its top P-state regardless of
+            # scaling_max_freq — measured at KX4AZ-T), so capped cpus that
+            # sit on it move to powersave/schedutil, whichever the driver
+            # offers.  Fast cpus keep whatever the affinity apply set.
+            # Before the cap, not after: amd-pstate-epp on 'performance'
+            # reads back the old ceiling right after the write, which
+            # printed "kernel set 4062 MHz" for a cap that had in fact
+            # taken (KJ6MKI, 2026-11-12).
+            gov_path = freq_dir / 'scaling_governor'
+            try:
+                cur_gov = gov_path.read_text().strip()
+                avail = (freq_dir / 'scaling_available_governors').read_text().split()
+            except OSError:
+                cur_gov, avail = '', []
+            if not is_fast and cur_gov == 'performance':
+                slow = next((g for g in ('powersave', 'schedutil') if g in avail), None)
+                if slow and _write_sysfs(gov_path, slow):
+                    _ok(f'cpu{cpu:2d}  [{role}]  governor performance → {slow} (cap was inert)')
+                    n_gov += 1
+
         # Per-CPU verdict: compare scaling_max_freq against what we
         # would apply.  If the kernel later rounds our write down
         # (some old drivers do this silently), the next pass will
@@ -16474,13 +16625,10 @@ def cmd_diag_cpu_freq(args) -> int:
                 try:
                     (freq_dir / 'scaling_max_freq').write_text(str(applied_khz))
                     # Re-read to see what the kernel actually accepted
-                    # (some drivers silently round).
-                    try:
-                        actual_khz = int(
-                            (freq_dir / 'scaling_max_freq').read_text().strip()
-                        )
-                    except (OSError, ValueError):
-                        actual_khz = applied_khz
+                    # (some drivers silently round), giving the driver a
+                    # moment to settle before calling it a rounding.
+                    actual_khz = _read_settled_khz(freq_dir / 'scaling_max_freq',
+                                                   applied_khz)
                     actual_mhz = actual_khz // 1000
                     if actual_khz == applied_khz:
                         _ok(f'cpu{cpu:2d}  [{role}]  {arrow}  applied')
@@ -16500,27 +16648,18 @@ def cmd_diag_cpu_freq(args) -> int:
                 changes += 1
 
         if do_apply:
-            # Governor: a cap is INERT under 'performance' (that governor
-            # drives the core to its top P-state regardless of
-            # scaling_max_freq — measured at KX4AZ-T), so capped cpus that
-            # sit on it move to powersave/schedutil, whichever the driver
-            # offers.  Fast cpus keep whatever the affinity apply set.
-            gov_path = freq_dir / 'scaling_governor'
-            try:
-                cur_gov = gov_path.read_text().strip()
-                avail = (freq_dir / 'scaling_available_governors').read_text().split()
-            except OSError:
-                cur_gov, avail = '', []
-            if not is_fast and cur_gov == 'performance':
-                slow = next((g for g in ('powersave', 'schedutil') if g in avail), None)
-                if slow and _write_sysfs(gov_path, slow):
-                    _ok(f'cpu{cpu:2d}  [{role}]  governor performance → {slow} (cap was inert)')
-                    n_gov += 1
             if have_cpb:
                 if _write_sysfs(freq_dir / 'cpb', '1' if is_fast else '0'):
                     n_cpb += 1
 
     print()
+    if below_nominal:
+        floors = sorted({k // 1000 for _, k in below_nominal})
+        cpus = _cpu_list_str({c for c, _ in below_nominal})
+        _info(f'cpus {cpus}: the driver will not hold a busy core below its CPPC '
+              f'nominal ({", ".join(str(f) for f in floors)} MHz), so the '
+              f'{other_max_mhz} MHz cap is effectively that floor -- it still '
+              f'stops boost')
     if do_apply:
         if n_cpb:
             _info(f'acpi-cpufreq host: per-core boost (cpb) set on {n_cpb} cpu(s) — '

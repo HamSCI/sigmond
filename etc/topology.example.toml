@@ -42,8 +42,12 @@ smd_bin = "/usr/local/sbin/smd"
 #                         whose latency the receiver depends on; proc_rx888 and
 #                         the demod threads are cheap.  K6FOD (Ryzen 5 5500U):
 #                         84-87 C → 61-64 C, zero drops.
+#   enabled         Bare metal applies this policy by default (bring-up and
+#                   `smd align --apply` install smd-cpu-freq.service); false
+#                   opts out.  Never applied on a Proxmox guest or host.
 #
 # [cpu_freq]
+# enabled        = true
 # radiod_max_mhz = 3200
 # other_max_mhz  = 1400
 # fast_mode      = "fft-pair"
