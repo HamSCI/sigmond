@@ -174,6 +174,32 @@ class Item:
     note: str = ""
 
 
+# Never installed by --install-missing alone: it opens the station to the
+# HamSCI remote-access path, and on a station reached only through another
+# operator's tunnels (KJ6MKI via WD's gw1/gw2) that is a change in who can
+# get in.  Enabled in topology, it installs like anything else.
+NEVER_IMPLICIT = ("sigmond-rac",)
+
+
+def missing_decision(name: str, *, enabled, install_missing: bool) -> tuple:
+    """(install, reason) for a release component with no checkout here.
+
+    `smd align --apply` used to install every such component: on KJ6MKI
+    (bare metal, 2026-11-11) it put down codar-sounder, gmag-webui,
+    gpsdo-monitor, hamsci-physics and hf-tec, and would have gone on to
+    sigmond-rac, while the dry run only said "missing".  Now a missing
+    component installs only when topology enables it, or when the operator
+    asks with --install-missing (sigmond-rac excepted)."""
+    if name in set(enabled or ()):
+        return True, "would install (enabled in topology, not on this station)"
+    if name in NEVER_IMPLICIT:
+        return False, ("would skip: not on this station — never installed "
+                       "implicitly (enable it in topology to install)")
+    if install_missing:
+        return True, "would install (not on this station; --install-missing)"
+    return False, "would skip: not on this station (use --install-missing)"
+
+
 def local_note(local) -> str:
     """The note a locally managed item carries: `locally managed (<by>) —
     left as is`."""

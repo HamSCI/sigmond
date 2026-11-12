@@ -680,6 +680,7 @@ def run_apply(*, apply=True, allow_rollback=False, max_bytes=None, release=APPLY
         mock.patch.object(smd, "_align_ancestry", m_ancestry),
         mock.patch.object(smd, "_align_target_has_align", m_target_has_align),
         mock.patch.object(smd, "_align_target_supports", m_target_supports),
+        mock.patch.object(smd, "_align_target_skips_missing", return_value=True),
         mock.patch("sigmond.align_apply.verify_release", m_verify),
         mock.patch("sigmond.align_apply.apply_plan", m_apply_plan),
         mock.patch("sigmond.align_apply.record", m_record),
@@ -834,6 +835,7 @@ class AlignApplySigmondBootstrapTests(unittest.TestCase):
                 st, rel=APPLY_REL,
                 live={"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"})
             st.enter_context(mock.patch.object(smd, "_align_target_has_align", return_value=True))
+            st.enter_context(mock.patch.object(smd, "_align_target_skips_missing", return_value=True))
             st.enter_context(mock.patch.object(smd, "_align_target_supports", return_value=False))
             st.enter_context(mock.patch("sigmond.align_apply.apply_plan", return_value=[boot_step]))
             st.enter_context(mock.patch("os.execv", m_execv))
@@ -882,7 +884,7 @@ class AlignApplySigmondBootstrapTests(unittest.TestCase):
             with contextlib.redirect_stdout(out):
                 rc = smd.cmd_align(args)
         m_execv.assert_not_called()
-        self.assertIn("predates smd align", out.getvalue())
+        self.assertIn("predates this one", out.getvalue())
         self.assertEqual(m_apply_plan.call_count, 2)
 
     def test_sigmond_bootstrap_not_moved_skips_rest_with_explanation(self):
@@ -925,6 +927,7 @@ class AlignApplySigmondBootstrapTests(unittest.TestCase):
              mock.patch.object(smd, "_align_ancestry", return_value=lambda c, a, b: True), \
              mock.patch("sigmond.align_apply.apply_plan", return_value=[boot_step]), \
              mock.patch.object(smd, "_align_target_has_align", return_value=True), \
+             mock.patch.object(smd, "_align_target_skips_missing", return_value=True), \
              mock.patch("sigmond.align_apply.record", m_record), \
              mock.patch("sigmond.align_apply.record_history", m_history), \
              mock.patch("sigmond.catalog.load_catalog", return_value={}), \
@@ -1074,8 +1077,11 @@ class AlignApplyRadiodMissingTests(unittest.TestCase):
              mock.patch("sigmond.align_apply.apply_plan", return_value=[]), \
              mock.patch("sigmond.align_apply.record"), \
              mock.patch("sigmond.catalog.load_catalog", return_value={}):
+            # --install-missing: a missing ka9q-radio would otherwise be
+            # skipped as "not on this station" before the refusal is reached.
             args = argparse.Namespace(release=None, base="/opt/git/sigmond", no_cost=True,
-                                      apply=True, allow_rollback=False, max_bytes=None)
+                                      apply=True, allow_rollback=False, max_bytes=None,
+                                      install_missing=True)
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 rc = smd.cmd_align(args)
@@ -2049,6 +2055,7 @@ class AlignFinalReviewCliTests(unittest.TestCase):
                 live={"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"})
             m_history.side_effect = lambda *a, **k: order.append("history")
             st.enter_context(mock.patch.object(smd, "_align_target_has_align", return_value=True))
+            st.enter_context(mock.patch.object(smd, "_align_target_skips_missing", return_value=True))
             st.enter_context(mock.patch("sigmond.align_apply.apply_plan", return_value=[boot_step]))
             st.enter_context(mock.patch("os.execv", side_effect=lambda *a: order.append("execv")))
             st.enter_context(contextlib.redirect_stdout(io.StringIO()))

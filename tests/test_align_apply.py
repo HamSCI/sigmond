@@ -407,7 +407,9 @@ class ApplyPlanTests(unittest.TestCase):
             self.assertIn("origin points at", steps[0].detail)
             self.assertFalse(any(git._subcommand(c) == "fetch" for c in git.calls))
 
-    def test_resolve_failure_on_second_of_three_stops_the_rest(self):
+    def test_a_failed_component_does_not_stop_the_rest(self):
+        # KJ6MKI, 2026-11-11: hf-timestd failed and every component after it
+        # (psk-recorder, wspr-recorder, ka9q-web …) was skipped.
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             names = ["sigmond", "hf-timestd", "wspr-recorder"]
@@ -422,8 +424,37 @@ class ApplyPlanTests(unittest.TestCase):
                 align.Item("wspr-recorder", "forward", "5" * 40, "6" * 40),
             ]
             steps = align_apply.apply_plan(rel(), items, ctx)
-            self.assertEqual([s.outcome for s in steps], ["moved", "failed", "skipped"])
-            self.assertIn("stopped after hf-timestd failed", steps[2].detail)
+            self.assertEqual([s.outcome for s in steps], ["moved", "failed", "moved"])
+
+    def test_a_failed_library_stops_its_consumers(self):
+        # A consumer must never move onto a library that failed to move.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            names = ["ka9q-python", "wspr-recorder"]
+            for n in names:
+                _repo(base, n)
+            git = _MultiFakeGit()
+            git.unresolvable.add("ka9q-python")
+            ctx = _ctx(base, git, names)
+            items = [align.Item("ka9q-python", "forward", "3" * 40, "4" * 40),
+                     align.Item("wspr-recorder", "forward", "5" * 40, "6" * 40)]
+            steps = align_apply.apply_plan(rel(), items, ctx)
+            self.assertEqual([s.outcome for s in steps], ["failed", "skipped"])
+            self.assertIn("stopped after ka9q-python failed", steps[1].detail)
+
+    def test_a_failed_missing_install_does_not_stop_the_rest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _repo(base, "wspr-recorder")
+            git = _MultiFakeGit()
+
+            def boom(name, sha):
+                raise RuntimeError("install.sh exited 1")
+            ctx = _ctx(base, git, ["wspr-recorder"], install_missing=boom)
+            items = [align.Item("hf-timestd", "missing", None, "4" * 40),
+                     align.Item("wspr-recorder", "forward", "5" * 40, "6" * 40)]
+            steps = align_apply.apply_plan(rel(), items, ctx)
+            self.assertEqual([s.outcome for s in steps], ["failed", "moved"])
 
     def test_pyproject_toml_change_triggers_install(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1627,12 +1658,12 @@ class DeployBuildTests(unittest.TestCase):
             self.assertFalse(steps[0].built)
             self.assertNotIn("[build]", steps[0].detail)
 
-    def test_a_failed_build_of_a_current_component_fails_and_stops(self):
+    def test_a_failed_build_of_a_current_component_fails_and_the_rest_go_on(self):
         with tempfile.TemporaryDirectory() as tmp:
             steps = self._plan(Path(tmp), _MultiFakeGit(), "current", lambda n, r: 2)
             self.assertEqual(steps[0].outcome, "failed")
             self.assertIn("deploy.toml [build] exit 2", steps[0].detail)
-            self.assertEqual(steps[1].outcome, "skipped")
+            self.assertEqual(steps[1].outcome, "left")
 
     def test_a_moved_component_due_a_build_is_built(self):
         with tempfile.TemporaryDirectory() as tmp:

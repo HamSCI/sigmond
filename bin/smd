@@ -2455,7 +2455,7 @@ def _build_ka9q_web_with_onion(src_dir: Path, *, force: bool = False) -> bool:
             # Pin onion to the known-good commit (idempotent).  Fetch first in
             # case an existing checkout predates the pin.  As the tree's
             # owner, never root (_native_git).
-            _native_git(onion_src, 'fetch', '--quiet', '--tags', 'origin')
+            _native_git(onion_src, 'fetch', '--quiet', '--tags', '--force', 'origin')
             r = _native_git(onion_src, 'checkout', '--quiet', onion_commit)
             if r.returncode != 0:
                 _err(f'onion: checkout {onion_commit[:12]} failed: {r.stderr.strip()}')
@@ -2572,7 +2572,7 @@ def _build_wsjtx_decoders() -> bool:
             _err(f'git clone wsjtx failed: {r.stderr.strip()}')
             return False
     if not _git_head(src).startswith(pin):
-        _native_git(src, 'fetch', '--quiet', '--tags', 'origin')
+        _native_git(src, 'fetch', '--quiet', '--tags', '--force', 'origin')
         r = _native_git(src, 'checkout', '--quiet', pin)
         if r.returncode != 0:
             _err(f'wsjtx: checkout {pin[:12]} failed: {r.stderr.strip()}')
@@ -2767,7 +2767,10 @@ def _build_ubersdr_decoders(*, check: bool = True) -> bool:
             _err(f'git clone ubersdr_wsprd failed: {r.stderr.strip()}')
             return False
     if not _git_head(src).startswith(pin):
-        _native_git(src, 'fetch', '--quiet', 'origin')
+        # --force: madpsy moves its `latest` tag, and a plain fetch then
+        # refuses ("would clobber existing tag") and never gets the pin
+        # (KJ6MKI, 2026-11-11).  The pin is a sha; no tag is trusted.
+        _native_git(src, 'fetch', '--quiet', '--tags', '--force', 'origin')
         r = _native_git(src, 'checkout', '--quiet', pin)
         if r.returncode != 0:
             _err(f'ubersdr_wsprd: checkout {pin[:12]} failed: '
@@ -6633,7 +6636,7 @@ def _restore_rerender_uploader(base) -> int:
 # command's entry and fails when a reachable function-level sigmond import
 # is missing from its list.
 _PRELOAD_MODULES = {
-    'manifest_restore': ('sigmond.doctor', 'sigmond.provenance',
+    'manifest_restore': ('sigmond.doctor', 'sigmond.provenance', 'sigmond.build_preflight',
                          'sigmond.manifest_restore', 'sigmond.restore_units',
                          'sigmond.installer_args', 'sigmond.sink_state',
                          'sigmond.uploader_manifest',
@@ -6652,6 +6655,7 @@ _PRELOAD_MODULES = {
                          # the checkouts on disk
                          'sigmond.installer', 'sigmond.lan_order'),
     'update': ('sigmond.cpu', 'sigmond.doctor', 'sigmond.wisdom', 'sigmond.update',
+               'sigmond.build_preflight',
                'sigmond.catalog', 'sigmond.discover', 'sigmond.provenance',
                'sigmond.installer_args', 'sigmond.sink_state',
                'sigmond.build_stamp', 'sigmond.gitowner',
@@ -6667,6 +6671,7 @@ _PRELOAD_MODULES = {
                # site_profile's locally_managed name check
                'sigmond.installer', 'sigmond.lan_order'),
     'align': ('sigmond.align', 'sigmond.align_apply', 'sigmond.align_live',
+              'sigmond.build_preflight',
               'sigmond.provenance', 'sigmond.catalog', 'sigmond.component_state', 'sigmond.discover',
               'sigmond.commands.uploader', 'sigmond.inprocess_senders',
               'sigmond.coordination', 'sigmond.installer_args',
@@ -8238,6 +8243,13 @@ def _align_print_restarts(base, moving, *, catalog=None, say=print) -> int:
         say(f"    could not read this station's services ({exc.__class__.__name__}: {exc}) "
             f"— restarts unknown")
         return 1
+    if not services and moving:
+        # No enabled component resolved to a unit (an old or empty
+        # topology): "none" would be a claim, not a reading (KJ6MKI,
+        # 2026-11-11: "restarts: none" while 8 components moved).
+        say(f"    unknown — no enabled services found in {TOPOLOGY_PATH}; "
+            f"--apply restarts what it finds stale afterwards")
+        return 1
     stale, running = st['stale'], st['running']
     pred_radiod, predicted = align_live.predicted_restarts(
         moving=moving, running=running, consumes=st['consumes'],
@@ -8252,7 +8264,14 @@ def _align_print_restarts(base, moving, *, catalog=None, say=print) -> int:
         rows.append(('radiod', f'{why}; restarts first — recording gap of about '
                                f'{align_live.RADIOD_GAP_ESTIMATE_S} s'))
     uploader_now = 'hs-uploader' in stale and 'hs-uploader' not in now_comps
-    for c in sorted(set(predicted) | set(now_comps) | ({'hs-uploader'} if uploader_now else set())):
+    # hs-uploader's daemon is outside topology, so predicted_restarts never
+    # sees it; an active daemon whose checkout moves restarts too.
+    uploader_moves = False
+    if 'hs-uploader' in moving and 'hs-uploader' not in services:
+        from sigmond.commands.uploader import SERVICE
+        uploader_moves = _align_units_started_at([SERVICE]) is not None
+    extra = {'hs-uploader'} if (uploader_now or uploader_moves) else set()
+    for c in sorted(set(predicted) | set(now_comps) | extra):
         if c in stale:
             rows.append((c, f'stale now — {stale[c]}'))
         elif c in moving:
@@ -8427,6 +8446,23 @@ def _align_target_has_align(base, full) -> bool:
     return r.returncode == 0
 
 
+def _align_target_skips_missing(base, full) -> bool:
+    """Whether sigmond at ``full`` has align.missing_decision — the rule that
+    installs a missing component only when topology enables it or
+    --install-missing asks.  An smd without it installs every missing
+    component (KJ6MKI, 2026-11-11), so --apply never re-execs into one.
+    A read (`git cat-file`); an unreadable target reads False."""
+    repo = Path(base) / 'sigmond'
+    try:
+        r = subprocess.run(
+            ['git', '-c', f'safe.directory={repo}', '-C', str(repo),
+             'cat-file', '-p', f'{full}:lib/sigmond/align.py'],
+            capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0 and 'def missing_decision(' in (r.stdout or '')
+
+
 def _align_target_supports(base, full, flag) -> bool:
     """Whether sigmond's bin/smd at ``full`` names ``flag`` at all — a read
     (`git cat-file -p <full>:bin/smd`), in `_align_target_has_align`'s
@@ -8457,6 +8493,10 @@ def _align_chown(path, owner) -> None:
     os.chown(p, st.st_uid, st.st_gid)
 
 
+# _align_run_install's exit when build_preflight refused before install.sh ran.
+ALIGN_PREFLIGHT_FAILED = 97
+
+
 def _align_run_install(repo: Path, log_target: Optional[str] = None,
                        *, tail_lines: int = 5) -> int:
     """scripts/install.sh else install.sh, run as root — the same
@@ -8475,6 +8515,14 @@ def _align_run_install(repo: Path, log_target: Optional[str] = None,
         sh = repo / 'install.sh'
     if not sh.exists():
         return 0
+    # A dependency that must compile against Python.h (hf-timestd's
+    # systemd-python) on a host without the dev headers: say which package
+    # and fail this component only (KJ6MKI, 2026-11-11).
+    from sigmond import build_preflight
+    why = build_preflight.check(repo)
+    if why:
+        print(f'  | preflight: {why}')
+        return ALIGN_PREFLIGHT_FAILED
     # --yes, as bring-up passes it: an install.sh that asks to replace a
     # running service ("Stop and replace …? [y/N]") under `set -e` otherwise
     # dies on the empty stdin — igmp-querier did, on AC0G-ND 2026-09-25.
@@ -8918,6 +8966,14 @@ def _align_apply(args) -> int:
         max_bytes = getattr(args, 'max_bytes', None)
         is_ancestor = _align_ancestry(base, prefetched, max_bytes, print, skipped_budget)
         items = align.classify(items, is_ancestor)
+        # A component with no checkout here installs only when topology
+        # enables it or --install-missing asks (sigmond-rac never
+        # implicitly) — KJ6MKI, 2026-11-11.  The rest are left, which
+        # blocks nothing: the station never ran them.
+        items, skip_missing = _align_missing_notes(items, args)
+        missing_left = [align_apply.Step(it.component, 'left', it.note)
+                        for it in items if it.component in skip_missing]
+        items = [it for it in items if it.component not in skip_missing]
 
         # Fix round 1 / I1: a component the prefetch skipped for budget must
         # never reach apply_plan's own move step — that step re-fetches
@@ -8927,8 +8983,9 @@ def _align_apply(args) -> int:
         # through classify's ancestry-unknown refusal (which would blame
         # the wrong thing) or apply_plan's own move step (which would
         # ignore the refusal and fetch anyway).
-        extra_steps = [align_apply.Step(it.component, 'skipped', 'byte budget reached')
-                       for it in items if it.component in skipped_budget]
+        extra_steps = missing_left + [
+            align_apply.Step(it.component, 'skipped', 'byte budget reached')
+            for it in items if it.component in skipped_budget]
         items = [it for it in items if it.component not in skipped_budget]
 
         # Fix round 1 / M4: ka9q-radio has no install.sh of its own — smd
@@ -8967,6 +9024,8 @@ def _align_apply(args) -> int:
         passthrough = ['--base', str(base)]
         if getattr(args, 'allow_rollback', False):
             passthrough.append('--allow-rollback')
+        if getattr(args, 'install_missing', False):
+            passthrough.append('--install-missing')
         if max_bytes is not None:
             passthrough += ['--max-bytes', str(max_bytes)]
 
@@ -8976,7 +9035,14 @@ def _align_apply(args) -> int:
             boot_steps = align_apply.apply_plan(rel, [sigmond_item], ctx)
             boot = boot_steps[0]
             print(f'  sigmond: {boot.outcome}' + (f' — {boot.detail}' if boot.detail else ''))
-            if boot.outcome == 'moved' and _align_target_has_align(base, sigmond_item.target):
+            # Re-exec only into an smd that has the missing-component rule:
+            # an older one installs every missing component, the KJ6MKI bug.
+            # Otherwise carry on with the code already loaded (as for a
+            # target that predates align itself).
+            reexec = (boot.outcome == 'moved'
+                      and _align_target_has_align(base, sigmond_item.target)
+                      and _align_target_skips_missing(base, sigmond_item.target))
+            if reexec:
                 # This process is about to replace itself — nothing after
                 # os.execv runs, so the sigmond move goes into HISTORY now
                 # (a crash in the re-exec'd child must not leave it
@@ -9009,8 +9075,8 @@ def _align_apply(args) -> int:
                          'align', '--apply', '--release', rel.tag, *passthrough])
                 return 0   # os.execv never returns on success; only reached under test
             if boot.outcome == 'moved':
-                print(f'sigmond moved to {sigmond_item.target}, which predates smd '
-                      f'align — continuing with the code already loaded')
+                print(f'sigmond moved to {sigmond_item.target}, whose smd align '
+                      f'predates this one — continuing with the code already loaded')
                 # Fix round 1 / I1: apply_plan's own total_bytes tracker
                 # starts at 0 on EVERY call — without carrying the boot
                 # move's own cost forward, this second call would get a
@@ -9290,6 +9356,29 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
     return 1 if (bad or not checks_ok) else 0
 
 
+def _align_missing_notes(plan, args) -> tuple:
+    """(plan, skip): each `missing` item's note says whether --apply installs
+    it or skips it (align.missing_decision), and ``skip`` names the skipped
+    ones.  Shared by the dry run and --apply, so both say the same thing."""
+    import dataclasses
+    from sigmond import align
+    try:
+        enabled = set(_enabled_components(_load_topology(TOPOLOGY_PATH)) or [])
+    except Exception:          # an unreadable topology enables nothing
+        enabled = set()
+    flag = bool(getattr(args, 'install_missing', False))
+    out, skip = [], set()
+    for it in plan:
+        if it.status == 'missing':
+            install, why = align.missing_decision(it.component, enabled=enabled,
+                                                  install_missing=flag)
+            if not install:
+                skip.add(it.component)
+            it = dataclasses.replace(it, note=why)
+        out.append(it)
+    return out, skip
+
+
 def cmd_align(args) -> int:
     """`smd align` — how far this station sits from the latest blessed release.
 
@@ -9335,6 +9424,7 @@ def cmd_align(args) -> int:
         return 2
     live, dirty, origins, errors = _align_live_state(base)
     plan = align.plan_align(rel, live, dirty, errors, local=_locally_managed())
+    plan, skip_missing = _align_missing_notes(plan, args)
     print(f'smd align — {socket.gethostname()} against blessed {rel.tag} '
           f'(dry run: nothing changes)')
     recorded = align.recorded_release()
@@ -9418,7 +9508,8 @@ def cmd_align(args) -> int:
     for f in files:
         print(f"    {f['path']:<40} {f['note'] or f['status']}")
     moving = [it.component for it in plan
-              if it.status in ('move', 'missing') and it.component not in ahead_components]
+              if it.status in ('move', 'missing') and it.component not in ahead_components
+              and it.component not in skip_missing]
     # The catalog cmd_align already read (empty under --no-cost, and then
     # _align_staleness reads it itself: the kinds decide radiod consumers).
     stale_now = _align_print_restarts(base, moving, catalog=catalog)
@@ -9430,8 +9521,13 @@ def cmd_align(args) -> int:
     # the summary line, don't call it pending work.
     counts['ahead'] = len(ahead_components)
     counts['move'] -= counts['ahead']
+    # A missing component --apply would skip is not pending work: the
+    # station never ran it (KJ6MKI, 2026-11-11).
+    counts['skipped'] = len(skip_missing)
+    counts['missing'] -= counts['skipped']
     print(f"  summary: {counts['move']} to move, {counts['ahead']} left ahead, "
-          f"{counts['refuse']} refused, {counts['missing']} missing, "
+          f"{counts['refuse']} refused, {counts['missing']} to install, "
+          f"{counts['skipped']} not on this station (skipped), "
           f"{counts['stray']} stray, "
           f"{len(stale)} file{'s' if len(stale) != 1 else ''} to refresh, "
           f"{stale_now} service{'s' if stale_now != 1 else ''} to restart")
@@ -29740,6 +29836,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument('--allow-rollback', action='store_true',
                    help='also move a component that is ahead of the pin back '
                         'to it (only with --apply)')
+    p.add_argument('--install-missing', action='store_true',
+                   help='also install release components this station has no '
+                        'checkout of (default: only those enabled in topology; '
+                        'sigmond-rac never, unless enabled)')
     p.add_argument('--max-bytes', type=_parse_bytes, metavar='N',
                    help='stop fetching once this many bytes have been '
                         'transferred (plain integer, or a suffix like 500K, '

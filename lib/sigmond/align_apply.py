@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from sigmond.align import AHEAD_NOTE, RADIOD, RAW_BASE, Item, Release
+from sigmond.align import AHEAD_NOTE, LIBRARIES_FIRST, RADIOD, RAW_BASE, Item, Release
 from sigmond.doctor import _sha_equal
 
 APPLIANCE_REPO = "https://github.com/HamSCI/sigmond-appliance"
@@ -88,17 +88,55 @@ def parse_fetch_bytes(stderr: str) -> Optional[int]:
     return int(round(float(value) * _FETCH_BYTES_UNITS[unit]))
 
 
+def foreign_git_files_hint(repo, limit: int = 3) -> str:
+    """'' or a hint naming files in ``repo``/.git that the checkout's owner
+    does not own.  The fetch runs as that owner, so one root-owned object
+    or ref fails it (KJ6MKI, 2026-11-11: root-owned files in psk-recorder's
+    and wspr-recorder's .git).  Only .git is named: a venv's files are
+    hard-linked between components by uv, and a chown there would move
+    another component's files too."""
+    gitdir = Path(repo) / ".git"
+    try:
+        uid = os.stat(repo).st_uid
+    except OSError:
+        return ""
+    found = []
+    try:
+        for p in gitdir.rglob("*"):
+            try:
+                if p.lstat().st_uid != uid:
+                    found.append(p)
+            except OSError:
+                continue
+            if len(found) > limit:
+                break
+    except OSError:
+        return ""
+    if not found:
+        return ""
+    shown = ", ".join(str(p.relative_to(repo)) for p in found[:limit])
+    more = " …" if len(found) > limit else ""
+    return (f" — {repo}/.git has files its owner does not own ({shown}{more}); "
+            f"repair: sudo chown -R --reference={repo} {gitdir}")
+
+
 def fetch(repo, owner, *, run: Callable = subprocess.run,
           as_owner: Callable = _default_as_owner) -> Optional[int]:
-    """git fetch --tags by ref (never a SHA) as the checkout's owner.
+    """git fetch --tags --force by ref (never a SHA) as the checkout's owner.
+
+    --force: an upstream that moves a tag (madpsy's `latest`) otherwise
+    makes git refuse the whole fetch ("would clobber existing tag"), and
+    the pinned commit never arrives (KJ6MKI, 2026-11-11).  Every pin is a
+    sha, so a moved tag changes nothing align trusts.
 
     stdin closed and GIT_TERMINAL_PROMPT=0: a remote that asks for
     credentials fails at once instead of hanging a root-run --apply."""
-    argv = as_owner(owner, git(repo, "fetch", "--tags", "--progress", "origin"))
+    argv = as_owner(owner, git(repo, "fetch", "--tags", "--force", "--progress", "origin"))
     r = _run(run, argv, repo, "fetch", 300, stdin=subprocess.DEVNULL,
              env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
     if r.returncode != 0:
-        raise ApplyError(f"{repo}: git fetch failed: {(r.stderr or '').strip()}")
+        raise ApplyError(f"{repo}: git fetch failed: {(r.stderr or '').strip()}"
+                         + foreign_git_files_hint(repo))
     return parse_fetch_bytes(r.stderr)
 
 
@@ -553,9 +591,25 @@ def _refresh_pin(it: Item, ctx: Ctx) -> Step:
     return Step(name, "current", "pin refreshed")
 
 
+# A failure here stops the run: everything after these imports them (plan
+# order puts them first), so moving a consumer onto a library that failed to
+# move would check it out against code older than its pin.
+_FOUNDATIONS = ("sigmond",) + LIBRARIES_FIRST
+
+
+def _stop_after(name: str) -> bool:
+    return name in _FOUNDATIONS
+
+
 def apply_plan(rel: Release, items: list, ctx: Ctx) -> list:
-    """Move each item toward ``rel``, in plan order (sigmond first), stopping
-    at the first failed component — everything after it stays untouched."""
+    """Move each item toward ``rel``, in plan order (sigmond first).
+
+    A failed component is reported and the run goes on: one install failure
+    used to skip every component after it, including the ones the station
+    runs (KJ6MKI, 2026-11-11: hf-timestd failed to build and psk-recorder,
+    wspr-recorder, ka9q-web and ubersdr_wsprd never moved).  Only a failed
+    foundation (sigmond, or a LIBRARIES_FIRST library) stops the run.  Any
+    failure still blocks the records and exits nonzero."""
     steps = []
     stopped = None
     total_bytes = 0
@@ -566,7 +620,7 @@ def apply_plan(rel: Release, items: list, ctx: Ctx) -> list:
         if it.status == "current":
             step = _build_current(_refresh_pin(it, ctx), it, ctx)
             steps.append(step)
-            if step.outcome == "failed":
+            if step.outcome == "failed" and _stop_after(it.component):
                 stopped = f"stopped after {it.component} failed"
         elif it.status == "stray":
             steps.append(Step(it.component, "left"))
@@ -584,7 +638,8 @@ def apply_plan(rel: Release, items: list, ctx: Ctx) -> list:
                     note = ctx.install_missing(it.component, it.target)
                 except Exception as e:  # noqa: BLE001 — an installer is foreign code
                     steps.append(Step(it.component, "failed", f"install failed: {e}"))
-                    stopped = f"stopped after {it.component} failed"
+                    if _stop_after(it.component):
+                        stopped = f"stopped after {it.component} failed"
                 else:
                     steps.append(Step(it.component, "installed", note or ""))
         elif it.status in ("refuse", "diverged"):
@@ -596,7 +651,7 @@ def apply_plan(rel: Release, items: list, ctx: Ctx) -> list:
             steps.append(step)
             if step.bytes:
                 total_bytes += step.bytes
-            if step.outcome == "failed":
+            if step.outcome == "failed" and _stop_after(it.component):
                 stopped = f"stopped after {it.component} failed"
             elif ctx.max_bytes is not None and total_bytes > ctx.max_bytes:
                 stopped = "byte budget reached"
