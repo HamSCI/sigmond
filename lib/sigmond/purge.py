@@ -133,7 +133,10 @@ def _links_into(roots, *, exclude=()) -> list[Path]:
     of *roots* -- what an install.sh linked without declaring it."""
     if not roots:
         return []
-    prefixes = [str(r).rstrip('/') + '/' for r in roots] + [str(r) for r in roots]
+    # A link counts when it names a root exactly or something under it --
+    # never a sibling that only shares the prefix (hf-tec vs hf-tec-foo).
+    exact = {str(r).rstrip('/') for r in roots}
+    prefixes = [x + '/' for x in exact]
     dirs = [SYSTEMD_SYSTEM, LOCAL_BIN]
     try:
         dirs += [d for d in SYSTEMD_SYSTEM.iterdir()
@@ -156,7 +159,7 @@ def _links_into(roots, *, exclude=()) -> list[Path]:
                 continue
             if not os.path.isabs(target):
                 target = os.path.normpath(os.path.join(str(d), target))
-            if any(target == p or target.startswith(p) for p in prefixes):
+            if target.rstrip('/') in exact or any(target.startswith(p) for p in prefixes):
                 out.append(e)
     return out
 

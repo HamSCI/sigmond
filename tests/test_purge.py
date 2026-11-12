@@ -162,6 +162,10 @@ class TestKj6mkiLeftovers:
         (sysd / 'timers.target.wants' / 'hf-tec-qa@x.timer').symlink_to(
             repo / 'systemd' / 'hf-tec-qa@.timer')
         (sysd / 'other.service').symlink_to(stub_paths / 'elsewhere.service')
+        # a sibling checkout that only shares the name prefix: never ours
+        sib = repo.parent / (repo.name + '-sibling')
+        (sib / 'systemd').mkdir(parents=True)
+        (sysd / 'sibling.service').symlink_to(sib / 'systemd' / 'sibling.service')
         (stub_paths / 'bin').mkdir()
         (stub_paths / 'bin' / 'hf-tec').symlink_to(repo / 'venv' / 'bin' / 'hf-tec')
         clients = stub_paths / 'sigmond-clients'
@@ -194,6 +198,7 @@ class TestKj6mkiLeftovers:
         assert not any(p.name.startswith('hf-tec') for p in sysd.iterdir())
         assert not list((sysd / 'timers.target.wants').iterdir())
         assert (sysd / 'other.service').is_symlink()           # not ours: kept
+        assert (sysd / 'sibling.service').is_symlink()         # prefix-only sibling: kept
         assert not (stub_paths / 'bin' / 'hf-tec').is_symlink()
         assert sorted(p.name for p in clients.iterdir()) == ['psk-recorder.deploy.toml']
         assert not state.exists()                              # empty tree: gone
