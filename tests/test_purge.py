@@ -16,6 +16,9 @@ def stub_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(purge, 'GIT_BASE', tmp_path / 'opt-git')
     monkeypatch.setattr(purge, 'ETC_BASE', tmp_path / 'etc')
     monkeypatch.setattr(purge, 'VENV_BASE', tmp_path / 'opt')
+    monkeypatch.setattr(purge, 'SYSTEMD_SYSTEM', tmp_path / 'systemd')
+    monkeypatch.setattr(purge, 'LOCAL_BIN', tmp_path / 'bin')
+    monkeypatch.setattr(purge, 'SIGMOND_CLIENTS', tmp_path / 'sigmond-clients')
     return tmp_path
 
 
@@ -135,3 +138,64 @@ class TestDeprecatedOnDisk:
     def test_skips_deprecated_entries_with_no_dir(self, stub_paths):
         deprecated = {'long-gone-client': mock.Mock()}
         assert purge.deprecated_on_disk(deprecated) == []
+
+
+class TestKj6mkiLeftovers:
+    """`smd component remove --purge --force` on KJ6MKI (2026-11-12) left
+    hf-tec-qa@.service/.timer links dangling, gmag-webui.deploy.toml in
+    /etc/sigmond/clients, and empty /var/lib/<name> dirs."""
+
+    def _hf_tec(self, stub_paths, monkeypatch):
+        monkeypatch.setattr(purge, '_running_template_instances', lambda u: [])
+        state = stub_paths / 'var-lib' / 'hf-tec'
+        log = stub_paths / 'var-log' / 'hf-tec'
+        deploy = (
+            '[systemd]\nunits = []\ntemplated_units = ["hf-tec@.service"]\n\n'
+            f'[[install.steps]]\nkind = "mkdir"\ndst = "{state}"\n\n'
+            f'[[install.steps]]\nkind = "mkdir"\ndst = "{log}"\n')
+        repo = _scaffold_client(stub_paths, 'hf-tec', deploy_toml=deploy)
+        (repo / 'systemd').mkdir()
+        sysd = stub_paths / 'systemd'
+        (sysd / 'timers.target.wants').mkdir(parents=True)
+        for u in ('hf-tec@.service', 'hf-tec-qa@.service', 'hf-tec-qa@.timer'):
+            (sysd / u).symlink_to(repo / 'systemd' / u)
+        (sysd / 'timers.target.wants' / 'hf-tec-qa@x.timer').symlink_to(
+            repo / 'systemd' / 'hf-tec-qa@.timer')
+        (sysd / 'other.service').symlink_to(stub_paths / 'elsewhere.service')
+        (stub_paths / 'bin').mkdir()
+        (stub_paths / 'bin' / 'hf-tec').symlink_to(repo / 'venv' / 'bin' / 'hf-tec')
+        clients = stub_paths / 'sigmond-clients'
+        clients.mkdir()
+        (clients / 'hf-tec.deploy.toml').write_text('x')
+        (clients / 'hf-tec@KJ6MKI.sources.toml').write_text('x')
+        (clients / 'psk-recorder.deploy.toml').write_text('x')
+        (state / 'sub').mkdir(parents=True)
+        log.mkdir(parents=True)
+        (log / 'keep.log').write_text('data')
+        return repo, sysd, clients, state, log
+
+    def test_plan_names_every_leftover(self, stub_paths, monkeypatch):
+        self._hf_tec(stub_paths, monkeypatch)
+        plan = purge.plan_purge('hf-tec')
+        assert 'hf-tec@.service' in plan['declared_units']
+        names = sorted(p.name for p in plan['owned_links'])
+        assert names == ['hf-tec', 'hf-tec-qa@.service', 'hf-tec-qa@.timer',
+                         'hf-tec-qa@x.timer', 'hf-tec@.service']
+        assert sorted(p.name for p in plan['client_files']) == [
+            'hf-tec.deploy.toml', 'hf-tec@KJ6MKI.sources.toml']
+        assert any('state dir' in l for l in purge.render_plan(plan))
+
+    def test_execute_removes_them_and_keeps_data(self, stub_paths, monkeypatch):
+        repo, sysd, clients, state, log = self._hf_tec(stub_paths, monkeypatch)
+        calls = []
+        monkeypatch.setattr(purge.subprocess, 'run',
+                            lambda a, **kw: calls.append(a) or mock.Mock(returncode=0, stderr=''))
+        assert purge.execute_purge(purge.plan_purge('hf-tec')) == 0
+        assert not any(p.name.startswith('hf-tec') for p in sysd.iterdir())
+        assert not list((sysd / 'timers.target.wants').iterdir())
+        assert (sysd / 'other.service').is_symlink()           # not ours: kept
+        assert not (stub_paths / 'bin' / 'hf-tec').is_symlink()
+        assert sorted(p.name for p in clients.iterdir()) == ['psk-recorder.deploy.toml']
+        assert not state.exists()                              # empty tree: gone
+        assert (log / 'keep.log').read_text() == 'data'        # holds data: kept
+        assert ['systemctl', 'disable', 'hf-tec@.service'] in calls

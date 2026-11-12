@@ -266,3 +266,35 @@ def test_status_says_the_probe_timed_out_rather_than_going_quiet(
     out = capsys.readouterr().out.lower()
     assert "adoption" in out
     assert "did not answer" in out
+
+
+GPSDO_2210 = SourceKey(type="usb", identifier="1dd2:2210:G40328")
+
+
+def _fake_usb(tmp_path, vid, pid, serial):
+    d = tmp_path / "1-4"
+    d.mkdir()
+    (d / "idVendor").write_text(vid + "\n")
+    (d / "idProduct").write_text(pid + "\n")
+    (d / "serial").write_text(serial + "\n")
+    return tmp_path
+
+
+def test_adopted_device_on_the_bus_but_unlisted_is_not_called_absent(tmp_path):
+    # KJ6MKI, 2026-11-12: a Leo Bodnar 1dd2:2210 lsusb could see read
+    # "NOT detected right now" because gpsdo-monitor does not list that model.
+    mod = _smd()
+    mod._USB_SYSFS = _fake_usb(tmp_path, "1dd2", "2210", "G40328")
+    text = "\n".join(mod._adoption_section(StationInventory(),
+                                           adopted=frozenset({GPSDO_2210})))
+    assert "on USB, but its client does not list it" in text
+    assert "NOT detected" not in text
+
+
+def test_usb_key_on_bus_matches_vid_pid_and_serial(tmp_path):
+    mod = _smd()
+    root = _fake_usb(tmp_path, "1dd2", "2210", "G40328")
+    assert mod._usb_key_on_bus("usb:1dd2:2210:G40328", sysfs=root)
+    assert not mod._usb_key_on_bus("usb:1dd2:2210:OTHER", sysfs=root)
+    assert not mod._usb_key_on_bus("usb:1dd2:2211:G40328", sysfs=root)
+    assert not mod._usb_key_on_bus("radiod:x", sysfs=root)
