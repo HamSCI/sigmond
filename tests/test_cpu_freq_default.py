@@ -49,6 +49,23 @@ class Wanted(unittest.TestCase):
         p2 = mock.patch.object(smd, "_PVE_DIR", self.root / "pve")
         p1.start(); p2.start()
         self.addCleanup(p1.stop); self.addCleanup(p2.stop)
+        self.virt = "none"
+        real_run = smd._run
+
+        def run(argv, **kw):
+            if argv[:1] == ["systemd-detect-virt"]:
+                return mock.Mock(returncode=0 if self.virt != "none" else 1,
+                                 stdout=self.virt + "\n", stderr="")
+            return real_run(argv, **kw)
+        p3 = mock.patch.object(smd, "_run", side_effect=run)
+        p3.start(); self.addCleanup(p3.stop)
+
+    def test_guest_with_cpufreq_exposed_does_not(self):
+        (self.cpu / "cpu0" / "cpufreq").mkdir(parents=True)
+        self.virt = "kvm"
+        wanted, why = smd._cpu_freq_policy_wanted({"cpu_freq": {}})
+        self.assertFalse(wanted)
+        self.assertIn("kvm guest", why)
 
     def test_bare_metal_wants_it(self):
         (self.cpu / "cpu0" / "cpufreq").mkdir(parents=True)
@@ -72,6 +89,8 @@ class Wanted(unittest.TestCase):
         (self.cpu / "cpu0" / "cpufreq").mkdir(parents=True)
         state = {"enabled": False}
         def run(argv, **kw):
+            if argv[:1] == ["systemd-detect-virt"]:
+                return subprocess.CompletedProcess(argv, 1, "none\n", "")
             out = "enabled\n" if state["enabled"] else "disabled\n"
             return subprocess.CompletedProcess(argv, 0, out, "")
         def apply(ns):

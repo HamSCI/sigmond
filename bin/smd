@@ -16247,6 +16247,12 @@ def _cpu_freq_policy_wanted(topology) -> tuple:
         return False, '[cpu_freq] enabled = false'
     if not (_CPU_SYSFS / 'cpu0' / 'cpufreq').exists():
         return False, 'no cpufreq sysfs (a VM guest: the host sets clocks)'
+    # Some hypervisors expose cpufreq to a guest; a guest's writes would not
+    # reach the host's cores, so ask systemd explicitly.
+    virt = _run(['systemd-detect-virt', '--vm'], capture=True)
+    kind = (getattr(virt, 'stdout', '') or '').strip()
+    if kind and kind != 'none':
+        return False, f'a {kind} guest: the host sets clocks'
     if _PVE_DIR.exists():
         return False, 'Proxmox host: its hookscript sets clocks'
     return True, ''
