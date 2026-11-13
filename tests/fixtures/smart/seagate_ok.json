@@ -1,0 +1,92 @@
+{
+ "smartctl": {
+  "exit_status": 0
+ },
+ "model_name": "ST2000LM007-1R8174",
+ "serial_number": "ZDZJHMBB",
+ "smart_status": {
+  "passed": true
+ },
+ "power_on_time": {
+  "hours": 1200
+ },
+ "power_cycle_count": 300,
+ "temperature": {
+  "current": 34
+ },
+ "ata_smart_attributes": {
+  "table": [
+   {
+    "id": 5,
+    "name": "5",
+    "raw": {
+     "value": 0
+    }
+   },
+   {
+    "id": 9,
+    "name": "9",
+    "raw": {
+     "value": 1200
+    }
+   },
+   {
+    "id": 12,
+    "name": "12",
+    "raw": {
+     "value": 300
+    }
+   },
+   {
+    "id": 187,
+    "name": "187",
+    "raw": {
+     "value": 0
+    }
+   },
+   {
+    "id": 194,
+    "name": "194",
+    "raw": {
+     "value": 34
+    }
+   },
+   {
+    "id": 197,
+    "name": "197",
+    "raw": {
+     "value": 0
+    }
+   },
+   {
+    "id": 198,
+    "name": "198",
+    "raw": {
+     "value": 0
+    }
+   },
+   {
+    "id": 199,
+    "name": "199",
+    "raw": {
+     "value": 0
+    }
+   }
+  ]
+ },
+ "ata_smart_self_test_log": {
+  "standard": {
+   "table": [
+    {
+     "type": {
+      "string": "Short offline"
+     },
+     "status": {
+      "passed": true,
+      "string": "Completed without error"
+     }
+    }
+   ]
+  }
+ }
+}
