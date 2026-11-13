@@ -83,6 +83,8 @@ AFFINITY_UNITS = {
     'timestd-chrony-monitor.service':    'other',
     'timestd-pipeline-watchdog.service': 'other',
     'timestd-prune.service':             'other',
+    'timestd-archive.service':           'other',
+    'sigmond-archive-health.service':    'other',
     'timestd-raw-cleanup.service':       'other',
     'grape-daily.service':               'other',
     'timestd-web-api.service':           'other',

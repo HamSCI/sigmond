@@ -31942,6 +31942,13 @@ def _build_parser() -> argparse.ArgumentParser:
     a_add.add_argument('--upgrade', action='store_true',
         help='bring an already-added drive up to date (automount, archiver keys, '
              'health baseline) without formatting it')
+    archive_sub.add_parser('health-refresh',
+        help="refresh the drive's SMART reading (root; sigmond-archive-health.timer runs it hourly)")
+    a_test = archive_sub.add_parser('test', help="run the drive's extended self-test")
+    a_test.add_argument('--long', action='store_true',
+        help='start the extended self-test and return; status shows its progress')
+    archive_sub.add_parser('eject',
+        help='unmount the drive for a safe unplug; it mounts again on its own when plugged in')
     a_rm = archive_sub.add_parser('remove',
         help='unmount the drive so it can be unplugged')
     a_rm.add_argument('--forget', action='store_true',

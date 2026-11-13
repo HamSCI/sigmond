@@ -78,6 +78,12 @@ def cmd_archive(args) -> int:
         return _add(args)
     if verb == 'remove':
         return _remove(args)
+    if verb == 'health-refresh':
+        return _health_refresh()
+    if verb == 'test':
+        return _test(args)
+    if verb == 'eject':
+        return _eject()
     return _status()
 
 
@@ -528,6 +534,100 @@ def _add(args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- refresh / test / eject
+
+def _read_once(name: str, dev_type):
+    return H.read_once(name, dev_type, run=_smart_run)
+
+
+def _drive_disk(cfg) -> Optional["ar.Disk"]:
+    serial = cfg.get("serial")
+    return next((d for d in ar.list_disks().values() if serial and d.serial == serial), None)
+
+
+def _now() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def _health_refresh() -> int:
+    """sigmond-archive-health.service (root, hourly): refresh the latest
+    reading in archive-health.json; the baseline from `add` stays."""
+    cfg = _config()
+    if not cfg.get("uuid"):
+        return 0
+    try:
+        doc = json.loads(HEALTH.read_text())
+    except (OSError, ValueError):
+        doc = {}
+    state = ar.mount_state(str(cfg["uuid"]))
+    doc["latest_state"] = state
+    if state != "absent":
+        disk = _drive_disk(cfg)
+        if disk is not None:
+            reading, why = _read_once(disk.name, cfg.get("smart_dev_type"))
+            if reading is not None:
+                if "baseline" not in doc:
+                    doc.update(H.health_doc(reading, reading, _now()))
+                else:
+                    doc["latest"] = H.dataclasses.asdict(reading)
+                    doc["latest_utc"] = _now()
+            elif why == "standby":
+                doc["skipped_standby_utc"] = _now()
+    HEALTH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = HEALTH.with_name(HEALTH.name + ".new")
+    tmp.write_text(json.dumps(doc, indent=2) + "\n")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, HEALTH)
+    return 0
+
+
+def _test(args) -> int:
+    cfg = _config()
+    disk = _drive_disk(cfg) if cfg else None
+    if disk is None:
+        err("no archive drive plugged in")
+        return 1
+    if not getattr(args, "long", False):
+        err("`smd archive test --long` starts the drive's extended self-test")
+        return 1
+    if not H.start_long_test(disk.name, cfg.get("smart_dev_type"), run=_smart_run):
+        err("the drive's bridge could not start a self-test")
+        return 1
+    ok(f"extended self-test started on /dev/{disk.name}; it takes hours on a large drive.  "
+       "`smd archive status` shows its progress and result")
+    return 0
+
+
+def _unit_name(path: Path) -> str:
+    """systemd-escape --path."""
+    out = []
+    for part in str(path).strip("/").split("/"):
+        out.append("".join(c if (c.isalnum() or c in "_.:") and not (i == 0 and c == ".")
+                           else "\\x%02x" % ord(c) for i, c in enumerate(part)))
+    return "-".join(out)
+
+
+def _unit_active(unit: str) -> bool:
+    return subprocess.run(["systemctl", "is-active", "--quiet", unit]).returncode == 0
+
+
+def _eject() -> int:
+    """Unmount for a safe unplug, and keep the drive configured: it mounts
+    again on its own when it is plugged back in."""
+    waited = 0
+    while _unit_active("timestd-archive.service"):
+        if waited == 0:
+            info("the archiver is copying; waiting for its run to end")
+        time.sleep(5)
+        waited += 5
+    unit = _unit_name(ar.MOUNT)
+    if _run(["systemctl", "stop", f"{unit}.automount", f"{unit}.mount"], False) != 0:
+        err("the drive is busy; `fuser -vm " + str(ar.MOUNT) + "` names who holds it")
+        return 1
+    ok("the archive drive is unmounted: safe to unplug.  Plugged back in, it mounts on its own")
+    return 0
+
+
 # ---------------------------------------------------------------- status / remove
 
 def _config() -> Dict[str, object]:
@@ -589,6 +689,7 @@ def _remove(args) -> int:
             ar.CONFIG.unlink()
         except FileNotFoundError:
             pass
+        _run(["systemctl", "disable", "--now", HEALTH_TIMER], False)
         _run(["systemctl", "daemon-reload"], False)
         ok("forgot the drive: its fstab line and archive.toml are gone")
     else:

@@ -1,0 +1,19 @@
+# /etc/systemd/system/sigmond-archive-health.service
+[Unit]
+Description=Archive drive health: refresh the SMART reading in /var/lib/sigmond/archive-health.json
+Documentation=https://github.com/HamSCI/sigmond/blob/main/docs/superpowers/specs/2026-11-12-archive-drive-design.md
+# smartctl needs root, so the reading belongs to sigmond, not the archiver.
+# `smd check` and `smd archive status` read the file and never wake the drive;
+# smartctl -n standby here leaves a spun-down drive asleep.
+ConditionPathExists=/etc/sigmond/archive.toml
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/local/bin/smd archive health-refresh
+IOSchedulingClass=idle
+Nice=19
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sigmond-archive-health

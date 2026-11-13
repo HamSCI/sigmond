@@ -1,0 +1,12 @@
+# /etc/systemd/system/sigmond-archive-health.timer
+# Enabled by `smd archive add`, disabled by `smd archive remove --forget`.
+[Unit]
+Description=Archive drive health, hourly
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

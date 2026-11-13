@@ -206,6 +206,19 @@ def table(r: Reading) -> List[Tuple[str, str]]:
     ]
 
 
+def read_once(device: str, dev_type: Optional[str], run=subprocess.run
+              ) -> Tuple[Optional[Reading], str]:
+    """One reading with the known -d type, never waking a spun-down drive
+    (-n standby).  (None, 'standby') when it was asleep."""
+    doc = _smartctl(device, dev_type, ["-a", "-n", "standby"], run)
+    if "standby" in _messages(doc).lower() or "STANDBY" in json.dumps(doc):
+        return None, "standby"
+    exit_status = int((doc.get("smartctl") or {}).get("exit_status", 2))
+    if exit_status & 0b11 or not has_attributes(doc):
+        return None, "no SMART reading"
+    return parse_smartctl(doc, dev_type), ""
+
+
 def start_short_test(device: str, dev_type: Optional[str], run=subprocess.run) -> bool:
     doc = _smartctl(device, dev_type, ["-t", "short"], run)
     return not (int((doc.get("smartctl") or {}).get("exit_status", 2)) & 0b11)

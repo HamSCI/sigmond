@@ -300,3 +300,75 @@ def test_add_upgrades_old_fstab_line(env, health):
     import tomllib
     cfg = tomllib.loads(ar.CONFIG.read_text())
     assert cfg["uuid"] == "abcd-1234" and cfg["archive_dtype"] == "f16"
+
+
+# ---- 2026-11-13: health refresh, test --long, eject, forget
+
+def _seed_drive(env, health, tmp_path):
+    assert cmd.cmd_archive(_args()) == 0
+    env.ran.clear()
+
+
+def test_health_refresh_updates_latest_only(env, health, tmp_path, monkeypatch):
+    _seed_drive(env, health, tmp_path)
+    import json
+    base = json.loads(cmd.HEALTH.read_text())["baseline"]
+    monkeypatch.setattr(cmd.ar, "mount_state", lambda *a, **k: "mounted")
+    monkeypatch.setattr(cmd, "_read_once", lambda name, t: (_reading(reallocated=4), ""))
+    assert cmd.cmd_archive(_args(archive_command="health-refresh")) == 0
+    doc = json.loads(cmd.HEALTH.read_text())
+    assert doc["baseline"] == base
+    assert doc["latest"]["reallocated"] == 4
+    assert oct(os.stat(cmd.HEALTH).st_mode & 0o777) == "0o644"
+
+
+def test_health_refresh_skips_when_absent(env, health, tmp_path, monkeypatch):
+    _seed_drive(env, health, tmp_path)
+    monkeypatch.setattr(cmd.ar, "mount_state", lambda *a, **k: "absent")
+    monkeypatch.setattr(cmd, "_read_once", lambda *a: pytest.fail("read an absent drive"))
+    assert cmd.cmd_archive(_args(archive_command="health-refresh")) == 0
+    import json
+    assert json.loads(cmd.HEALTH.read_text())["latest_state"] == "absent"
+
+
+def test_health_refresh_standby_keeps_previous(env, health, tmp_path, monkeypatch):
+    _seed_drive(env, health, tmp_path)
+    import json
+    before = json.loads(cmd.HEALTH.read_text())["latest"]
+    monkeypatch.setattr(cmd.ar, "mount_state", lambda *a, **k: "mounted")
+    monkeypatch.setattr(cmd, "_read_once", lambda name, t: (None, "standby"))
+    assert cmd.cmd_archive(_args(archive_command="health-refresh")) == 0
+    doc = json.loads(cmd.HEALTH.read_text())
+    assert doc["latest"] == before and "skipped_standby_utc" in doc
+
+
+def test_test_long_starts_and_returns(env, health, tmp_path, monkeypatch):
+    _seed_drive(env, health, tmp_path)
+    started = []
+    monkeypatch.setattr(cmd.H, "start_long_test", lambda name, t, run=None: started.append(name) or True)
+    assert cmd.cmd_archive(_args(archive_command="test", long=True)) == 0
+    assert started == ["sdb"]
+
+
+def test_eject_waits_for_archiver_and_unmounts(env, health, tmp_path, monkeypatch, capsys):
+    _seed_drive(env, health, tmp_path)
+    states = iter(["active", "active", "inactive"])
+    monkeypatch.setattr(cmd, "_unit_active", lambda unit: next(states) == "active")
+    monkeypatch.setattr(cmd.time, "sleep", lambda s: None)
+    assert cmd.cmd_archive(_args(archive_command="eject")) == 0
+    stop = [a for a in env.ran if a[:2] == ["systemctl", "stop"]][0]
+    esc = cmd._unit_name(ar.MOUNT)
+    assert stop == ["systemctl", "stop", f"{esc}.automount", f"{esc}.mount"]
+    assert "safe to unplug" in capsys.readouterr().err
+
+
+def test_forget_removes_timer(env, health, tmp_path):
+    _seed_drive(env, health, tmp_path)
+    assert cmd.cmd_archive(_args(archive_command="remove", forget=True)) == 0
+    assert ["systemctl", "disable", "--now", "sigmond-archive-health.timer"] in env.ran
+
+
+def test_unit_name_escapes_like_systemd():
+    from pathlib import Path
+    assert cmd._unit_name(Path("/var/lib/sigmond/archive")) == "var-lib-sigmond-archive"
+    assert cmd._unit_name(Path("/mnt/a-b")) == "mnt-a\\x2db"
