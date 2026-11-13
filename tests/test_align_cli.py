@@ -612,6 +612,8 @@ def _quiet_live_stages():
         smd,
         _align_refresh_image_files=lambda tag: [],
         _align_bringup=lambda **kw: [],
+        # The routing step runs a child smd as root (uniform routing).
+        _align_routing=lambda: align_apply.Step("admin uploader routing --apply", "ran"),
         _align_services=lambda *a, **k: {},
         _align_restart=lambda *a, **k: [],
         _align_fast_checks=lambda *a, **k: dict(_CHECKS_PASS),
@@ -3041,6 +3043,9 @@ class AlignRecordSurvivesNoRestartTests(unittest.TestCase):
                 st.enter_context(mock.patch.object(smd, "_align_refresh_image_files",
                                                    return_value=[]))
                 st.enter_context(mock.patch.object(smd, "_align_bringup", return_value=[]))
+                st.enter_context(mock.patch.object(
+                    smd, "_align_routing",
+                    return_value=align_apply.Step("admin uploader routing --apply", "ran")))
                 st.enter_context(mock.patch.object(
                     smd, "_align_services", return_value={"hf-timestd": ["hf-a.service"]}))
                 st.enter_context(mock.patch.object(

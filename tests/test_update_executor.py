@@ -68,6 +68,11 @@ class _Rig(unittest.TestCase):
         _p = mock.patch.object(smd, "_refresh_cli_reference")
         _p.start()
         self.addCleanup(_p.stop)
+        # update --apply ends by running `smd admin uploader routing
+        # --apply` as a root child (uniform routing); never from a test.
+        _p = mock.patch.object(smd, "_update_routing", return_value=0)
+        _p.start()
+        self.addCleanup(_p.stop)
         self._tmp = tempfile.TemporaryDirectory()
         root = Path(self._tmp.name)
         self.origin = root / "origin.git"

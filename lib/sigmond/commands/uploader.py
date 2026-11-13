@@ -561,6 +561,96 @@ def cmd_uploader_manifest(args) -> int:
                               daemon_ready=daemon_ready)
 
 
+# ---- uniform routing: psk and MSK spots go via wsprdaemon.org alone ---------
+
+def routing_lowered(roots: co.CarryRoots, coord
+                    ) -> "tuple[Optional[frozenset], str]":
+    """The clients whose sink reads below ``upload``, for
+    ``uniform_routing.migrate_routing``, with the cause when nobody can say.
+
+    With the gate offered and the carry-over marker standing, hs-uploader's
+    own reading of the switches decides; a read that fails returns
+    ``(None, cause)``, and the migration then changes nothing.  Otherwise
+    the ``[uploads]`` mode decides: ``upload`` lowers nobody, anything else
+    lowers every routed client."""
+    from .. import uniform_routing
+    features = um.hs_uploader_features(python=roots.python)
+    if (features is not None and um.GATE_FEATURE in features
+            and sink_state.marker_stands(roots.marker)):
+        relayed: list = []
+        with _relayed_stderr(relayed):
+            state = sink_state.read_state(
+                python=roots.python, manifest=str(roots.manifest),
+                sinks=str(roots.sinks), marker=str(roots.marker),
+                store=None if roots.store is None else str(roots.store))
+        if state is None:
+            return None, (_cause(relayed)
+                          or "hs-uploader sink status gave no reason")
+        return uniform_routing.lowered_from_state(state), ""
+    if coord.uploads.mode == "upload":
+        return frozenset(), ""
+    return frozenset(uniform_routing.ROUTED_CLIENTS), ""
+
+
+def _migrate(lowered: Optional[frozenset], why: str = "", *, apply: bool):
+    """``migrate_routing`` on this station's topology, reading environments
+    and restarting through the lever step's systemctl."""
+    from .. import inprocess_senders as ips
+    from .. import uniform_routing
+    from ..topology import load_topology
+    roots = _step_roots()
+    sc = _lever_systemctl
+    return uniform_routing.migrate_routing(
+        load_topology(roots.topology), lowered=lowered, apply=apply,
+        etc=roots.etc, undecided_why=why,
+        show=lambda unit: ips._systemctl_show(unit, run=sc),
+        restart=lambda units: sink_levers.restart_units(units, systemctl=sc))
+
+
+ROUTING_DEFERRED = ("routing: the manifest render waits for the next "
+                    "`smd align` (no carry-over marker yet)")
+
+
+def cmd_uploader_routing(args) -> int:
+    """``smd admin uploader routing [--apply]``: move every enabled
+    psk-recorder and meteor-scatter instance onto the wsprdaemon.org route,
+    then render the manifest.  Without ``--apply``, say what would change.
+
+    While hs-uploader offers ``gate`` and the carry-over marker stands
+    absent, the render waits for the next `smd align` (spec §6.1): the
+    carry-over runs in the manifest step, and `smd align` owns it."""
+    from ..coordination import load_coordination
+    apply = bool(getattr(args, "apply", False))
+    if apply and _euid() != 0:
+        _err("moving instances onto the wsprdaemon.org route writes root-owned "
+             "files and restarts recorders; run it as root (sudo smd admin "
+             "uploader routing --apply)")
+        return 1
+    roots = _step_roots()
+    try:
+        lowered, why = routing_lowered(roots,
+                                       load_coordination(roots.coordination))
+        result = _migrate(lowered, why, apply=apply)
+    except Exception as exc:
+        _err(f"routing: FAILED ({type(exc).__name__}: {exc}); nothing "
+             "rendered")
+        return 1
+    for line in result.lines():
+        if "ERROR" in line or "FAILED" in line or "cannot read" in line:
+            _err(line)
+        else:
+            _say(line)
+    if not apply:
+        return 0
+    rc = 0 if result.ok else 1
+    if sink_state.update_notice():
+        print(ROUTING_DEFERRED)
+        return rc
+    from types import SimpleNamespace
+    mrc = cmd_uploader_manifest(SimpleNamespace(write=True, enable=False))
+    return 1 if (rc or mrc) else 0
+
+
 # ---- the part 2 steps before the render (spec §6, §7.2; Rulings 9, 10) -------
 
 def _carry_over(roots: co.CarryRoots) -> bool:

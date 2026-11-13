@@ -1682,6 +1682,17 @@ def cmd_config_uploads(args) -> int:
         return 1
     _say_site_waits(roots.sinks / 'site.toml', features)
 
+    # Uniform routing: before the manifest step, so the render finds every
+    # psk-recorder and meteor-scatter instance on the wsprdaemon.org route.
+    route_rc = 0
+    if mode == 'upload':
+        try:
+            route = up_cmd.routing_lowered(
+                roots, load_coordination(COORDINATION_PATH))
+        except Exception as exc:
+            route = (None, f'{type(exc).__name__}: {exc}')
+        route_rc = _route_via_wsprdaemon(*route)
+
     rc = _regenerate_uploader_manifest()
     if rc:
         # The old manifest may still rule: no success line, no "ships now".
@@ -1703,7 +1714,28 @@ def cmd_config_uploads(args) -> int:
         ok(words['off'] + (f' ({reason})' if reason else ''))
     else:
         ok(words['hold'] + (f' ({reason})' if reason else ''))
-    return rc
+    return 1 if (rc or route_rc) else 0
+
+
+def _route_via_wsprdaemon(lowered: Optional[frozenset], why: str = '') -> int:
+    """Move every enabled psk-recorder and meteor-scatter instance onto the
+    wsprdaemon.org route (uniform_routing), leaving each client in
+    ``lowered`` as it stands; None changes nothing and says ``why``.
+    Prints each line; 0 when the migration came out clean, else 1.  It
+    never raises, so the manifest step after it always runs."""
+    from . import uploader as up_cmd
+    try:
+        result = up_cmd._migrate(lowered, why, apply=True)
+    except Exception as exc:
+        err(f'routing: FAILED ({type(exc).__name__}: {exc}); no instance '
+            'is known to have moved')
+        return 1
+    for line in result.lines():
+        if 'ERROR' in line or 'FAILED' in line or 'cannot read' in line:
+            err(line)
+        else:
+            info(line)
+    return 0 if result.ok else 1
 
 
 # ---------------------------------------------------------------------------
@@ -1926,10 +1958,14 @@ def _site_change(mode: str, reason: str, coord, words, roots) -> int:
        skip; ruling C20-2);
     3. ``hs-uploader sink set site <state>``;
     4. ``[uploads]`` in site-profile.toml and coordination.toml (D19);
+    4a. on a raise to upload, route via wsprdaemon.org: every enabled
+        psk-recorder and meteor-scatter instance moves onto the server
+        route, except a client step 1 leaves below upload
+        (uniform_routing);
     5. the manifest step, which alone takes the install lock (its own
        lever step then finds nothing to do).
 
-    A failure in any of steps 1-4 is named and the later steps still run,
+    A failure in any of steps 1-4a is named and the later steps still run,
     so an off order always lands; the command then exits 1.  One exception:
     with no carry-over marker yet, a coordination.toml that kept its old
     mode would have the carry-over (step 5) copy that mode back into
@@ -2015,6 +2051,16 @@ def _site_change(mode: str, reason: str, coord, words, roots) -> int:
             err(f'cannot list the clients this raise lifts '
                 f'({type(exc).__name__}: {exc}); the switch is set')
             rc = 1
+
+    # 4a. route via wsprdaemon.org, before the render
+    if new == 'upload':
+        if change is not None:
+            route = (frozenset(change.below), '')
+        elif marker:
+            route = (None, 'the sink status could not be read')
+        else:
+            route = (frozenset(), '')
+        rc = _route_via_wsprdaemon(*route) or rc
 
     # 5. the manifest step
     if coord_failed and not marker:

@@ -208,6 +208,8 @@ def _update(*, apply, raises=False):
         st.enter_context(mock.patch.object(smd, '_venv_sibling_skew', return_value=([], [])))
         st.enter_context(mock.patch.object(smd, '_refresh_upstreams'))
         st.enter_context(mock.patch.object(smd, '_say_sink_notice'))
+        # the routing child runs as root (uniform routing); never here
+        st.enter_context(mock.patch.object(smd, '_update_routing', return_value=0))
         st.enter_context(mock.patch('sigmond.wisdom.plans_from_fft_log', return_value=[]))
         st.enter_context(mock.patch('sigmond.update.plan_update',
                                     return_value=[Action('restart', 'radiod')]))

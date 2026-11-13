@@ -2127,6 +2127,27 @@ def _run_smd_child(argv_tail: list, log_target: str, what: str, *,
     return r.returncode
 
 
+ROUTING_CHILD = ['admin', 'uploader', 'routing', '--apply']
+
+
+def _update_routing() -> int:
+    """`smd admin uploader routing --apply` as a child of the smd on disk:
+    the step `smd update --apply` and `smd align --apply` both run."""
+    return _run_smd_child(ROUTING_CHILD, 'sigmond', 'routing')
+
+
+def _align_routing():
+    """`smd align --apply`'s routing step, after its bring-up re-run: the
+    same child as `smd update --apply`'s."""
+    from sigmond import align_apply
+    rc = _update_routing()
+    if rc:
+        return align_apply.Step(
+            'admin uploader routing --apply', 'failed',
+            f'exit {rc}; re-run: sudo smd admin uploader routing --apply')
+    return align_apply.Step('admin uploader routing --apply', 'ran')
+
+
 def _git_remote_url(repo: Path) -> str:
     r = _run(['git', '-c', f'safe.directory={repo}', '-C', str(repo),
               'remote', 'get-url', 'origin'])
@@ -5964,6 +5985,17 @@ def cmd_update(args) -> int:
         else:
             _info('run this step by hand (long-running; bounces acquisition)')
 
+    # Uniform routing: move psk-recorder and meteor-scatter instances onto
+    # the wsprdaemon.org route.  A child runs the smd on disk, so the update
+    # that ships this code also runs it (this process preloaded the old
+    # modules).  Idempotent: a second run changes nothing.
+    if apply_ and not failed:
+        print('\n  [routing] psk-recorder and meteor-scatter via wsprdaemon.org')
+        rc = _update_routing()
+        if rc:
+            failed += 1
+            _err(f'routing: exit {rc}; re-run: sudo smd admin uploader routing --apply')
+
     # Record what was done.  Without this the host keeps asserting the
     # image version it was installed with — the exact way DASI002 came to
     # claim v3.20 while running v3.31-era components.  Only real work is
@@ -6691,7 +6723,9 @@ _PRELOAD_MODULES = {
               # render_env reads the [[receiver]] list
               'sigmond.receivers', 'sigmond.bringup', 'sigmond.paths',
               # site_profile's locally_managed name check
-              'sigmond.installer', 'sigmond.lan_order'),
+              'sigmond.installer', 'sigmond.lan_order',
+              # commands.uploader's routing helpers (uniform routing)
+              'sigmond.uniform_routing', 'sigmond.sink_state'),
 }
 
 
@@ -9273,6 +9307,14 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
 
     align_apply.record(rel, steps, manifest_path=MANIFEST_PATH, history=history, now=now)
 
+    # Uniform routing, after the bring-up re-run rendered the manifest.
+    # After the record: a station the migration cannot move (no
+    # wspr-recorder to carry its spots) still aligned, and exits 1.
+    routing_step = _align_routing()
+    _align_print_steps([routing_step])
+    steps = steps + [routing_step]
+    routing_failed = routing_step.outcome in _ALIGN_BLOCKING
+
     try:
         services = _align_services()
         staleness = _align_staleness(base, services, catalog or None)
@@ -9300,7 +9342,7 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
         if not any(s.outcome in _ALIGN_BLOCKING for s in steps):
             _refresh_cli_reference()
         _align_print_summary(steps)
-        return 0
+        return 1 if routing_failed else 0
 
     print('  restarts:')
 
@@ -31061,6 +31103,14 @@ def _build_parser() -> argparse.ArgumentParser:
              'then run hs-uploader migrate')
     p_u_manifest.add_argument('--enable', action='store_true',
         help='write and migrate, then enable + (re)start hs-uploader.service')
+    p_u_routing = uploader_sub.add_parser(
+        'routing',
+        help='move psk-recorder and meteor-scatter instances onto the '
+             'wsprdaemon.org route, then render the manifest; dry run '
+             'without --apply')
+    p_u_routing.add_argument('--apply', action='store_true',
+        help='write the env files, restart the instances that changed, '
+             'then render the manifest (root)')
 
     p_manifest = admin_sub.add_parser(
         'manifest',
@@ -32364,6 +32414,16 @@ def main() -> int:
                 _err(f"uploader manifest unavailable: {exc}")
                 return 1
             return cmd_uploader_manifest(args)
+        if up_cmd == 'routing':
+            if getattr(args, 'apply', False) and \
+                    _need_root('admin uploader routing'):
+                return 1
+            try:
+                from sigmond.commands.uploader import cmd_uploader_routing
+            except Exception as exc:
+                _err(f"uploader routing unavailable: {exc}")
+                return 1
+            return cmd_uploader_routing(args)
         p_uploader.print_help()
         return 0
 
