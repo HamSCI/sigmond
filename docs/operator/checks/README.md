@@ -17,6 +17,7 @@ Run `smd check` in the VM. Commands on these pages run in the VM.
 |---|---|---|
 | `platform.bringup` | bring-up | platform.bringup.md |
 | `platform.storage` | storage | platform.storage.md |
+| `platform.archive` | archive | platform.archive.md |
 | `platform.topology` | topology | platform.topology.md |
 | `sensor.magnetometer` | magnetometer | sensor.magnetometer.md |
 | `decode.psk` | PSK | decode.psk.md |
