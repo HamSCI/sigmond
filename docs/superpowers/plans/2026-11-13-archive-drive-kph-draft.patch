@@ -1,0 +1,228 @@
+diff --git a/src/hf_timestd/quota_manager.py b/src/hf_timestd/quota_manager.py
+index 5040082d..dad66679 100755
+--- a/src/hf_timestd/quota_manager.py
++++ b/src/hf_timestd/quota_manager.py
+@@ -70,6 +70,8 @@ class QuotaManager:
+         dry_run: bool = False,
+         archive_root: Optional[Path] = None,
+         derived_max_days: int = 7,
++        archive_threshold_percent: Optional[float] = None,
++        archive_evict_first: Optional[List[Path]] = None,
+     ):
+         self.data_root = Path(data_root)
+         self.threshold_percent = threshold_percent
+@@ -77,6 +79,14 @@ class QuotaManager:
+         self.dry_run = dry_run
+         self.archive_root = Path(archive_root) if archive_root else None
+         self.derived_max_days = derived_max_days
++        # Archive-drive quota: when the archive filesystem is at or above this
++        # percent full (df's Use%), the oldest day-directories are removed
++        # from it — first from each archive_evict_first directory (another
++        # program's day-dirs that hf-timestd has taken over from, e.g. the
++        # old wsprdaemon wav-archive), then hf-timestd's own archived raw IQ.
++        # None leaves the archive drive unmanaged (previous behaviour).
++        self.archive_threshold_percent = archive_threshold_percent
++        self.archive_evict_first = [Path(p) for p in (archive_evict_first or [])]
+ 
+         # Managed directories
+         self.raw_buffer_dir = self.data_root / 'raw_buffer'
+@@ -281,6 +291,126 @@ class QuotaManager:
+             logger.error(f"Failed to remove {entry.path}: {e}")
+             return 0
+ 
++    # ------------------------------------------------------------------
++    # Archive-drive quota
++    # ------------------------------------------------------------------
++
++    def get_archive_usage(self, incoming_bytes: int = 0) -> Tuple[int, int, float]:
++        """Return (used, capacity, percent) of the archive filesystem as df
++        reports Use%: blocks in use over blocks usable by a non-root user,
++        with ``incoming_bytes`` counted as already written."""
++        st = os.statvfs(self.archive_root)
++        used = (st.f_blocks - st.f_bfree) * st.f_frsize
++        capacity = used + st.f_bavail * st.f_frsize
++        percent = (used + incoming_bytes) / capacity * 100 if capacity else 100.0
++        return used, capacity, percent
++
++    @staticmethod
++    def _tree_bytes(path: Path) -> int:
++        """Disk blocks a tree occupies (what removing it frees)."""
++        total = 0
++        try:
++            for f in [path, *path.rglob('*')]:
++                try:
++                    total += f.lstat().st_blocks * 512
++                except OSError:
++                    pass
++        except OSError:
++            pass
++        return total
++
++    def _archive_eviction_candidates(self) -> List[DayEntry]:
++        """Day-directories on the archive drive in eviction order: every
++        archive_evict_first directory's YYYYMMDD children (oldest first,
++        across all of them), then hf-timestd's own archived raw IQ days
++        (oldest first).  Today and yesterday are never offered."""
++        protected = self._protected_dates_min2()
++        foreign: List[DayEntry] = []
++        for root in self.archive_evict_first:
++            try:
++                children = list(root.iterdir())
++            except OSError as e:
++                logger.warning(f"Archive quota: cannot list {root}: {e}")
++                continue
++            for d in children:
++                if (d.is_dir() and not d.is_symlink()
++                        and _DATE_RE.fullmatch(d.name) and d.name not in protected):
++                    foreign.append(DayEntry(path=d, date_str=d.name,
++                                            category='archive_foreign', is_dir=True))
++        own: List[DayEntry] = []
++        raw_root = self.archive_root / 'raw_buffer'
++        if raw_root.is_dir():
++            for ch in raw_root.iterdir():
++                if not ch.is_dir():
++                    continue
++                for d in ch.iterdir():
++                    if d.is_dir() and _DATE_RE.fullmatch(d.name) and d.name not in protected:
++                        own.append(DayEntry(path=d, date_str=d.name,
++                                            category='archive_raw_iq', is_dir=True))
++        foreign.sort(key=lambda e: (e.date_str, str(e.path)))
++        own.sort(key=lambda e: (e.date_str, str(e.path)))
++        return foreign + own
++
++    def _protected_dates_min2(self) -> set:
++        """Today and yesterday (UTC) — the archive drive's own guard."""
++        today = datetime.now(timezone.utc).date()
++        return {(today - timedelta(days=k)).strftime('%Y%m%d') for k in (0, 1)}
++
++    def enforce_archive_quota(self, incoming_bytes: int = 0) -> dict:
++        """Keep the archive drive below archive_threshold_percent, counting
++        ``incoming_bytes`` about to be moved there, by removing the oldest
++        day-directories (see _archive_eviction_candidates).
++
++        Returns {'evicted', 'bytes_freed', 'initial_percent',
++        'final_percent', 'fits'} — fits is False when the drive would still
++        be at or over the threshold with nothing left to remove."""
++        result = {'evicted': 0, 'bytes_freed': 0, 'initial_percent': None,
++                  'final_percent': None, 'fits': True, 'dry_run': self.dry_run}
++        if (self.archive_threshold_percent is None or not self.archive_root
++                or not self._archive_is_mounted()):
++            return result
++
++        threshold = self.archive_threshold_percent
++        used, capacity, percent = self.get_archive_usage(incoming_bytes)
++        result['initial_percent'] = result['final_percent'] = percent
++        if percent < threshold:
++            return result
++
++        logger.info(f"Archive drive {self.archive_root}: {percent:.1f}% "
++                    f"(with {incoming_bytes / 1024**3:.1f} GB incoming) — "
++                    f"at or over {threshold}%, removing oldest days")
++        simulated_freed = 0
++        for entry in self._archive_eviction_candidates():
++            size = self._tree_bytes(entry.path)
++            if self.dry_run:
++                logger.info(f"[DRY RUN] Would remove from archive: {entry.path} "
++                            f"({size / 1024**3:.2f} GB, {entry.category})")
++                simulated_freed += size
++                percent = (used - simulated_freed + incoming_bytes) / capacity * 100
++            else:
++                try:
++                    shutil.rmtree(entry.path)
++                except OSError as e:
++                    logger.error(f"Archive quota: cannot remove {entry.path}: {e}")
++                    continue
++                logger.info(f"Removed from archive: {entry.path} "
++                            f"({size / 1024**3:.2f} GB, {entry.category})")
++                _, _, percent = self.get_archive_usage(incoming_bytes)
++            result['evicted'] += 1
++            result['bytes_freed'] += size
++            if percent < threshold:
++                break
++
++        result['final_percent'] = percent
++        result['fits'] = percent < threshold
++        if not result['fits']:
++            logger.warning(f"Archive drive {self.archive_root} still {percent:.1f}% "
++                           f"(threshold {threshold}%) with nothing left to remove")
++        logger.info(f"Archive quota: {'would remove' if self.dry_run else 'removed'} "
++                    f"{result['evicted']} day-dirs, "
++                    f"{result['bytes_freed'] / 1024**3:.2f} GB; now {percent:.1f}%")
++        return result
++
+     # ------------------------------------------------------------------
+     # Deletion / archival
+     # ------------------------------------------------------------------
+@@ -383,7 +513,9 @@ class QuotaManager:
+         """
+         Proactively move completed raw IQ day-directories to archive storage.
+ 
+-        Moves all raw day-directories except today's to archive_root,
++        Moves all raw day-directories except today's and yesterday's to
++        archive_root, first making room there (enforce_archive_quota) when an
++        archive threshold is set,
+         freeing primary disk for new recordings while preserving the data.
+         Only runs if archive_root is configured and mounted.
+ 
+@@ -397,24 +529,39 @@ class QuotaManager:
+         if not self.raw_buffer_dir.exists():
+             return result
+ 
+-        today = datetime.now(timezone.utc).date().strftime('%Y%m%d')
++        # Never move today (still being written) or yesterday (GRAPE daily
++        # processing reads it from primary after 01:00 UTC and can run for
++        # hours).
++        yesterday = (datetime.now(timezone.utc).date()
++                     - timedelta(days=1)).strftime('%Y%m%d')
+ 
++        pending: List[DayEntry] = []
+         for channel_dir in sorted(self.raw_buffer_dir.iterdir()):
+             if not channel_dir.is_dir():
+                 continue
+             for day_dir in sorted(channel_dir.iterdir()):
+                 if not day_dir.is_dir() or not _DATE_RE.fullmatch(day_dir.name):
+                     continue
+-                if day_dir.name >= today:
+-                    continue  # never move today (still being written)
+-
+-                entry = DayEntry(
++                if day_dir.name >= yesterday:
++                    continue
++                pending.append(DayEntry(
+                     path=day_dir, date_str=day_dir.name,
+                     category='raw_iq', is_dir=True
+-                )
+-                freed = self._archive_entry(entry)
+-                result['bytes_freed'] += freed
+-                result['dirs_archived'] += 1
++                ))
++
++        if pending and self.archive_threshold_percent is not None:
++            incoming = sum(self._tree_bytes(e.path) for e in pending)
++            quota = self.enforce_archive_quota(incoming_bytes=incoming)
++            result['archive_quota'] = quota
++            if not quota['fits']:
++                logger.warning("Archive drive has no room for the pending raw "
++                               "days; leaving them on primary")
++                return result
++
++        for entry in pending:
++            freed = self._archive_entry(entry)
++            result['bytes_freed'] += freed
++            result['dirs_archived'] += 1
+ 
+         if result['dirs_archived'] > 0:
+             logger.info(
+@@ -438,8 +585,11 @@ class QuotaManager:
+         # Step 1: proactive retention trim of derived data
+         retention_result = self.enforce_retention()
+ 
+-        # Step 2: archive completed raw days to external storage
++        # Step 2: archive completed raw days to external storage (makes room
++        # on the archive drive first when archive_threshold_percent is set)
+         archive_result = self.archive_raw()
++        if 'archive_quota' not in archive_result:
++            self.enforce_archive_quota()
+ 
+         # Step 3: threshold-based cleanup
+         used, total, percent = self.get_disk_usage()
