@@ -32284,7 +32284,8 @@ def main() -> int:
 
     if args.command == 'archive':
         verb = getattr(args, 'archive_command', None) or 'status'
-        if verb in ('add', 'remove') and not getattr(args, 'dry_run', False) \
+        if verb in ('add', 'remove', 'eject', 'test', 'health-refresh') \
+                and not getattr(args, 'dry_run', False) \
                 and _need_root(f'archive {verb}'):
             return 1
         from sigmond.commands.archive import cmd_archive
