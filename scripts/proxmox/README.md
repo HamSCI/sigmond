@@ -117,7 +117,7 @@ named in an alarm at once.
 To take a snapshot the reaper will clean up:
 
 ```bash
-pm-storage.py snapshot <vmid> <name> [--hours N]
+pm-storage.py snapshot <vmid> <name> [--hours N] [--include-data-disks]
 ```
 
 It refuses (exit 3) when the pool sits at 70 % or more, or when the pool's

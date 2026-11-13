@@ -583,6 +583,30 @@ def _report_body(host, now, state, items, pools_state, unmeasured) -> int:
     return rc
 
 
+_DISK_KEY = re.compile(r"^(scsi|virtio|sata|ide)(\d+)$")
+
+
+def data_disks(qm_config_text: str) -> list:
+    """The VM's disks other than its boot disk: data disks a whole-VM
+    snapshot would pin (data-volume design 2026-11-08).  The boot disk is the
+    first disk in `boot: order=`, else `bootdisk:`, else scsi0.  CD-ROMs,
+    cloud-init, EFI and TPM state are not disks here."""
+    disks, boot = [], None
+    for ln in qm_config_text.splitlines():
+        key, _, val = ln.partition(":")
+        key, val = key.strip(), val.strip()
+        if key == "boot" and "order=" in val:
+            for item in val.split("order=", 1)[1].split(",")[0].split(";"):
+                if _DISK_KEY.match(item.strip()):
+                    boot = boot or item.strip()
+        elif key == "bootdisk" and not boot:
+            boot = val
+        elif _DISK_KEY.match(key) and "media=cdrom" not in val and "cloudinit" not in val:
+            disks.append(key)
+    boot = boot or ("scsi0" if "scsi0" in disks else (disks[0] if disks else None))
+    return [d for d in disks if d != boot]
+
+
 def _refuse(msg: str) -> int:
     print(f"pm-storage: snapshot refused: {msg}", file=sys.stderr)
     return 3
@@ -597,7 +621,7 @@ def _vm_running(host, vmid: int) -> bool:
 
 
 def _snapshot(host, vmid: int, name: str, hours: Optional[float],
-              live: bool = False) -> int:
+              live: bool = False, include_data_disks: bool = False) -> int:
     if hours is not None and not hours > 0:
         print("pm-storage: --hours must be positive", file=sys.stderr)
         return 2
@@ -608,6 +632,12 @@ def _snapshot(host, vmid: int, name: str, hours: Optional[float],
     except Exception as exc:                        # noqa: BLE001
         print(f"pm-storage: cannot read VM {vmid}: {exc}", file=sys.stderr)
         return 2
+    extra = data_disks(cfg)
+    if extra and not include_data_disks:
+        return _refuse(f"VM {vmid} has a data disk ({', '.join(extra)}); a qm snapshot pins "
+                       f"its blocks in the pool until deleted.  Protect the system disk with "
+                       f"`vzdump {vmid} --mode snapshot` (it leaves backup=0 disks out), or pass "
+                       f"--include-data-disks for a snapshot you will delete within hours")
     where = pool_for_vm(cfg, smap)
     if where is None:
         return _refuse(f"VM {vmid} sits on no lvmthin pool this tool can measure")
@@ -861,13 +891,16 @@ def main(argv=None, host=None) -> int:
     sp.add_argument("--hours", type=float, default=None)
     sp.add_argument("--live", action="store_true",
                     help="leave radiod running (it may silently lose ~0.1-0.2 s of samples)")
+    sp.add_argument("--include-data-disks", action="store_true",
+                    help="snapshot even with a data disk attached (it pins the data disk's blocks)")
     args = ap.parse_args(argv)
     if host is None:
         host = RealHost()
         signal.signal(signal.SIGTERM, _on_sigterm)
     if args.cmd == "report":
         return _report(host)
-    return _snapshot(host, args.vmid, args.name, args.hours, live=args.live)
+    return _snapshot(host, args.vmid, args.name, args.hours, live=args.live,
+                     include_data_disks=args.include_data_disks)
 
 
 if __name__ == "__main__":

@@ -884,3 +884,51 @@ def test_live_snapshot_skips_the_guest_and_warns(capsys):
     assert pm.main(["snapshot", "100", "a", "--live"], host) == 0
     assert _kinds(host) == ["snapshot"]
     assert "silently" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# a data disk (data-volume design 2026-11-08, "Snapshots still pin the data
+# disk"): no whole-VM qm snapshot while one is attached
+# ---------------------------------------------------------------------------
+
+def test_data_disks_none():
+    cfg = ("boot: order=scsi0;ide2\nscsi0: local-lvm:vm-100-disk-0,size=255G\n"
+           "ide2: none,media=cdrom\nefidisk0: local-lvm:vm-100-disk-1,size=4M\n"
+           "tpmstate0: local-lvm:vm-100-disk-2,size=4M\nide0: local-lvm:vm-100-cloudinit,media=cdrom\n")
+    assert pm.data_disks(cfg) == []
+
+
+def test_data_disks_scsi1():
+    cfg = ("boot: order=scsi0\nscsi0: local-lvm:vm-101-disk-0,size=32G\n"
+           "scsi1: local-lvm:vm-101-disk-1,backup=0,discard=on,size=240G,ssd=1\n")
+    assert pm.data_disks(cfg) == ["scsi1"]
+
+
+def test_boot_disk_from_boot_order():
+    cfg = ("boot: order=virtio0;net0\nvirtio0: local-lvm:vm-1-disk-0,size=8G\n"
+           "scsi0: local-lvm:vm-1-disk-1,size=8G\n")
+    assert pm.data_disks(cfg) == ["scsi0"]
+
+
+def test_usb_and_hostpci_are_not_disks():
+    cfg = ("scsi0: local-lvm:vm-1-disk-0,size=8G\nusb0: host=0bc2:2344\n"
+           "hostpci0: 0000:05:00.3\nsata0: local-lvm:vm-1-disk-1,size=8G\n")
+    assert pm.data_disks(cfg) == ["sata0"]
+
+
+def test_snapshot_refused_with_data_disk(capsys):
+    host = _fake_host(pool_pct=40)
+    base = host.qm_config
+    host.qm_config = lambda vmid: base(vmid) + "scsi1: local-lvm:vm-100-disk-9,backup=0,size=240G\n"
+    assert pm.main(["snapshot", "100", "x"], host) == 3
+    assert host.calls_of("snapshot") == []
+    err = capsys.readouterr().err
+    assert "scsi1" in err and "vzdump 100 --mode snapshot" in err
+
+
+def test_snapshot_include_data_disks_flag_allows():
+    host = _fake_host(pool_pct=40)
+    base = host.qm_config
+    host.qm_config = lambda vmid: base(vmid) + "scsi1: local-lvm:vm-100-disk-9,backup=0,size=240G\n"
+    assert pm.main(["snapshot", "100", "x", "--include-data-disks", "--live"], host) == 0
+    assert len(host.calls_of("snapshot")) == 1
