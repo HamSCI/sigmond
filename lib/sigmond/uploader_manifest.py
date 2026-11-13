@@ -346,18 +346,25 @@ class _Proxied:
     carrier: str
     direct: str
     call_attr: str
-    enabled_attr: str
 
 
 PROXIED_SERVICES = (
     _Proxied(flag="forward_to_wsprnet",
              carrier="wspr-wsprdaemon", direct="wspr-wsprnet",
-             call_attr="wsprnet_call", enabled_attr="wsprnet_proxy"),
+             call_attr="wsprnet_call"),
 )
+
+_WARNED_PROXY_RETIRED = False
 
 
 def apply_proxying(pipelines: list, coord: Coordination) -> list:
-    """Hand an upstream to the WD servers: flag the tar, drop the direct post.
+    """Hand wsprnet posting to the WD servers: flag the tar, drop the direct post.
+
+    Every station does this.  Its WSPR spots already travel in the
+    wsprdaemon tar, and wsprdaemon.org forwards a copy to wsprnet.org
+    under each spot's own reporter id.  The old [station] wsprnet_proxy
+    key is retired: a set value draws one warning per process and changes
+    nothing.
 
     ⛔ THE TWO HALVES MUST MOVE TOGETHER, AND ONLY TOGETHER.  Dropping the
     direct pipeline without flagging the tar leaves nobody posting: the
@@ -368,23 +375,30 @@ def apply_proxying(pipelines: list, coord: Coordination) -> list:
     direct one and says so at ERROR.  A station that keeps posting for
     itself is merely not saving bandwidth; the other way round loses data.
 
-    ⚠ Proxying OFF emits nothing rather than ``false``.  Absent means
-    "leave the per-spot field alone" to the server, and hs-uploader writes
-    that field 0 when unset, so switching off still switches off — while
-    an explicit ``false`` from every station in the fleet would be a
-    statement none of them made.
+    ⚠ No ``false`` ever renders.  The flag reads true on every station
+    that carries the tar, so there is no per-station "off" to express.
     """
+    global _WARNED_PROXY_RETIRED
+    if getattr(coord.station, "wsprnet_proxy", False) \
+            and not _WARNED_PROXY_RETIRED:
+        _WARNED_PROXY_RETIRED = True
+        logger.warning(
+            "uploader-manifest: [station] wsprnet_proxy is retired and "
+            "ignored — every station's WSPR spots reach wsprnet.org "
+            "through wsprdaemon.org")
     out = list(pipelines)
     for svc in PROXIED_SERVICES:
-        if not getattr(coord.station, svc.enabled_attr, False):
-            continue
         carrier = next((p for p in out if p.get("name") == svc.carrier), None)
         if carrier is None or not isinstance(carrier.get("transport"), dict):
+            if not any(p.get("name") == svc.direct for p in out):
+                # Nothing to keep: a station that renders neither pipeline
+                # (no wspr-recorder, no wspr-wsprnet) has nothing to refuse.
+                continue
             logger.error(
-                "uploader-manifest: [station] %s is set but the %s pipeline "
-                "is not being rendered — keeping %s so this station still "
-                "posts for itself; nothing would post otherwise",
-                svc.enabled_attr, svc.carrier, svc.direct)
+                "uploader-manifest: the %s pipeline is not being rendered "
+                "— keeping %s so this station still posts for itself; "
+                "nothing would post otherwise",
+                svc.carrier, svc.direct)
             continue
         transport = dict(carrier["transport"])
         transport[svc.flag] = True
@@ -415,7 +429,7 @@ def apply_proxying(pipelines: list, coord: Coordination) -> list:
         before = len(out)
         out = [p for p in out if p.get("name") != svc.direct]
         logger.info("uploader-manifest: %s proxied by the WD servers — "
-                    "%s flagged, %s %s", svc.enabled_attr, svc.carrier,
+                    "%s flagged, %s %s", svc.flag, svc.carrier,
                     svc.direct,
                     "dropped" if len(out) < before else "was not present")
     return out
@@ -1290,6 +1304,13 @@ def drop_server_delivered_pipelines(pipelines: list, producers: set,
     split one shared pipeline serves both producers; it goes only when
     both do."""
     if not producers:
+        return pipelines
+    if not any(p.get("name") == MERGE_CARRIER for p in pipelines):
+        for producer in sorted(producers):
+            logger.error(
+                "uploader-manifest: %s delivers via the WD servers but no "
+                "wspr-wsprdaemon pipeline carries its rows — keeping its "
+                "direct pipeline; enable wspr-recorder", producer)
         return pipelines
     drop = set()
     if store_version >= SPLIT_STORE_VERSION:

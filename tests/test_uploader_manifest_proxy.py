@@ -1,13 +1,14 @@
-"""[station] wsprnet_proxy: hand wsprnet posting to the WD servers.
+"""Every station's WSPR spots reach wsprnet.org through wsprdaemon.org.
 
-The spots already travel in the wsprdaemon tar, so the station's second
-upload stops existing.  Measured on AC0G/B4: 24.8 -> 5.8 MB/day, and a
-500-spot/day site currently spends ~13 kB of its link per spot delivered
-because every cycle opens a fresh TLS connection.
+The spots already travel in the wsprdaemon tar, so the manifest always
+flags that tar ``forward_to_wsprnet`` and never renders the station's own
+wspr-wsprnet pipeline.  The old [station] wsprnet_proxy key is retired and
+ignored.
 
-The property that matters most here is NOT the saving — it is that the
-two halves move together.  Dropping the direct pipeline without flagging
-the tar leaves nobody posting at all, and nothing reports an error.
+The property that matters most is that the two halves move together.
+Dropping the direct pipeline without a tar to carry the spots leaves
+nobody posting, and nothing reports an error.  So a missing carrier keeps
+the direct pipeline and logs an ERROR.
 
 Run with:  .venv/bin/pytest tests/test_uploader_manifest_proxy.py -v
 """
@@ -22,9 +23,9 @@ from sigmond.coordination import Coordination, Host, Station  # noqa: E402
 from sigmond.uploader_manifest import apply_proxying          # noqa: E402
 
 
-def _coord(*, proxy=False, call="", grid="EM38ww"):
+def _coord(*, proxy_key=None, call="", grid="EM38ww"):
     return Coordination(host=Host(call="AC0G/B4", grid=grid),
-                        station=Station(wsprnet_proxy=proxy,
+                        station=Station(wsprnet_proxy=bool(proxy_key),
                                         reporter_id="AC0G/B4",
                                         wsprnet_call=call))
 
@@ -44,46 +45,54 @@ def _names(ps):
     return [p["name"] for p in ps]
 
 
-def test_off_by_default_changes_NOTHING():
-    """⛔ Every station in the fleet renders this manifest.  If the default
-    touched a byte, enabling proxying would be a flag day for 85 sites
-    instead of a per-operator decision."""
-    out = apply_proxying(_pipes(), _coord(proxy=False))
-    assert out == _pipes()
-
-
-def test_off_emits_NOTHING_not_false():
-    """Absent means 'leave the per-spot field alone' to the server, and
-    hs-uploader writes that field 0 when unset — so off still switches
-    off, without every station asserting something it never said."""
-    out = apply_proxying(_pipes(), _coord(proxy=False))
-    tar = next(p for p in out if p["name"] == "wspr-wsprdaemon")
-    assert "forward_to_wsprnet" not in tar["transport"]
-
-
-def test_on_flags_the_tar_and_drops_the_direct_post():
-    out = apply_proxying(_pipes(), _coord(proxy=True))
+def test_every_station_flags_the_tar_and_drops_wsprnet():
+    out = apply_proxying(_pipes(), _coord())
     assert "wspr-wsprnet" not in _names(out)
-    assert "psk-recorder-pskreporter" in _names(out)   # untouched
     tar = next(p for p in out if p["name"] == "wspr-wsprdaemon")
     assert tar["transport"]["forward_to_wsprnet"] is True
 
 
-def test_A_MISSING_CARRIER_KEEPS_THE_DIRECT_PIPELINE():
+def test_wsprnet_proxy_false_is_ignored():
+    out = apply_proxying(_pipes(), _coord(proxy_key=False))
+    assert "wspr-wsprnet" not in _names(out)
+
+
+def test_a_set_wsprnet_proxy_warns_once_per_process(caplog, monkeypatch):
+    import logging
+    from sigmond import uploader_manifest as um
+    monkeypatch.setattr(um, "_WARNED_PROXY_RETIRED", False)
+    with caplog.at_level(logging.WARNING):
+        apply_proxying(_pipes(), _coord(proxy_key=True))
+        apply_proxying(_pipes(), _coord(proxy_key=True))
+    hits = [r for r in caplog.records if "wsprnet_proxy" in r.getMessage()
+            and "retired" in r.getMessage()]
+    assert len(hits) == 1 and hits[0].levelname == "WARNING"
+
+
+def test_the_other_pipelines_stay_untouched():
+    out = apply_proxying(_pipes(), _coord())
+    assert "psk-recorder-pskreporter" in _names(out)
+
+
+def test_A_MISSING_CARRIER_KEEPS_THE_DIRECT_PIPELINE(caplog):
     """⛔⛔ THE ONE THAT LOSES DATA.  If the tar pipeline is not being
     rendered — client disabled, pipeline renamed, deploy.toml changed —
     dropping the direct post leaves NOBODY posting: the station stops, the
     server never starts, and spots just stop appearing on wsprnet with no
     error anywhere.  Keeping the direct post merely forfeits the saving."""
     pipes = [p for p in _pipes() if p["name"] != "wspr-wsprdaemon"]
-    out = apply_proxying(pipes, _coord(proxy=True))
+    import logging
+    with caplog.at_level(logging.ERROR):
+        out = apply_proxying(pipes, _coord())
     assert "wspr-wsprnet" in _names(out), "must keep posting for itself"
+    assert any(r.levelname == "ERROR" and "wspr-wsprdaemon" in r.getMessage()
+               for r in caplog.records)
 
 
 def test_a_malformed_carrier_also_keeps_the_direct_pipeline():
     pipes = [{"name": "wspr-wsprdaemon", "transport": None},
              {"name": "wspr-wsprnet", "transport": {"type": "wsprnet"}}]
-    out = apply_proxying(pipes, _coord(proxy=True))
+    out = apply_proxying(pipes, _coord())
     assert "wspr-wsprnet" in _names(out)
 
 
@@ -98,7 +107,7 @@ def test_SWITCHING_TO_THE_PROXY_CANNOT_MOVE_THE_CREDIT(caplog):
     rx_sign, which IS the reporter id the direct pipeline used, so the
     switch cannot change who gets credited."""
     import logging
-    out = apply_proxying(_pipes(), _coord(proxy=True, call="AC0G"))
+    out = apply_proxying(_pipes(), _coord(call="AC0G"))
     tar = next(p for p in out if p["name"] == "wspr-wsprdaemon")
     assert "wsprnet_reporter_call" not in tar["transport"]
     assert "wsprnet_reporter_grid" not in tar["transport"]
@@ -109,7 +118,7 @@ def test_a_contradictory_wsprnet_call_is_reported_not_obeyed(caplog):
     the operator believing it does something."""
     import logging
     with caplog.at_level(logging.WARNING):
-        apply_proxying(_pipes(), _coord(proxy=True, call="AC0G"))
+        apply_proxying(_pipes(), _coord(call="AC0G"))
     msgs = [r.getMessage() for r in caplog.records]
     assert any("wsprnet_call" in m and "AC0G/B4" in m for m in msgs), msgs
 
@@ -117,14 +126,14 @@ def test_a_contradictory_wsprnet_call_is_reported_not_obeyed(caplog):
 def test_a_matching_wsprnet_call_says_nothing(caplog):
     import logging
     with caplog.at_level(logging.WARNING):
-        apply_proxying(_pipes(), _coord(proxy=True, call="AC0G/B4"))
+        apply_proxying(_pipes(), _coord(call="AC0G/B4"))
     assert not [r for r in caplog.records
                 if "wsprnet_call" in r.getMessage()]
 
 
 def test_proxying_does_not_mutate_the_caller_s_pipelines():
     pipes = _pipes()
-    apply_proxying(pipes, _coord(proxy=True))
+    apply_proxying(pipes, _coord())
     assert _names(pipes) == ["wspr-wsprdaemon", "wspr-wsprnet",
                              "psk-recorder-pskreporter"]
     assert "forward_to_wsprnet" not in pipes[0]["transport"]

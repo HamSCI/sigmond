@@ -45,9 +45,9 @@ def _pipes():
     ]
 
 
-def _coord(grid="CN87"):
+def _coord(grid="CN87", **station):
     return Coordination(host=Host(call="KFS/SE", grid=grid),
-                        station=Station(reporter_id="KFS/SE"))
+                        station=Station(reporter_id="KFS/SE", **station))
 
 
 class _Topo:
@@ -219,6 +219,25 @@ def test_collect_pipelines_carries_the_merge(monkeypatch, tmp_path, units):
     t = out[0]["transport"]
     assert t["wsprnet_reporter_call"] == "KFS"
     assert t["psk_reporter_grid"] == "CN87"
+
+
+def test_a_merged_proxied_station_renders_as_before(monkeypatch, tmp_path,
+                                                    units):
+    deploy = tmp_path / "deploy.toml"
+    deploy.write_text(
+        '[[hs_uploader.pipeline]]\nname = "wspr-wsprdaemon"\n'
+        '[hs_uploader.pipeline.transport]\ntype = "wsprdaemon_tar"\n'
+        '[[hs_uploader.pipeline]]\nname = "wspr-wsprnet"\n'
+        '[hs_uploader.pipeline.transport]\ntype = "wsprnet"\n')
+    monkeypatch.setattr(um, "find_deploy_toml", lambda c: deploy)
+    rx = [_rx("KFS/SE", merge_into="KFS"), _rx("KFS/NW", B, merge_into="KFS")]
+    out = um.collect_pipelines(_Topo(["wspr-recorder"]), _coord(),
+                               store_version=99, receivers=rx)
+    assert [p["name"] for p in out] == ["wspr-wsprdaemon"]
+    assert out[0]["transport"] == {
+        "type": "wsprdaemon_tar", "forward_to_wsprnet": True,
+        "wsprnet_reporter_call": "KFS", "wsprnet_reporter_grid": "CN87",
+        "psk_reporter_call": "KFS", "psk_reporter_grid": "CN87"}
 
 
 def test_collect_pipelines_unmerged_emits_no_key(monkeypatch, tmp_path):

@@ -112,6 +112,15 @@ class DropServerDelivered(unittest.TestCase):
             pipes, {'psk-recorder', 'meteor-scatter'}, store_version=1)
         self.assertEqual(self.names(both), ['wspr-wsprdaemon'])
 
+    def test_no_carrier_keeps_the_direct_psk_pipelines(self):
+        pipes = [{'name': PSK_OWN}, {'name': MS_OWN}]
+        with self.assertLogs('sigmond.uploader_manifest', 'ERROR') as cm:
+            out = um.drop_server_delivered_pipelines(
+                pipes, {'psk-recorder', 'meteor-scatter'},
+                store_version=um.SPLIT_STORE_VERSION)
+        self.assertEqual([p['name'] for p in out], [PSK_OWN, MS_OWN])
+        self.assertIn('wspr-wsprdaemon', '\n'.join(cm.output))
+
     def test_nothing_server_delivered_changes_nothing(self):
         out = um.drop_server_delivered_pipelines(
             self.PIPES, set(), store_version=um.SPLIT_STORE_VERSION)
