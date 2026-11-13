@@ -132,8 +132,25 @@ def set_env_flag(path: Path, key: str, value: str) -> None:
     rewrite_owned(path, edit, mode=None, keep_owner=True)
 
 
+def sink_level(client: str, reader=None) -> "str | None":
+    """The client's effective sink state (upload, fill, off ...), read with
+    sink_state's own reader; None when it cannot be read."""
+    try:
+        if reader is None:
+            from . import sink_state
+            reader = sink_state.read_state
+        state = reader()
+        if state is None:
+            return None
+        c = state.clients.get(client)
+        return None if c is None else c.effective
+    except Exception:
+        return None
+
+
 def apply_enable(client: str, instance: str, on: bool, base: str = "/etc",
-                 delivery: "str | None" = None):
+                 delivery: "str | None" = None,
+                 hold_level: "str | None" = None):
     """Flip the upload enable flag for one instance.  Returns
     (env_path, flag, destinations, delivery_set) where delivery_set is
     ``(env_key, value)`` if a delivery pipeline was also written, else None.
@@ -142,7 +159,11 @@ def apply_enable(client: str, instance: str, on: bool, base: str = "/etc",
     DELIVERY_ON_ENABLE), the pipeline is set to the standard server route.
     Disabling leaves the pipeline untouched.  Raises KeyError for an unknown
     client, DirectRouteRefused for a direct ``delivery`` (nothing written),
-    ValueError for any other invalid ``delivery`` choice."""
+    ValueError for any other invalid ``delivery`` choice.
+
+    ``hold_level`` is the client's effective sink state when known.  Below
+    ``upload`` it is a sink lever's turn: the flag is written and the
+    delivery key stays as it stands (delivery_set is None)."""
     if client not in UPLOAD_ENABLE:
         raise KeyError(client)
     if delivery in REFUSED_VIA.get(client, ()):
@@ -156,6 +177,8 @@ def apply_enable(client: str, instance: str, on: bool, base: str = "/etc",
     if on and client in DELIVERY_ON_ENABLE:
         dkey, ddefault, dchoices = DELIVERY_ON_ENABLE[client]
         val = delivery or ddefault
+        if hold_level is not None and hold_level != "upload":
+            val = None
         if val is not None:
             if val not in dchoices:
                 raise ValueError(

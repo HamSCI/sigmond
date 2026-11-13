@@ -224,7 +224,8 @@ def gather_upload_rows() -> list:
             delivery = ""
             if client in DELIVERY_ON_ENABLE:
                 dkey, ddefault, _choices = DELIVERY_ON_ENABLE[client]
-                delivery = read_flag(path, dkey) or ddefault
+                delivery = read_flag(path, dkey) or (
+                    "direct" if client == "meteor-scatter" else ddefault)
             rows.append(UploadRow(client=client, reporter_id=inst.reporter_id,
                                   enabled=is_truthy(val), delivery=delivery))
     return rows

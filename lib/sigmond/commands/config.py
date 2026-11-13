@@ -2159,9 +2159,15 @@ def cmd_config_upload(args) -> int:
         err("an instance is required to change the flag, e.g. "
             f"`smd config upload {client} AC0G/S --on`")
         return 1
+    hold = None
+    if on and delivery_knob:
+        hold = upload.sink_level(client)
+        if hold == "upload":
+            hold = None
     try:
+        kw = {"hold_level": hold} if hold else {}
         path, flag, dests, delivery_set = upload.apply_enable(
-            client, instance, on, delivery=via)
+            client, instance, on, delivery=via, **kw)
     except upload.DirectRouteRefused as e:
         err(str(e))
         return 1
@@ -2184,9 +2190,19 @@ def cmd_config_upload(args) -> int:
         info(f"delivery: {dkey}={dval}"
              + "  (wsprdaemon.org forwards it)")
     info(f"wrote {path}")
+    if hold and client in upload.STANDARD_ROUTE:
+        cur = upload.read_flag(path, upload.STANDARD_ROUTE[client][0])
+        info(f"{client}: delivery stays {cur if cur is not None else 'unset'} "
+             f"while the sink reads {hold}; `smd sink upload` moves it to "
+             f"the wsprdaemon.org route")
+    carrier = None
     if on and client in upload.STANDARD_ROUTE:
-        from ..topology import load_topology
-        if "wspr-recorder" not in load_topology().enabled_components():
+        try:
+            from ..topology import load_topology
+            carrier = "wspr-recorder" in load_topology().enabled_components()
+        except Exception as e:
+            warn(f"cannot read the topology to check for wspr-recorder: {e}")
+        if carrier is False:
             err(f"no wspr-recorder is enabled on this host, so nothing "
                 f"carries {client}'s spots to wsprdaemon.org; "
                 f"run: smd enable wspr-recorder")

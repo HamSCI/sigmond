@@ -31779,7 +31779,7 @@ def _build_parser() -> argparse.ArgumentParser:
     g.add_argument('--on', action='store_true', help='enable upload for the instance')
     g.add_argument('--off', action='store_true', help='disable upload for the instance')
     p.add_argument('--via',
-                   choices=['direct', 'server-merge', 'server-raw', 'deposit', 'off'],
+                   choices=['direct', 'server-merge', 'server-raw', 'both', 'deposit', 'off'],
                    help='delivery when enabling: server-merge (psk-recorder) or '
                         'deposit (meteor-scatter), the defaults.  direct, '
                         'server-raw and off are refused: wsprdaemon.org '
