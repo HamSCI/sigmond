@@ -221,7 +221,9 @@ def migrate_routing(topology, *, lowered: Optional[frozenset],
             if client in lowered:
                 res.lowered.append((unit, _effective(client, env)))
                 continue
-            if not is_truthy(env.get(flag)):
+            # psk-recorder reads PSK_USE_HS_UPLOADER nowhere: at 0 it still
+            # posts directly, so only meteor-scatter honours its flag here.
+            if client != "psk-recorder" and not is_truthy(env.get(flag)):
                 res.upload_off.append(unit)
                 continue
             if not carrier:

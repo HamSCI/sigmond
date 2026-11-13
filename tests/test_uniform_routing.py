@@ -198,17 +198,25 @@ def test_no_carrier_leaves_every_instance_and_says_error(rig):
     assert res.ok is False
 
 
-def test_upload_off_instance_is_left_alone(rig):
+def test_psk_instance_with_flag_at_zero_is_routed(rig):
+    # psk-recorder reads PSK_USE_HS_UPLOADER nowhere: at 0 it still posts directly.
+    rig.env("psk-recorder", "AC0G-S", PSK_USE_HS_UPLOADER="0",
+            PSK_DELIVERY_PIPELINES="direct")
+    res = rig.run(ALL, lowered=frozenset())
+    assert "PSK_DELIVERY_PIPELINES=server-merge" in rig.text(
+        "psk-recorder", "AC0G-S")
+    assert res.upload_off == []
+    assert [c[0] for c in res.changed] == ["psk-recorder@AC0G-S.service"]
+
+
+def test_psk_instance_with_flag_at_zero_stays_when_lowered(rig):
     rig.env("psk-recorder", "AC0G-S", PSK_USE_HS_UPLOADER="0",
             PSK_DELIVERY_PIPELINES="direct")
     before = rig.text("psk-recorder", "AC0G-S")
-    res = rig.run(ALL, lowered=frozenset())
+    res = rig.run(ALL, lowered=frozenset({"psk-recorder"}))
     assert rig.text("psk-recorder", "AC0G-S") == before
-    assert rig.restarts == []
-    assert res.upload_off == ["psk-recorder@AC0G-S.service"]
-    assert res.lines() == [
-        "routing: left alone psk-recorder@AC0G-S.service (its upload is off)"]
-    assert res.ok
+    assert rig.restarts == [] and res.changed == []
+    assert [u for u, _ in res.lowered] == ["psk-recorder@AC0G-S.service"]
 
 
 def test_unreadable_env_is_named_and_untouched(rig):

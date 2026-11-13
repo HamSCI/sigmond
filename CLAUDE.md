@@ -417,12 +417,15 @@ flags.  So sigmond keeps setting the flags: `forward_to_wsprnet` on the tar,
 and `forward_to_pskreporter` on each psk and MSK row, which psk-recorder sets
 under `server-merge` and meteor-scatter under `deposit`.
 
-⚠ wspr-recorder's own uploader (`hs_uploader_shim.py`, armed by
+wspr-recorder's own uploader (`hs_uploader_shim.py`, armed by
 `WSPR_USE_HS_UPLOADER=1`, which `smd config upload wspr-recorder <id> --on`
-writes) builds its pipelines from its environment, not from the manifest.
-It still builds a direct `wsprnet` pipeline whenever the sink exists, so a
-station running it still posts WSPR to wsprnet.org itself.  Its cycle line
-then shows `wsprnet=N`.  `apply_proxying` cannot reach it.
+writes) no longer posts to wsprnet.org. It ships only the wsprdaemon tar, with
+`forward_to_wsprnet` set, and its FTP fallback does the same
+(wspr-recorder cb2c54c). The gap closed there.
+
+The recorder still prints `wsprnet=0` in its cycle line. `smd watch uploads`
+reads that field with a regex that needs the field present (`bin/smd`, grep
+`wsprnet=(`), so dropping the field would blind the watcher.
 
 Server side (the `proxy_upload` column, the forwarder, the batching window):
 `rrobinett/wsprdaemon-server`, CLAUDE.md § "wsprnet.org forwarder".
