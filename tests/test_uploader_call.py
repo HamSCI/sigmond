@@ -64,7 +64,7 @@ def test_unset_writes_nothing(tmp_path):
 
 def test_the_station_writer_keeps_operator_decisions(tmp_path):
     """write_station_identity rewrites [station]; it must not drop the
-    machine's name, nor wsprnet_proxy (which it used to drop)."""
+    machine's name.  An old wsprnet_proxy key is retired and dropped."""
     coord_path = tmp_path / "coordination.toml"
     coord_path.write_text('[host]\ncall = "KFS"\n\n[station]\n'
                           'reporter_id = "KFS/MAIN"\nuploader_call = "KFS-MAIN"\n'
@@ -73,7 +73,7 @@ def test_the_station_writer_keeps_operator_decisions(tmp_path):
     st = load_coordination(coord_path).station
     assert st.reporter_id == "KFS/OMNI"
     assert st.uploader_call == "KFS-MAIN"
-    assert st.wsprnet_proxy is True
+    assert st.wsprnet_proxy is False
 
 
 def test_set_reporters_keys_edits_only_its_keys():
@@ -108,7 +108,7 @@ def test_config_reporters_dry_run(tmp_path, monkeypatch, capsys):
         uploader_call="kfs-main", wsprnet_proxy="on", dry_run=True, no_render=True))
     assert rc == 0
     out = capsys.readouterr().out
-    assert 'uploader_call = "KFS-MAIN"' in out and "wsprnet_proxy = true" in out
+    assert 'uploader_call = "KFS-MAIN"' in out and "wsprnet_proxy" not in out
     assert "uploader_call" not in prof.read_text()      # dry run wrote nothing
 
 
@@ -121,3 +121,73 @@ def test_config_reporters_refuses_a_bad_name(tmp_path, monkeypatch):
     rc = cfg.cmd_config_reporters(types.SimpleNamespace(
         uploader_call="KFS MAIN; rm", wsprnet_proxy=None, dry_run=True, no_render=True))
     assert rc == 1
+
+
+# ---- wsprnet_proxy retired (2026-11-13) ------------------------------------
+
+def _profile_at(tmp_path, monkeypatch, extra=""):
+    from sigmond.commands import config as cfg
+    prof = tmp_path / "site-profile.toml"
+    prof.write_text('[station]\ncallsign = "KFS"\ngrid_square = "CM87tj"\n\n'
+                    '[reporters]\nuploader_call = "X"\n' + extra)
+    monkeypatch.setattr(cfg, "SITE_PROFILE_PATH", prof)
+    return cfg, prof
+
+
+def test_reporters_wsprnet_proxy_writes_nothing_and_says_why(tmp_path, monkeypatch, capsys):
+    cfg, prof = _profile_at(tmp_path, monkeypatch)
+    before = prof.read_bytes()
+    rc = cfg.cmd_config_reporters(SimpleNamespace(
+        uploader_call=None, wsprnet_proxy="on", dry_run=False, no_render=True))
+    cap = capsys.readouterr()
+    assert rc == 0
+    assert prof.read_bytes() == before
+    assert "wsprnet_proxy is retired" in cap.out + cap.err or \
+        "--wsprnet-proxy is retired" in cap.out + cap.err
+    assert "wsprdaemon.org" in cap.out + cap.err
+
+
+def test_reporters_wsprnet_proxy_beside_uploader_call_writes_only_the_name(
+        tmp_path, monkeypatch):
+    cfg, prof = _profile_at(tmp_path, monkeypatch)
+    rc = cfg.cmd_config_reporters(SimpleNamespace(
+        uploader_call="kfs-main", wsprnet_proxy="on", dry_run=False, no_render=True))
+    assert rc == 0
+    text = prof.read_text()
+    assert 'uploader_call = "KFS-MAIN"' in text
+    assert "wsprnet_proxy" not in text
+
+
+def test_render_never_writes_wsprnet_proxy(tmp_path):
+    from sigmond.commands.config import _patch_station_block
+    coord_path = tmp_path / "coordination.toml"
+    coord_path.write_text('[host]\ncall = "KFS"\n\n')
+    _patch_station_block(coord_path, Station(reporter_id="KFS/MAIN",
+                                             wsprnet_proxy=True))
+    assert "wsprnet_proxy" not in coord_path.read_text()
+
+
+def test_write_station_identity_drops_an_old_wsprnet_proxy(tmp_path):
+    coord_path = tmp_path / "coordination.toml"
+    coord_path.write_text('[host]\ncall = "AC0G"\n\n[station]\n'
+                          'reporter_id = "AC0G/B4"\nwsprnet_proxy = true\n')
+    write_station_identity(reporter_id="AC0G/B4", path=coord_path)
+    assert "wsprnet_proxy" not in coord_path.read_text()
+
+
+def test_render_warns_once_about_a_profile_wsprnet_proxy(tmp_path, monkeypatch, capsys):
+    from sigmond import site_profile as sp
+    cfg, prof = _profile_at(tmp_path, monkeypatch, "wsprnet_proxy = true\n")
+    monkeypatch.setattr(sp, "SITE_PROFILE_PATH", prof)
+    monkeypatch.setattr(cfg, "COORDINATION_PATH", tmp_path / "coordination.toml")
+    monkeypatch.setattr(cfg, "COORDINATION_ENV", tmp_path / "coordination.env")
+    cfg.cmd_config_render(SimpleNamespace(init=False, if_present=False, dry_run=True))
+    cap = capsys.readouterr()
+    hits = [ln for ln in (cap.out + cap.err).splitlines() if "wsprnet_proxy" in ln]
+    assert len(hits) == 1
+    assert "retired" in hits[0] and "delete" in hits[0].lower()
+
+
+def test_profile_template_has_no_wsprnet_proxy():
+    from sigmond import site_profile
+    assert "wsprnet_proxy" not in site_profile.TEMPLATE

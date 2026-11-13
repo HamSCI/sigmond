@@ -44,17 +44,7 @@ class Station:
     reporter_id: str = ""
     wsprnet_call: str = ""
     pskreporter_call: str = ""
-    # Ask the WsprDaemon servers to post this station's WSPR spots to
-    # wsprnet.org on its behalf, instead of this station posting them
-    # itself.  The spots already travel in the wsprdaemon tar, so the
-    # second upload stops existing: measured 24.8 -> 5.8 MB/day on a real
-    # station, and a small site currently spends ~13 kB of its link per
-    # spot delivered because every cycle opens a fresh TLS connection.
-    #
-    # ⚠ THIS PUTS THIS STATION'S CALLSIGN ON SOMEONE ELSE'S UPLOADS.
-    # wsprnet will see these spots arrive from a WD server's address under
-    # this operator's call, so it is the operator's decision, never a
-    # default inherited from a site profile.
+    # retired 2026-11-13; read so old files load, ignored
     wsprnet_proxy: bool = False
     # The name this machine uploads under (hs-uploader [identity] call).
     # Operator's choice; blank derives it (uploader_manifest.reporter_call).
@@ -509,10 +499,6 @@ def write_station_identity(reporter_id: str = '',
                      ('uploader_call', cur.uploader_call)):
         if val:
             fields.append(f'{key} = "{val}"')
-    # Operator decisions survive this merge: dropping wsprnet_proxy here
-    # silently put a proxied station back on direct wsprnet posting.
-    if cur.wsprnet_proxy:
-        fields.append('wsprnet_proxy = true')
     if not fields:
         return False
     block = '[station]\n' + '\n'.join(fields) + '\n'

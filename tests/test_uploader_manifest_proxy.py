@@ -184,8 +184,8 @@ def test_the_setting_survives_a_render_round_trip(tmp_path):
     _patch_station_block(coord_path, Station(reporter_id="AC0G/B4",
                                              wsprnet_proxy=True))
     text = coord_path.read_text()
-    assert "wsprnet_proxy = true" in text
-    assert load_coordination(coord_path).station.wsprnet_proxy is True
+    assert "wsprnet_proxy" not in text      # retired 2026-11-13: never written
+    assert load_coordination(coord_path).station.wsprnet_proxy is False
 
 
 def test_a_profile_that_says_nothing_writes_nothing(tmp_path):

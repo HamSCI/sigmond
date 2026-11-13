@@ -31814,14 +31814,14 @@ def _build_parser() -> argparse.ArgumentParser:
                    help='print the profile that would be written')
 
     p = config_sub.add_parser('reporters',
-                              help="set this machine's upload name and the wsprnet "
-                                   'proxy in site-profile.toml [reporters], then render')
+                              help="set this machine's upload name in "
+                                   'site-profile.toml [reporters], then render')
     p.add_argument('--uploader-call', metavar='NAME', dest='uploader_call',
                    help='the name this machine uploads under (e.g. KFS-MAIN); '
                         'empty string clears it so it is derived again')
     p.add_argument('--wsprnet-proxy', choices=['on', 'off'], dest='wsprnet_proxy',
-                   help='on: the WsprDaemon servers post this station\'s WSPR '
-                        'spots to wsprnet.org; off: the station posts them')
+                   help='retired 2026-11-13; writes nothing (every station\'s '
+                        'WSPR spots reach wsprnet.org through wsprdaemon.org)')
     p.add_argument('--no-render', action='store_true', dest='no_render',
                    help='write site-profile.toml only; skip `smd config render`')
     p.add_argument('--dry-run', action='store_true',

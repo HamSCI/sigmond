@@ -61,12 +61,6 @@ instrument_id = ""                 # legacy single id (= hf-timestd/GRAPE's)
 reporter_id      = ""              # WSPR/PSK reporter instance id, e.g. AC0G/S
 wsprnet_call     = ""
 pskreporter_call = ""
-# Let the WsprDaemon servers post this station's WSPR spots to wsprnet.org
-# instead of this station posting them itself.  The spots already travel in
-# the wsprdaemon tar, so the second upload stops existing.
-# ⚠ This puts THIS station's callsign on uploads sent from a WD server's
-# address, so it is the operator's decision, never a site-profile default.
-wsprnet_proxy    = false
 # The name this machine uploads under to wsprdaemon.org (hs-uploader's
 # [identity] call: tar names, heartbeat).  Each report still carries the
 # reporter id of the radiod and antenna it came from.  Blank = derived: the
@@ -141,6 +135,7 @@ class SiteProfile:
     reporter_id: str = ""
     wsprnet_call: str = ""
     pskreporter_call: str = ""
+    # retired 2026-11-13; read so old files load, ignored
     wsprnet_proxy: bool = False
     uploader_call: str = ""
     hostname: str = ""

@@ -486,7 +486,7 @@ instance) narrows the scope.
 | `smd update [--apply] [--latest]` | Plan an update (dry run by default); `--apply` performs it.  `--latest` takes every component to the tip of its main branch and pins the station there; it serves test stations |
 | `smd version` | Each component's commit, against the image and upstream |
 | `smd sink status\|upload\|fill\|off` | The site sink switch: whether this station sends its data |
-| `smd config reporters [--uploader-call NAME] [--wsprnet-proxy on\|off]` | The name this machine uploads under, and whether the WsprDaemon servers post its WSPR spots to wsprnet.org |
+| `smd config reporters [--uploader-call NAME]` | The name this machine uploads under |
 | `smd remote status\|on\|off` | Remote access for the fleet admin |
 
 **Observe & diagnose** — most diagnostics now live under the `admin` group.

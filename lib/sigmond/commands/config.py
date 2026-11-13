@@ -893,9 +893,13 @@ def cmd_config_render(args) -> int:
         reporter_id=profile.effective_reporter_id,
         wsprnet_call=profile.effective_wsprnet_call,
         pskreporter_call=profile.effective_pskreporter_call,
-        wsprnet_proxy=profile.wsprnet_proxy,
+        wsprnet_proxy=False,
         uploader_call=profile.uploader_call,
     )
+    if profile.wsprnet_proxy:
+        warn('site-profile.toml [reporters] wsprnet_proxy is retired and '
+             'ignored: every station\'s WSPR spots reach wsprnet.org through '
+             'wsprdaemon.org.  Delete the key.')
 
     # [heartbeat] (sigmond#task-8) — copied through field-for-field ONLY
     # when site-profile.toml actually declares the block (heartbeat_declared);
@@ -1114,13 +1118,13 @@ def cmd_config_psws(args) -> int:
 
 
 def cmd_config_reporters(args) -> int:
-    """`smd config reporters --uploader-call NAME --wsprnet-proxy on|off`.
+    """`smd config reporters --uploader-call NAME`.
 
     Sets the machine's upload name ([reporters] uploader_call: the operator's
-    choice, e.g. KFS-MAIN for a host decoding four radiods) and whether the
-    WsprDaemon servers post its WSPR spots to wsprnet.org (wsprnet_proxy),
-    in site-profile.toml, then renders.  `--uploader-call ""` clears the name
-    so it is derived again."""
+    choice, e.g. KFS-MAIN for a host decoding four radiods) in
+    site-profile.toml, then renders.  `--uploader-call ""` clears the name
+    so it is derived again.  `--wsprnet-proxy` retired on 2026-11-13: it
+    writes nothing and says so."""
     import tomllib
     from ..site_profile import set_reporters_keys
     keys = {}
@@ -1132,11 +1136,12 @@ def cmd_config_reporters(args) -> int:
             return 1
         keys['uploader_call'] = name or None
     if getattr(args, 'wsprnet_proxy', None) is not None:
-        # Off writes nothing, never `false`: absent is what the chain reads
-        # as unset (see CLAUDE.md, Proxied uploads).
-        keys['wsprnet_proxy'] = True if args.wsprnet_proxy == 'on' else None
+        warn("--wsprnet-proxy is retired and writes nothing: every station's "
+             "WSPR spots reach wsprnet.org through wsprdaemon.org")
+        if not keys:
+            return 0
     if not keys:
-        err('config reporters: name --uploader-call and/or --wsprnet-proxy')
+        err('config reporters: name --uploader-call')
         return 1
     if not SITE_PROFILE_PATH.exists():
         err(f'config reporters: no {SITE_PROFILE_PATH}; create one first '
@@ -1163,7 +1168,7 @@ def cmd_config_reporters(args) -> int:
             return 1
         prof = load_site_profile(SITE_PROFILE_PATH)
         ok(f'updated {SITE_PROFILE_PATH}: uploader_call='
-           f'{prof.uploader_call or "(derived)"} wsprnet_proxy={prof.wsprnet_proxy}')
+           f'{prof.uploader_call or "(derived)"}')
     if getattr(args, 'no_render', False):
         info('not rendered (--no-render); run: smd config render')
         return 0
@@ -1265,12 +1270,6 @@ def _patch_station_block(path: Path, station: Station) -> None:
         body.append(f'pskreporter_call = "{station.pskreporter_call}"')
     if station.uploader_call:
         body.append(f'uploader_call = "{station.uploader_call}"')
-    if station.wsprnet_proxy:
-        # ⛔ Written ONLY when true.  An explicit `false` in every station's
-        # coordination.toml would read as a decision each operator made,
-        # and absent is what the whole chain treats as "unset" — down to
-        # the per-spot field the server leaves alone.
-        body.append('wsprnet_proxy = true')
     body.append('')
 
     if not path.exists():
