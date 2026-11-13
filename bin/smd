@@ -22286,7 +22286,6 @@ def cmd_timestd_tune_storage(args) -> int:
         f'    --threshold {threshold} \\\n'
         f'    --min-days {min_days} \\\n'
         '    --max-derived-days 7 \\\n'
-        '    --archive-root /mnt/timestd-archive \\\n'
         '    -v\n'
     )
 

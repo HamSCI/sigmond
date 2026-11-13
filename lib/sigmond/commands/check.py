@@ -1001,7 +1001,7 @@ def archive_line(env: Env) -> Optional[Line]:
         try:
             if '--archive-root' in f.read_text():
                 warn.append(f'{f} still moves raw days with --archive-root; '
-                            f'{RUN}smd storage tune-timestd --apply')
+                            f'{RUN}sudo smd admin storage tune-timestd --apply')
                 break
         except OSError:
             pass
