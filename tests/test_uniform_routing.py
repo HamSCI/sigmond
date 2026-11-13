@@ -129,8 +129,9 @@ def test_legacy_both_and_server_raw_at_upload_move(rig):
     assert len(rig.restarts) == 1
 
 
-def test_meteor_off_and_direct_at_upload_move_to_deposit_unset_stays(rig):
-    # meteor-scatter 907c7b2 reads an unset mode as deposit (final fix F4).
+def test_meteor_unset_off_and_direct_at_upload_move_to_deposit(rig):
+    # meteor-scatter before 907c7b2 reads an unset mode as direct and flags
+    # its rows unforwarded, so the migration writes deposit explicitly.
     rig.env("meteor-scatter", "AC0G-S", METEOR_SCATTER_USE_HS_UPLOADER="1")
     rig.env("meteor-scatter", "AC0G-T", METEOR_SCATTER_USE_HS_UPLOADER="1",
             METEOR_SCATTER_DELIVERY_MODE="off")
@@ -138,15 +139,38 @@ def test_meteor_off_and_direct_at_upload_move_to_deposit_unset_stays(rig):
             METEOR_SCATTER_DELIVERY_MODE="direct")
     res = rig.run(["wspr-recorder", "meteor-scatter"], lowered=frozenset())
     assert res.changed == [
+        ("meteor-scatter@AC0G-S.service", "METEOR_SCATTER_DELIVERY_MODE", "unset", "deposit"),
         ("meteor-scatter@AC0G-T.service", "METEOR_SCATTER_DELIVERY_MODE", "off", "deposit"),
         ("meteor-scatter@AC0G-U.service", "METEOR_SCATTER_DELIVERY_MODE", "direct", "deposit"),
     ]
-    assert res.already == ["meteor-scatter@AC0G-S.service"]
-    assert "METEOR_SCATTER_DELIVERY_MODE" not in rig.text("meteor-scatter", "AC0G-S")
-    for inst in ("AC0G-T", "AC0G-U"):
+    for inst in ("AC0G-S", "AC0G-T", "AC0G-U"):
         assert "METEOR_SCATTER_DELIVERY_MODE=deposit" in rig.text("meteor-scatter", inst)
-    assert "routing: meteor-scatter@AC0G-T.service: METEOR_SCATTER_DELIVERY_MODE off -> deposit" in res.lines()
+    assert "routing: meteor-scatter@AC0G-S.service: METEOR_SCATTER_DELIVERY_MODE unset -> deposit" in res.lines()
     assert res.ok
+
+
+def test_an_unset_meteor_gets_deposit_and_one_restart_then_nothing(rig):
+    rig.env("meteor-scatter", "AC0G-S", METEOR_SCATTER_USE_HS_UPLOADER="1")
+    rig.env("meteor-scatter", "AC0G-T", METEOR_SCATTER_DELIVERY_MODE="")
+    first = rig.run(ALL, lowered=frozenset())
+    assert rig.restarts == [["meteor-scatter@AC0G-S.service",
+                             "meteor-scatter@AC0G-T.service"]]
+    assert first.restarted == ["meteor-scatter@AC0G-S.service",
+                               "meteor-scatter@AC0G-T.service"]
+    second = rig.run(ALL, lowered=frozenset())
+    assert second.changed == [] and len(rig.restarts) == 1
+    assert second.lines() == [
+        "routing: 2 instance(s) already deliver via wsprdaemon.org"]
+
+
+def test_a_lowered_unset_meteor_stays_as_it_is(rig):
+    rig.env("meteor-scatter", "AC0G-S", METEOR_SCATTER_USE_HS_UPLOADER="1")
+    before = rig.text("meteor-scatter", "AC0G-S")
+    res = rig.run(ALL, lowered=frozenset({"meteor-scatter"}))
+    assert rig.text("meteor-scatter", "AC0G-S") == before
+    assert rig.restarts == [] and res.changed == []
+    assert res.lowered == [("meteor-scatter@AC0G-S.service",
+                            "METEOR_SCATTER_DELIVERY_MODE=deposit")]
 
 
 def test_a_lowered_client_is_left_alone_and_reported(rig):
@@ -638,3 +662,19 @@ def test_a_shim_in_the_future_is_named_once_not_restarted(rig, tmp_path):
     assert rig.restarts == []
     assert [l for l in res.lines() if "future" in l] == [
         f"routing: {shim} mtime in the future (host clock?) — not restarted"]
+
+
+def test_a_failed_stale_restart_of_a_deposit_meteor_has_its_own_line(rig):
+    import os
+    rig.env("psk-recorder", "AC0G-S", PSK_DELIVERY_PIPELINES="server-merge")
+    p = rig.env("meteor-scatter", "AC0G-S",
+                METEOR_SCATTER_DELIVERY_MODE="deposit")
+    os.utime(p, (1000, 1000))
+    rig.states[MS] = ("active", 900.0)
+    rig.restart_error = sink_levers.RestartFailed([(MS, "exit 1")])
+    res = rig.run(ALL, lowered=frozenset(), heal=True, now=2000.0)
+    assert res.unforwarded == []
+    assert (f"routing: {MS}: restart failed; its running process may hold "
+            "old settings") in res.lines()
+    assert not any("still flags its rows" in l for l in res.lines())
+    assert not res.ok

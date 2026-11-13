@@ -76,6 +76,20 @@ def via_server(client: str, env: dict) -> bool:
     raise KeyError(client)
 
 
+def _routed_here(client: str, env: dict) -> bool:
+    """``via_server`` for the migration, which also needs an explicit
+    meteor-scatter mode.  meteor-scatter before 907c7b2 reads an unset or
+    empty METEOR_SCATTER_DELIVERY_MODE as ``direct`` and flags its rows
+    unforwarded, so the migration writes ``deposit`` for such an instance
+    whatever version runs.  Status and the manifest keep F4's reading."""
+    return not _unset_meteor(client, env) and via_server(client, env)
+
+
+def _unset_meteor(client: str, env: dict) -> bool:
+    return (client == "meteor-scatter"
+            and not (env.get("METEOR_SCATTER_DELIVERY_MODE") or "").strip())
+
+
 def _effective(client: str, env: dict) -> str:
     """``KEY=value`` as the client reads its route from ``env``."""
     key = STANDARD_ROUTE[client][0]
@@ -154,6 +168,7 @@ class RoutingResult:
     failures: list = field(default_factory=list)     # (what, why)
     unforwarded: list = field(default_factory=list)  # (meteor unit, receiver)
     notes: list = field(default_factory=list)        # lines; ok unchanged
+    stale_failed: list = field(default_factory=list) # stale restart failed
     undecided: str = ""
 
     @property
@@ -192,6 +207,8 @@ class RoutingResult:
                 f"not-forwarded, so FT8/FT4 spots from {rx} stop reaching "
                 f"pskreporter — fix {u} (smd admin uploader routing --apply)"
                 for u, rx in self.unforwarded]
+        out += [f"routing: {u}: restart failed; its running process may "
+                "hold old settings" for u in self.stale_failed]
         out += [f"routing: {n}" for n in self.notes]
         if self.already:
             out.append(f"routing: {len(self.already)} instance(s) already "
@@ -258,7 +275,7 @@ def migrate_routing(topology, *, lowered: Optional[frozenset],
                 if client == "meteor-scatter":
                     ms_off.append(unit)
                 continue
-            if via_server(client, env):
+            if _routed_here(client, env):
                 if not carrier:
                     res.stranded.append(unit)
                     continue
@@ -286,7 +303,10 @@ def migrate_routing(topology, *, lowered: Optional[frozenset],
             # Neither client reads its *_USE_HS_UPLOADER flag: at 0 an
             # instance still posts directly, so the flag never exempts one.
             if not carrier:
-                res.no_carrier.append(unit)
+                # An unset meteor mode posts on an old meteor-scatter and
+                # deposits on a new one; either way nothing carries it.
+                (res.stranded if _unset_meteor(client, env)
+                 else res.no_carrier).append(unit)
                 continue
             old = env.get(key) or "unset"
             if not apply:
@@ -314,7 +334,7 @@ def migrate_routing(topology, *, lowered: Optional[frozenset],
                 if client == "meteor-scatter":
                     ms_off.append(unit)
                 continue
-            if not via_server(client, after):
+            if not _routed_here(client, after):
                 res.failures.append((str(path), f"written, but {unit}'s "
                                      f"environment still overrides {key}; "
                                      "not restarted"))
@@ -347,7 +367,12 @@ def migrate_routing(topology, *, lowered: Optional[frozenset],
     psk_routed = [u for u in psk_routed if u not in bad]
     psk_routed += [u for u in res.restarted
                    if u.startswith("psk-recorder@")]
-    ms_off += [u for u in bad if u.startswith("meteor-scatter@")]
+    stale_units = {u for u, _ in stale}
+    ms_off += [u for u in bad if u.startswith("meteor-scatter@")
+               and u not in stale_units]
+    # A meteor unit already on deposit whose stale restart failed flags
+    # nothing unforwarded on disk; only its running process may lag.
+    res.stale_failed = [u for u in bad if u in stale_units]
     if psk_routed:
         for u in dict.fromkeys(ms_off):
             label = u if u != "meteor-scatter" else "(its instances)"
