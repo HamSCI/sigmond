@@ -66,6 +66,8 @@ def env(tmp_path, monkeypatch):
     # No SMART by default: health unknown, add goes on (the health fixture below overrides).
     monkeypatch.setattr(cmd, "_probe", lambda name: (None, "test: no SMART"))
     monkeypatch.setattr(cmd, "HEALTH", tmp_path / "archive-health.json")
+    monkeypatch.setattr(cmd, "UDEV_RULE", tmp_path / "udev" / "90-sigmond-archive.rules")
+    monkeypatch.setattr(cmd, "_unit_active", lambda unit: False)
     return state
 
 
@@ -80,7 +82,8 @@ def test_confirmed_add_formats_mounts_and_records(env):
     tools = [a[0] for a in env.ran]
     assert tools[:4] == ["wipefs", "sfdisk", "udevadm", "mkfs.ext4"]
     assert env.ran[3][-1] == "/dev/sdb1" and "SIGMOND-ARCHIVE" in env.ran[3]
-    assert tools[4:] == ["blkid", "systemctl", "chattr", "mount", "systemctl", "systemctl"]
+    assert tools[4:] == ["blkid", "systemctl", "chattr", "mount", "systemctl", "systemctl",
+                         "udevadm", "umount", "systemctl", "systemctl"]
     fstab = ar.FSTAB.read_text()
     assert "UUID=root / ext4 defaults 0 1" in fstab
     assert f"UUID=abcd-1234 {ar.MOUNT} ext4 nofail," in fstab
@@ -414,3 +417,53 @@ def test_status_days_held_per_channel_and_fit(env, status_files, monkeypatch, ca
     # free 2e12 - 1e9 at the measured 40 GB/day -> about 50 days (not the 15 GB/channel guess)
     assert "about 50 more days at the measured 40.0 GB/day" in out
     assert "export-f32" in out
+
+
+# ---- final-review fixes: the automount is live at once, and comes back after eject/remove
+
+@pytest.fixture
+def udev(env, tmp_path, monkeypatch):
+    p = tmp_path / "udev" / "90-sigmond-archive.rules"
+    monkeypatch.setattr(cmd, "UDEV_RULE", p)
+    monkeypatch.setattr(cmd, "_unit_active", lambda unit: False)
+    return p
+
+
+def test_add_activates_automount(env, health, udev):
+    assert cmd.cmd_archive(_args()) == 0
+    u = cmd._unit_name(ar.MOUNT)
+    seq = [a for a in env.ran if a[0] in ("umount", "systemctl") and
+           (a[0] == "umount" or a[1] == "start")]
+    assert seq[-3:] == [["umount", str(ar.MOUNT)], ["systemctl", "start", f"{u}.automount"],
+                        ["systemctl", "start", f"{u}.mount"]]
+    rule = udev.read_text()
+    assert 'ENV{ID_FS_UUID}=="abcd-1234"' in rule and f"start {u}.automount" in rule
+
+
+def test_remove_waits_and_stops_automount(env, health, udev, monkeypatch):
+    assert cmd.cmd_archive(_args()) == 0
+    env.ran.clear()
+    states = iter([True, False])
+    monkeypatch.setattr(cmd, "_unit_active", lambda unit: next(states, False))
+    monkeypatch.setattr(cmd.time, "sleep", lambda s: None)
+    assert cmd.cmd_archive(_args(archive_command="remove")) == 0
+    u = cmd._unit_name(ar.MOUNT)
+    assert ["systemctl", "stop", f"{u}.automount", f"{u}.mount"] in env.ran
+    assert udev.exists()              # a replug brings the automount back
+
+
+def test_forget_removes_udev_rule(env, health, udev):
+    assert cmd.cmd_archive(_args()) == 0
+    assert cmd.cmd_archive(_args(archive_command="remove", forget=True)) == 0
+    assert not udev.exists()
+
+
+def test_upgrade_never_switches_uas_while_mounted(env, health, udev, monkeypatch):
+    assert cmd.cmd_archive(_args()) == 0
+    env.ran.clear()
+    monkeypatch.setattr(cmd.ar, "mount_state", lambda *a, **k: "mounted")
+    monkeypatch.setattr(cmd, "_probe", lambda name: (None, "the drive's USB bridge blocks SMART under UAS; x"))
+    import sigmond.storage.guard as G
+    monkeypatch.setattr(G, "seal_bare_dir", lambda *a, **k: "already")
+    assert cmd.cmd_archive(_args(upgrade=True, device=None, confirm=None, switch_uas=True)) == 0
+    assert health.rebinds == []

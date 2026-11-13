@@ -41,6 +41,8 @@ _SBIN_DIRS = ("/usr/sbin", "/sbin")
 HEALTH = ar.MOUNT.parent / "archive-health.json"            # /var/lib/sigmond/archive-health.json
 MODPROBE_CONF = Path("/etc/modprobe.d/sigmond-archive-usb.conf")
 HEALTH_TIMER = "sigmond-archive-health.timer"
+# A replug restarts the automount that eject/remove stopped (review fix 2).
+UDEV_RULE = Path("/etc/udev/rules.d/90-sigmond-archive.rules")
 
 
 def _say(msg: str = "") -> None:
@@ -287,7 +289,7 @@ def _ask(prompt: str) -> bool:
         return False
 
 
-def _health_step(disk: "ar.Disk", args, dry: bool):
+def _health_step(disk: "ar.Disk", args, dry: bool, allow_switch: bool = True):
     """Read SMART, run the short self-test, judge.  Returns (rc, disk,
     reading); rc 1 stops add before the erase."""
     if not shutil.which("smartctl"):
@@ -298,7 +300,11 @@ def _health_step(disk: "ar.Disk", args, dry: bool):
             warn("smartctl could not be installed; the drive's health is unknown")
             return 0, disk, None
     reading, why = _probe(disk.name)
-    if reading is None and "under UAS" in why and not dry:
+    if reading is None and "under UAS" in why and not dry and not allow_switch:
+        warn(why)
+        info("the drive is mounted: `smd archive eject`, then `add --upgrade` again, to switch "
+             "its bridge to usb-storage")
+    elif reading is None and "under UAS" in why and not dry:
         warn(why)
         if getattr(args, "switch_uas", False) or _ask(
                 "  Switch the bridge to usb-storage so its health can be read? [y/N] "):
@@ -357,6 +363,31 @@ def _after_mount(reading, dry: bool) -> None:
     _run(["systemctl", "enable", "--now", HEALTH_TIMER], dry)
 
 
+def _write_udev_rule(uuid: str) -> None:
+    unit = _unit_name(ar.MOUNT)
+    UDEV_RULE.parent.mkdir(parents=True, exist_ok=True)
+    UDEV_RULE.write_text(
+        "# smd archive: a replugged archive drive gets its automount back\n"
+        f'ACTION=="add", SUBSYSTEM=="block", ENV{{ID_FS_UUID}}=="{uuid}", '
+        f'RUN+="/usr/bin/systemctl --no-block start {unit}.automount"\n')
+    _run(["udevadm", "control", "--reload"], False)
+
+
+def _activate_automount(uuid: str, direct_mount: bool) -> None:
+    """Swap the mount add made by hand for systemd's automount now, not at
+    the next boot, so a replug before any reboot still mounts (review fix 1)."""
+    unit = _unit_name(ar.MOUNT)
+    _write_udev_rule(uuid)
+    if _unit_active(f"{unit}.automount"):
+        return
+    _wait_for_archiver()
+    if direct_mount and _run(["umount", str(ar.MOUNT)], False) != 0:
+        warn("could not hand the drive to the automount (busy); it takes over at the next boot")
+        return
+    _run(["systemctl", "start", f"{unit}.automount"], False)
+    _run(["systemctl", "start", f"{unit}.mount"], False)
+
+
 def _upgrade(args) -> int:
     """Bring a drive added before 2026-11-13 up to date without formatting:
     the automount fstab line, the new archive.toml keys, a health baseline."""
@@ -372,8 +403,9 @@ def _upgrade(args) -> int:
     disk = next((d for d in ar.list_disks().values() if d.serial and d.serial == cfg.get("serial")),
                 None)
     reading = None
+    mounted = ar.mount_state(uuid) == "mounted"
     if disk is not None:
-        rc, disk, reading = _health_step(disk, args, False)
+        rc, disk, reading = _health_step(disk, args, False, allow_switch=not mounted)
     disk_serial = reading.disk_serial if reading else str(cfg.get("disk_serial", ""))
     dev_type = reading.dev_type if reading else cfg.get("smart_dev_type")
     d = disk or ar.Disk("", int(cfg.get("size_bytes", 0)), str(cfg.get("model", "")),
@@ -386,6 +418,7 @@ def _upgrade(args) -> int:
         from ..storage.guard import seal_bare_dir
         ok(f"the bare {ar.MOUNT} beneath the drive: {seal_bare_dir(str(ar.MOUNT), mode=None)}")
     _after_mount(reading, False)
+    _activate_automount(uuid, direct_mount=ar.mount_state(uuid) == "mounted")
     return 0
 
 
@@ -527,6 +560,7 @@ def _add(args) -> int:
         return 1
     _make_client_dirs(ar.MOUNT)
     _after_mount(reading, False)
+    _activate_automount(uuid, direct_mount=True)
     st = shutil.disk_usage(ar.MOUNT)
     ok(f"archive drive mounted at {ar.MOUNT}: {ar.human_bytes(st.free)} free, "
        f"about {ar.days_fit(st.free, channels):.0f} days at {channels} channels")
@@ -614,15 +648,19 @@ def _unit_active(unit: str) -> bool:
     return subprocess.run(["systemctl", "is-active", "--quiet", unit]).returncode == 0
 
 
-def _eject() -> int:
-    """Unmount for a safe unplug, and keep the drive configured: it mounts
-    again on its own when it is plugged back in."""
+def _wait_for_archiver() -> None:
     waited = 0
     while _unit_active("timestd-archive.service"):
         if waited == 0:
             info("the archiver is copying; waiting for its run to end")
         time.sleep(5)
         waited += 5
+
+
+def _eject() -> int:
+    """Unmount for a safe unplug, and keep the drive configured: plugged back
+    in, udev restarts the automount (UDEV_RULE) and it mounts on its own."""
+    _wait_for_archiver()
     unit = _unit_name(ar.MOUNT)
     if _run(["systemctl", "stop", f"{unit}.automount", f"{unit}.mount"], False) != 0:
         err("the drive is busy; `fuser -vm " + str(ar.MOUNT) + "` names who holds it")
@@ -712,6 +750,11 @@ def _status() -> int:
 
 def _remove(args) -> int:
     forget = bool(getattr(args, 'forget', False))
+    # The archiver would otherwise remount it through the automount before
+    # the operator unplugs it (review fix 3).
+    _wait_for_archiver()
+    unit = _unit_name(ar.MOUNT)
+    _run(["systemctl", "stop", f"{unit}.automount", f"{unit}.mount"], False)
     mounted = {m for m in ar.mounted_sources().values()}
     # Unmount by name only what /proc/mounts lists as mounted there: a mount
     # point in use cannot be renamed or replaced (EBUSY), so the name cannot
@@ -735,9 +778,14 @@ def _remove(args) -> int:
         except FileNotFoundError:
             pass
         _run(["systemctl", "disable", "--now", HEALTH_TIMER], False)
+        try:
+            UDEV_RULE.unlink()
+            _run(["udevadm", "control", "--reload"], False)
+        except FileNotFoundError:
+            pass
         _run(["systemctl", "daemon-reload"], False)
         ok("forgot the drive: its fstab line and archive.toml are gone")
     else:
-        info("the fstab line stays (nofail), so the drive mounts again at the next boot "
-             "when it is plugged in; `smd archive remove --forget` drops it")
+        info("the drive stays configured: plugged back in, it mounts on its own; "
+             "`smd archive remove --forget` drops it")
     return 0
