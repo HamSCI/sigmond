@@ -327,8 +327,7 @@ ClickHouse install, use `smd admin storage migrate-to-sqlite` to clean it up.
 
 Every WSPR, FT4/FT8 and MSK144 spot goes only to wsprdaemon.org.  The server
 stores it and forwards copies to wsprnet.org and pskreporter.info under the
-spot's own reporter id.  No station should post to either itself; one gap
-remains, below.  Only a merge
+spot's own reporter id.  No station posts to either itself.  Only a merge
 (`merge_into`) rewrites the reporter id, and the server carries it out.
 
 The spots already travel in the wsprdaemon tar, so the station's second and
@@ -357,7 +356,9 @@ Data dominates the FT8 share: 39.6 B/spot as PSKReporter frames against
   `--via` values `direct`, `server-raw` and `both` for psk-recorder, and
   `direct` and `off` for meteor-scatter (`upload.REFUSED_VIA`) before it writes anything.
   While the client's sink reads below `upload`, it writes the enable flag and
-  leaves the delivery key alone.  With no wspr-recorder enabled, it still
+  leaves the delivery key alone; it reads the sink the way the migration
+  does (`commands/uploader.routing_lowered`), and when that read fails it
+  writes nothing and exits 1.  With no wspr-recorder enabled, it still
   writes the route and prints an ERROR naming `smd enable wspr-recorder`.
 - **`uploader_manifest.apply_proxying`** flags `forward_to_wsprnet = true` on
   the wspr-wsprdaemon transport and drops the `wspr-wsprnet` pipeline, on
@@ -371,7 +372,14 @@ Data dominates the FT8 share: 39.6 B/spot as PSKReporter frames against
   instances it changed, through `sink_levers.restart_units`, which never
   touches radiod.  A second run changes nothing.  It also restarts an active
   instance already on the route whose start predates its env file (a restart
-  that failed last time).  Four verbs run it: `smd sink upload`,
+  that failed last time), and each active wspr-recorder unit (and
+  `wspr-uploader.service`) that started before wspr-recorder's
+  `hs_uploader_shim.py` last changed.  A file dated more than 5 s in the
+  future restarts nothing.  Every instance is routed whatever its
+  `*_USE_HS_UPLOADER` flag says: neither client reads it.  When psk-recorder
+  rides `server-merge` beside a meteor-scatter instance off `deposit`, it
+  prints an ERROR: hs-uploader keeps one forward flag per receiver, so that
+  receiver's FT8/FT4 spots stop reaching pskreporter.  Four verbs run it: `smd sink upload`,
   `smd update --apply`, `smd align --apply`, and
   `smd admin uploader routing --apply` (without `--apply` it only reports).
 

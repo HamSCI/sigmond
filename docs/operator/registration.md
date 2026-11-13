@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 5554c6e on 2026-11-13 — whole page re-read; `smd psws` and `smd config psws` against `--help` and psws.py, timers against the unit files, uploader unit names against bin/smd; sample outputs dated 2026-08 not re-run. Routing passages: sigmond 0d9e879 on 2026-11-13 — every spot goes to wsprdaemon.org, checked against uniform_routing.py, uploader_manifest.apply_proxying, upload.py, bin/smd `watch uploads` and wspr-recorder's hs_uploader_shim.py. Earlier: sigmond 913bfed on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 6406025 on 2026-10-10: remote-access words and the addresses the host relays checked against commands/remote.py, the wizard's switch and the appliance console panel; held packages against sink_doors.py
+> **Verified against:** sigmond 5554c6e on 2026-11-13 — whole page re-read; `smd psws` and `smd config psws` against `--help` and psws.py, timers against the unit files, uploader unit names against bin/smd; sample outputs dated 2026-08 not re-run. Routing passages: sigmond 37c46f1 on 2026-11-13 — every spot goes to wsprdaemon.org, checked against uniform_routing.py, uploader_manifest.apply_proxying, upload.py, bin/smd `watch uploads` and wspr-recorder's hs_uploader_shim.py. Earlier: sigmond 913bfed on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 6406025 on 2026-10-10: remote-access words and the addresses the host relays checked against commands/remote.py, the wizard's switch and the appliance console panel; held packages against sink_doors.py
 > **Canonical for:** getting a station's uploads accepted (PSWS, wsprnet, pskreporter, wsprdaemon; airframes.io, optional)
 
 Your station starts hearing signals the moment the install finishes. This page
@@ -137,11 +137,9 @@ smd watch uploads
 That prints one line per two-minute WSPR cycle, e.g.
 `[21:48:05] cycle 21:48   wsprnet    0   wsprdaemon  199   ft8  312   ft4    0   tar 12.3kB`.
 It keeps printing until you press Ctrl-C; it changes nothing. The `wsprdaemon`
-count tells you the cycle left the station. The `wsprnet` count shows only the
-spots this station posted to wsprnet *itself*. Where wsprdaemon.org does the
-forwarding, that count reads 0, and 0 there is normal. Some stations still show
-a count there, because wspr-recorder's own uploader also posts directly; their
-spots reach wsprnet either way.
+count tells you the cycle left the station. The `wsprnet` count always reads 0.
+wspr-recorder posts nothing to wsprnet itself; wsprdaemon.org forwards the
+spots there.
 
 #### When it says "no active uploader"
 
@@ -189,13 +187,14 @@ no operator page explains is
 Same story: no account, no key. Your station puts its FT8/FT4 spots, and its
 MSK144 spots if it runs meteor-scatter, into each WSPR cycle's upload to
 wsprdaemon.org. wsprdaemon.org forwards them to pskreporter; your station does
-not connect to pskreporter itself. pskreporter files them under your **bare
-callsign and grid**, with no `/B4` suffix
-(source: `hs-uploader/docs/PER-SITE-SETUP.md` §1 and §2).
+not connect to pskreporter itself. Which name pskreporter shows for those
+spots, your bare callsign (`AC0G`) or your full reporter ID (`AC0G/B4`), is
+not settled yet. We are confirming it with the owner of the wsprdaemon.org
+server. Until then, search for both.
 
 **How to confirm:** at [pskreporter.info](https://pskreporter.info), look
 yourself up as the **receiver** (sometimes labelled *monitor*) — "signals
-received by `AC0G`" — **not** as a sender. This trips up nearly everyone: a
+received by `AC0G`" or by `AC0G/B4` — **not** as a sender. This trips up nearly everyone: a
 station that is working perfectly shows nothing at all if you search it as a
 transmitter. It cost one of our sites an afternoon of debugging a system that
 was never broken.

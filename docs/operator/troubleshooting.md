@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 5554c6e on 2026-11-13 — whole page re-read; verbs and flags against `smd <verb> --help`, the restart table against etc/catalog.toml, doctor findings against sdr_events.py, console-panel lines against sigmond-appliance, disk numbers against hf-timestd b7f5a56; sample outputs dated 2026-08 not re-run. Routing passages: sigmond 0d9e879 on 2026-11-13 — every spot goes to wsprdaemon.org, checked against uniform_routing.py, uploader_manifest.apply_proxying, upload.py, bin/smd `watch uploads` and wspr-recorder's hs_uploader_shim.py. Earlier: sigmond 913bfed on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 16f47bc on 2026-10-11: the console panel's bring-up and guest-agent lines checked against sigmond-appliance 68e966a (`firstboot-v3.sh`) and `bin/sigmond-firstrun-bringup`; earlier checks, at 007bf72 on 2026-10-10: remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; sink words checked at 58fb909 against commands/sink.py and commands/config.py
+> **Verified against:** sigmond 5554c6e on 2026-11-13 — whole page re-read; verbs and flags against `smd <verb> --help`, the restart table against etc/catalog.toml, doctor findings against sdr_events.py, console-panel lines against sigmond-appliance, disk numbers against hf-timestd b7f5a56; sample outputs dated 2026-08 not re-run. Routing passages: sigmond 37c46f1 on 2026-11-13 — every spot goes to wsprdaemon.org, checked against uniform_routing.py, uploader_manifest.apply_proxying, upload.py, bin/smd `watch uploads` and wspr-recorder's hs_uploader_shim.py. Earlier: sigmond 913bfed on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 16f47bc on 2026-10-11: the console panel's bring-up and guest-agent lines checked against sigmond-appliance 68e966a (`firstboot-v3.sh`) and `bin/sigmond-firstrun-bringup`; earlier checks, at 007bf72 on 2026-10-10: remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; sink words checked at 58fb909 against commands/sink.py and commands/config.py
 > **Amended 2026-09-02** (not re-walked): the SDR sentinel was retired, so a
 > re-seated RX888 is now brought back with `smd status` + `smd adopt`, not by
 > waiting two minutes.
@@ -197,16 +197,15 @@ smd watch uploads
 ```
 
 It follows the uploader until you press Ctrl-C; it changes nothing. There are
-**four** answers:
+**three** answers:
 
 | What you see | What it means |
 |---|---|
-| One line per two-minute cycle, e.g. `[21:48:05] cycle 21:48   wsprnet    0   wsprdaemon  199   ft8  312   ft4    0   tar 12.3kB` | *Good.* The station is shipping to wsprdaemon.org. A `wsprnet` count of 0 is normal: it counts only spots the station posted to wsprnet itself, and wsprdaemon.org forwards yours. |
-| A `wsprnet` count above 0 on those lines | Also shipping. wspr-recorder's own uploader still posts this station's WSPR spots to wsprnet directly, beside wsprdaemon.org. The spots reach wsprnet either way; mention it to your fleet admin. |
+| One line per two-minute cycle, e.g. `[21:48:05] cycle 21:48   wsprnet    0   wsprdaemon  199   ft8  312   ft4    0   tar 12.3kB` | *Good.* The station is shipping to wsprdaemon.org. The `wsprnet` count always reads 0: wspr-recorder posts nothing to wsprnet itself, and wsprdaemon.org forwards your spots there. |
 | **Nothing printed at all** for more than five minutes | Nothing is reaching the uploader; the problem is upstream of uploading. |
 | It **returns immediately** with `✗ uploads-watch: no active uploader on this host (wspr-uploader.service, wspr-recorder@*, psk-recorder@*, wd-upload-hs@* all inactive).` | The spot recorders and uploaders are **not running on this station** — usually because they were deliberately switched off (no antenna, or a station still being built). This is DASI002's answer, and it is correct there. Nothing has failed and there is nothing to Ctrl-C. |
 
-That fourth answer is the one most likely to be mistaken for a crash. Confirm it
+That third answer is the one most likely to be mistaken for a crash. Confirm it
 with the next two commands: if `smd sink status` says
 `site sink: off`, `site sink: fill` or `site sink: hold (legacy)`, or `smd component list` shows `wspr-recorder` and
 `psk-recorder` at LIFECYCLE `binary, on PATH` rather than `enabled, running`,
@@ -255,7 +254,7 @@ while the site switch reads `upload`.
   admin.
 - Nothing printed at all → the problem is upstream of uploading. Go to
   [Spots stopped](#spots-stopped-were-fine-before). (Only if it **sat there**
-  silently. An *immediate* `✗ … no active uploader on this host` is the fourth
+  silently. An *immediate* `✗ … no active uploader on this host` is the third
   row of the table above, and does not belong on that path.)
 - `site sink: off` with the reason `new station: …` → nobody has raised the switch
   since the install. Check the station
@@ -287,11 +286,13 @@ them.
    (sometimes labelled *monitor*)
    ([registration.md §3](registration.md#3-pskreporterinfo--nothing-to-register)).
    It cost one of our sites an afternoon.
-2. **You searched with the suffix.** pskreporter wants the bare callsign —
-   `AC0G`, not `AC0G/B4` (same section).
+2. **You searched one name only.** Which name pskreporter shows, the bare
+   callsign `AC0G` or the full reporter ID `AC0G/B4`, is not settled yet;
+   we are confirming it with the owner of the wsprdaemon.org server. Search
+   for both (same section).
 3. **`psk-recorder` is not enabled on this station at all.** If `smd status`
    shows **no `psk-recorder:` block**, the client is installed but switched off
-   — the same case as the wsprnet section's fourth outcome. Confirm with
+   — the same case as the wsprnet section's third outcome. Confirm with
    `smd component list` (LIFECYCLE `binary, on PATH` or `configured` rather than
    `enabled, running`) and `smd sink status`; if it says `site sink: off`,
    `site sink: fill` or `site sink: hold (legacy)`, this station does not report FT8/FT4 on purpose and
@@ -350,7 +351,8 @@ searching pskreporter will find a station that is not reporting.
 
 **What to do**
 
-Search pskreporter again as the **receiver**, using the bare callsign. If
+Search pskreporter again as the **receiver**, under both `AC0G` and
+`AC0G/B4`. If
 the `ft8` counts are moving, your station is doing its job; the rest happens
 at wsprdaemon.org.
 

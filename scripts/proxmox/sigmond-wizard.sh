@@ -5311,7 +5311,7 @@ HOSTIP=$(ip -4 -o addr show vmbr0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 |
     | grep -vE '^(10\.99\.0\.|127\.|192\.0\.0\.|fe80:)' | head -1)
 SINK_NOTE=""
 [ -n "${UPLOADS_TOML:-}" ] && SINK_NOTE=" Site sink switch: off — the station records and decodes but sends
-            no data and no heartbeat.  Check reception and
+            no data; only its heartbeat goes out.  Check reception and
             identity, then run in the VM: smd sink upload"
 SUMMARY=$(cat <<SEOF
 ──────────────────────────────────────────────────────
