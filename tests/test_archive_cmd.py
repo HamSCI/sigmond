@@ -63,6 +63,9 @@ def env(tmp_path, monkeypatch):
                         lambda part: [str(ar.MOUNT)] if state.landed is None else state.landed)
     monkeypatch.setattr(cmd, "_libc_umount_detach", lambda where: ran.append(["umount2", where]))
     monkeypatch.setattr("builtins.input", lambda *a: pytest.fail("add asked a question"))
+    # No SMART by default: health unknown, add goes on (the health fixture below overrides).
+    monkeypatch.setattr(cmd, "_probe", lambda name: (None, "test: no SMART"))
+    monkeypatch.setattr(cmd, "HEALTH", tmp_path / "archive-health.json")
     return state
 
 
@@ -77,7 +80,7 @@ def test_confirmed_add_formats_mounts_and_records(env):
     tools = [a[0] for a in env.ran]
     assert tools[:4] == ["wipefs", "sfdisk", "udevadm", "mkfs.ext4"]
     assert env.ran[3][-1] == "/dev/sdb1" and "SIGMOND-ARCHIVE" in env.ran[3]
-    assert tools[4:] == ["blkid", "systemctl", "mount"]
+    assert tools[4:] == ["blkid", "systemctl", "chattr", "mount", "systemctl", "systemctl"]
     fstab = ar.FSTAB.read_text()
     assert "UUID=root / ext4 defaults 0 1" in fstab
     assert f"UUID=abcd-1234 {ar.MOUNT} ext4 nofail," in fstab
@@ -189,3 +192,111 @@ def test_everything_add_says_goes_to_one_stream(env, capsys):
     out, errtext = capsys.readouterr()
     assert out == ""
     assert errtext.index("found") < errtext.index("$ wipefs") < errtext.index("archive drive mounted")
+
+
+# ---- 2026-11-13: SMART health before the erase, automount, chattr, UAS quirk, smartd
+
+from sigmond import archive_health as H
+
+
+def _reading(**kw):
+    base = dict(passed=True, model="ST2000LM007-1R8174", disk_serial="ZDZJHMBB", reallocated=0,
+                pending=0, offline_uncorrectable=0, temperature_c=30, dev_type="sat",
+                selftest_status="passed")
+    base.update(kw)
+    return H.Reading(**base)
+
+
+@pytest.fixture
+def health(env, monkeypatch, tmp_path):
+    hs = types.SimpleNamespace(reading=_reading(), why="", selftests=[], uas_answer=False,
+                               rebinds=[])
+    monkeypatch.setattr(cmd, "_probe", lambda name: (hs.reading, hs.why))
+    monkeypatch.setattr(cmd, "_short_self_test",
+                        lambda name, t: hs.selftests.append(name) or "passed")
+    monkeypatch.setattr(cmd, "HEALTH", tmp_path / "archive-health.json")
+    monkeypatch.setattr(cmd, "MODPROBE_CONF", tmp_path / "modprobe.d" / "sigmond-archive-usb.conf")
+    monkeypatch.setattr(cmd, "_usb_ids", lambda devpath: ("0bc2", "2344"))
+    monkeypatch.setattr(cmd, "_rebind_usb", lambda devpath: hs.rebinds.append(devpath) or True)
+    monkeypatch.setattr(cmd, "_set_runtime_quirk", lambda line: None)
+    return hs
+
+
+def test_add_refuses_fail(env, health):
+    health.reading = _reading(pending=8)
+    assert cmd.cmd_archive(_args()) == 1
+    assert "wipefs" not in [a[0] for a in env.ran]
+
+
+def test_add_accept_unhealthy_needs_name(env, health):
+    health.reading = _reading(pending=8)
+    assert cmd.cmd_archive(_args(accept_unhealthy="sdc")) == 1
+    assert "wipefs" not in [a[0] for a in env.ran]
+    assert cmd.cmd_archive(_args(accept_unhealthy="sdb")) == 0
+    assert "wipefs" in [a[0] for a in env.ran]
+
+
+def test_add_unknown_health_continues(env, health):
+    health.reading, health.why = None, "the drive's USB bridge passes no SMART data"
+    assert cmd.cmd_archive(_args()) == 0
+
+
+def test_add_runs_short_self_test_unless_told(env, health):
+    assert cmd.cmd_archive(_args()) == 0
+    assert health.selftests == ["sdb"]
+    health.selftests.clear()
+    env.ran.clear()
+    ar.FSTAB.write_text("UUID=root / ext4 defaults 0 1\n")
+    assert cmd.cmd_archive(_args(no_self_test=True)) == 0
+    assert health.selftests == []
+
+
+def test_add_dry_run_reads_only(env, health):
+    assert cmd.cmd_archive(_args(dry_run=True, confirm=None)) == 0
+    assert health.selftests == [] and env.ran == []
+    assert not cmd.HEALTH.exists()
+
+
+def test_add_writes_baseline_and_keys(env, health):
+    assert cmd.cmd_archive(_args()) == 0
+    import json
+    import tomllib
+    doc = json.loads(cmd.HEALTH.read_text())
+    assert doc["baseline"]["disk_serial"] == "ZDZJHMBB"
+    cfg = tomllib.loads(ar.CONFIG.read_text())
+    assert (cfg["disk_serial"], cfg["smart_dev_type"]) == ("ZDZJHMBB", "sat")
+
+
+def test_add_masks_smartd_and_enables_health_timer(env, health):
+    assert cmd.cmd_archive(_args()) == 0
+    assert ["systemctl", "mask", "--now", "smartmontools.service"] in env.ran
+    assert ["systemctl", "enable", "--now", "sigmond-archive-health.timer"] in env.ran
+
+
+def test_add_chattr_before_mount(env, health):
+    assert cmd.cmd_archive(_args()) == 0
+    tools = [a[0] for a in env.ran]
+    assert tools.index("chattr") < tools.index("mount")
+    assert env.ran[tools.index("chattr")] == ["chattr", "+i", str(ar.MOUNT)]
+
+
+def test_add_offers_uas_quirk(env, health, monkeypatch):
+    health.reading, health.why = None, "the drive's USB bridge blocks SMART under UAS; ..."
+    seq = iter([(None, health.why), (_reading(), "")])
+    monkeypatch.setattr(cmd, "_probe", lambda name: next(seq))
+    assert cmd.cmd_archive(_args(switch_uas=True)) == 0
+    assert cmd.MODPROBE_CONF.read_text().strip() == "options usb-storage quirks=0bc2:2344:u"
+    assert health.rebinds == ["4-2"]
+
+
+def test_add_upgrades_old_fstab_line(env, health):
+    ar.FSTAB.write_text("UUID=root / ext4 defaults 0 1\n"
+                        f"UUID=abcd-1234 {ar.MOUNT} ext4 nofail,noatime,x-systemd.device-timeout=10s 0 2\n")
+    ar.CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    ar.CONFIG.write_text('uuid = "abcd-1234"\nmount = "%s"\nserial = "S6XN"\n' % ar.MOUNT)
+    assert cmd.cmd_archive(_args(upgrade=True, device=None, confirm=None)) == 0
+    assert "x-systemd.automount" in ar.FSTAB.read_text()
+    assert "wipefs" not in [a[0] for a in env.ran]
+    import tomllib
+    cfg = tomllib.loads(ar.CONFIG.read_text())
+    assert cfg["uuid"] == "abcd-1234" and cfg["archive_dtype"] == "f16"

@@ -21,7 +21,11 @@ MOUNT = Path("/var/lib/sigmond/archive")
 CONFIG = Path("/etc/sigmond/archive.toml")
 FSTAB = Path("/etc/fstab")
 # A missing drive must never hold up a boot (plan, step 6).
-MOUNT_OPTS = "nofail,noatime,x-systemd.device-timeout=10s"
+# x-systemd.automount: a replugged drive mounts on the next access, after
+# systemd-fsck (pass 2) replays an unclean removal's journal (AI6VN-1,
+# 2026-11-13: a pulled drive came back unmounted with the plain line).
+MOUNT_OPTS = "nofail,noatime,x-systemd.automount,x-systemd.device-timeout=10s"
+PROC_MOUNTINFO = Path("/proc/self/mountinfo")
 SYS_BLOCK = Path("/sys/block")
 SYS_USB = Path("/sys/bus/usb/devices")
 PROC_MOUNTS = Path("/proc/mounts")
@@ -197,6 +201,43 @@ def fstab_with_archive(text: str, uuid: str, mount: Optional[Path] = None) -> st
     return "\n".join(kept) + "\n"
 
 
+def fstab_needs_upgrade(text: str, mount: Optional[Path] = None) -> bool:
+    """An archive line exists but lacks the current options."""
+    mount = MOUNT if mount is None else mount
+    for ln in text.splitlines():
+        f = ln.split()
+        if len(f) >= 4 and not ln.lstrip().startswith("#") and f[1] == str(mount):
+            return f[3] != MOUNT_OPTS
+    return False
+
+
+def _by_uuid(uuid: str) -> Optional[str]:
+    p = Path("/dev/disk/by-uuid") / uuid
+    return os.path.realpath(p) if os.path.lexists(p) else None
+
+
+def mount_state(uuid: str, mountinfo: Path = PROC_MOUNTINFO, by_uuid=_by_uuid,
+                mount: Optional[Path] = None) -> str:
+    """'mounted' (the drive's ext4 is on the mount point), 'present' (the
+    drive is plugged in but not mounted there) or 'absent'.  Reads
+    /proc/self/mountinfo and /dev/disk/by-uuid only: it never touches the
+    mount point, which with the drive away would block on the automount."""
+    mount = MOUNT if mount is None else mount
+    dev = by_uuid(uuid)
+    top = None
+    try:
+        for ln in mountinfo.read_text().splitlines():
+            pre, _, post = ln.partition(" - ")
+            f, g = pre.split(), post.split()
+            if len(f) >= 5 and len(g) >= 2 and f[4] == str(mount):
+                top = (g[0], g[1])
+    except OSError:
+        pass
+    if dev and top and top[0] != "autofs" and os.path.realpath(top[1]) == dev:
+        return "mounted"
+    return "present" if dev else "absent"
+
+
 def fstab_without_archive(text: str, mount: Optional[Path] = None) -> str:
     mount = MOUNT if mount is None else mount
     kept = [ln for ln in text.splitlines()
@@ -211,7 +252,8 @@ def _toml_str(value: str) -> str:
     return json.dumps(_printable(str(value)), ensure_ascii=True)
 
 
-def config_text(uuid: str, disk: Disk, when_utc: str) -> str:
+def config_text(uuid: str, disk: Disk, when_utc: str, disk_serial: str = "",
+                smart_dev_type: Optional[str] = None) -> str:
     """/etc/sigmond/archive.toml.  `mode` and the retention keys are read by
     the archiver (hf-timestd, phase 2); their values here are the plan's
     defaults (decisions 2 and 4)."""
@@ -223,6 +265,8 @@ def config_text(uuid: str, disk: Disk, when_utc: str) -> str:
         f"added_utc = {_toml_str(when_utc)}\n"
         f"model = {_toml_str(disk.model)}\n"
         f"serial = {_toml_str(disk.serial)}\n"
+        f"disk_serial = {_toml_str(disk_serial)}\n"
+        + (f"smart_dev_type = {_toml_str(smart_dev_type)}\n" if smart_dev_type else "") +
         f"size_bytes = {int(disk.size_bytes)}\n"
         "\n"
         "# Read by the archiver (hf-timestd, phase 2): every channel, rolling, with a\n"
@@ -230,6 +274,11 @@ def config_text(uuid: str, disk: Disk, when_utc: str) -> str:
         'mode = "all"\n'
         "high_water_pct = 90\n"
         "kept_ceiling_pct = 25\n"
+        "# F16 copies at the fixed 2^12 scale (hf-timestd iq_codec); \"complex64\" copies as is.\n"
+        'archive_dtype = "f16"\n'
+        "# Folders on the drive whose YYYYMMDD day folders the archiver may delete\n"
+        "# before its own (another program's archive it took over, e.g. wav-archive).\n"
+        "evict_first = []\n"
     )
 
 

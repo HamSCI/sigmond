@@ -216,3 +216,42 @@ def test_mount_point_must_be_a_real_root_directory(tmp_path):
 
 def test_the_root_directory_passes_the_mount_point_check():
     assert ar.mount_point_problem(Path("/")) is None
+
+
+# ---- 2026-11-13: automount, new archive.toml keys, mount state without touching the mount
+
+def test_fstab_line_has_automount():
+    assert ar.fstab_line("u").endswith(
+        "ext4 nofail,noatime,x-systemd.automount,x-systemd.device-timeout=10s 0 2")
+
+
+def test_fstab_upgrade_detected():
+    old = "UUID=u /var/lib/sigmond/archive ext4 nofail,noatime,x-systemd.device-timeout=10s 0 2\n"
+    assert ar.fstab_needs_upgrade(old) is True
+    assert ar.fstab_needs_upgrade(ar.fstab_with_archive(old, "u")) is False
+    assert ar.fstab_needs_upgrade("UUID=root / ext4 defaults 0 1\n") is False
+
+
+def test_config_text_new_keys(station):
+    _usb_disk(station, "sdb", PCI_B, 4, "4-2")
+    import tomllib
+    cfg = tomllib.loads(ar.config_text("u", ar.list_disks(station / "block")["sdb"], "t",
+                                       disk_serial="ZDZJHMBB", smart_dev_type="sat"))
+    assert (cfg["disk_serial"], cfg["smart_dev_type"]) == ("ZDZJHMBB", "sat")
+    assert cfg["archive_dtype"] == "f16" and cfg["evict_first"] == []
+    cfg = tomllib.loads(ar.config_text("u", ar.list_disks(station / "block")["sdb"], "t"))
+    assert "smart_dev_type" not in cfg and cfg["disk_serial"] == ""
+
+
+def test_mount_state_three_ways(tmp_path):
+    mi = tmp_path / "mountinfo"
+    m = "/var/lib/sigmond/archive"
+    mi.write_text(f"36 25 0:30 / {m} rw,relatime shared:1 - autofs systemd-1 rw\n"
+                  f"90 36 8:17 / {m} rw,noatime shared:2 - ext4 /dev/sdb1 rw\n")
+    uuids = {"u": "/dev/sdb1"}
+    assert ar.mount_state("u", mountinfo=mi, by_uuid=uuids.get) == "mounted"
+    mi.write_text(f"36 25 0:30 / {m} rw,relatime shared:1 - autofs systemd-1 rw\n")
+    assert ar.mount_state("u", mountinfo=mi, by_uuid=uuids.get) == "present"
+    assert ar.mount_state("u", mountinfo=mi, by_uuid=lambda u: None) == "absent"
+    mi.write_text(f"90 36 8:33 / {m} rw - ext4 /dev/sdc1 rw\n")
+    assert ar.mount_state("u", mountinfo=mi, by_uuid=uuids.get) == "present"   # someone else's disk

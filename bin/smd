@@ -31932,6 +31932,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help='format without the typed question (for scripts); must name the drive')
     a_add.add_argument('--dry-run', action='store_true',
         help='find and judge the drive, print what add would run, change nothing')
+    a_add.add_argument('--no-self-test', action='store_true',
+        help="skip the drive's 2-minute short self-test before the erase")
+    a_add.add_argument('--accept-unhealthy', metavar='sdX',
+        help='format a drive whose health check FAILED (name it); unplug it instead if you can')
+    a_add.add_argument('--switch-uas', action='store_true',
+        help="when the drive's USB bridge blocks SMART under UAS, switch it to "
+             "usb-storage without asking")
+    a_add.add_argument('--upgrade', action='store_true',
+        help='bring an already-added drive up to date (automount, archiver keys, '
+             'health baseline) without formatting it')
     a_rm = archive_sub.add_parser('remove',
         help='unmount the drive so it can be unplugged')
     a_rm.add_argument('--forget', action='store_true',

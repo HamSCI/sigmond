@@ -17,9 +17,13 @@ import shutil
 import subprocess
 import sys
 import time
-from typing import Dict, List, Optional
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import json
 
 from .. import archive as ar
+from .. import archive_health as H
 from ..ui import err, info, ok, warn
 
 # Who must own the mount point.  Root, always; the tests point it at themselves.
@@ -33,6 +37,10 @@ CLIENT_DIRS = {"timestd": "timestd"}
 # often lacks (AI6VN-1, 2026-11-12: `--dry-run` as hamsci stopped on
 # "wipefs not found").
 _SBIN_DIRS = ("/usr/sbin", "/sbin")
+
+HEALTH = ar.MOUNT.parent / "archive-health.json"            # /var/lib/sigmond/archive-health.json
+MODPROBE_CONF = Path("/etc/modprobe.d/sigmond-archive-usb.conf")
+HEALTH_TIMER = "sigmond-archive-health.timer"
 
 
 def _say(msg: str = "") -> None:
@@ -198,8 +206,184 @@ def _channels_in_buffer() -> int:
 
 # ---------------------------------------------------------------- add
 
+# ---------------------------------------------------------------- health (part 1)
+
+def _smart_run(argv, **kw):
+    kw.pop("timeout", None)
+    return subprocess.run(argv, capture_output=True, text=True)
+
+
+def _probe(name: str):
+    return H.probe(name, run=_smart_run)
+
+
+def _short_self_test(name: str, dev_type) -> Optional[str]:
+    if not H.start_short_test(name, dev_type, run=_smart_run):
+        _say("    the drive's bridge cannot start a self-test; going on without one")
+        return None
+    _say("    short self-test started (about 2 minutes)")
+    return H.wait_self_test(name, dev_type, run=_smart_run, say=_say)
+
+
+def _usb_ids(devpath: str) -> Tuple[str, str]:
+    d = ar.SYS_USB / devpath
+    return ((d / "idVendor").read_text().strip(), (d / "idProduct").read_text().strip())
+
+
+def _set_runtime_quirk(line: str) -> None:
+    quirk = line.split("quirks=", 1)[1]
+    p = Path("/sys/module/usb_storage/parameters/quirks")
+    cur = p.read_text().strip() if p.exists() else ""
+    if quirk not in cur.split(","):
+        p.write_text(",".join(x for x in (cur, quirk) if x))
+
+
+def _rebind_usb(devpath: str) -> bool:
+    drv = Path("/sys/bus/usb/drivers/usb")
+    try:
+        (drv / "unbind").write_text(devpath)
+        time.sleep(2)
+        (drv / "bind").write_text(devpath)
+        return True
+    except OSError as exc:
+        err(f"could not rebind USB {devpath}: {exc}")
+        return False
+
+
+def _switch_uas(disk: "ar.Disk") -> Optional["ar.Disk"]:
+    """Put the drive's bridge on usb-storage (BOT) so SMART passes, here and
+    at every boot; the disk that comes back, or None."""
+    if not disk.usb_devpath:
+        return None
+    vid, pid = _usb_ids(disk.usb_devpath)
+    line = H.uas_quirk_line(vid, pid)
+    MODPROBE_CONF.parent.mkdir(parents=True, exist_ok=True)
+    MODPROBE_CONF.write_text(line + "\n")
+    ok(f"wrote {MODPROBE_CONF}: {line}")
+    _set_runtime_quirk(line)
+    if not _rebind_usb(disk.usb_devpath):
+        return None
+    end = time.monotonic() + 30
+    while True:
+        for d in ar.list_disks().values():
+            if d.usb_devpath == disk.usb_devpath:
+                return d
+        if time.monotonic() >= end:
+            err("the drive did not come back after the switch; unplug it and plug it in again")
+            return None
+        time.sleep(1)
+
+
+def _ask(prompt: str) -> bool:
+    try:
+        return input(prompt).strip().lower() in ("y", "yes")
+    except EOFError:
+        return False
+
+
+def _health_step(disk: "ar.Disk", args, dry: bool):
+    """Read SMART, run the short self-test, judge.  Returns (rc, disk,
+    reading); rc 1 stops add before the erase."""
+    if not shutil.which("smartctl"):
+        if dry:
+            _say("    would install smartmontools (smartctl) to read the drive's health")
+            return 0, disk, None
+        if _run(["apt-get", "install", "-y", "-q", "smartmontools"], False) != 0:
+            warn("smartctl could not be installed; the drive's health is unknown")
+            return 0, disk, None
+    reading, why = _probe(disk.name)
+    if reading is None and "under UAS" in why and not dry:
+        warn(why)
+        if getattr(args, "switch_uas", False) or _ask(
+                "  Switch the bridge to usb-storage so its health can be read? [y/N] "):
+            back = _switch_uas(disk)
+            if back is not None:
+                disk = back
+                reading, why = _probe(disk.name)
+    if reading is not None:
+        _say(f"\n  health  {reading.model}  disk serial {reading.disk_serial or '?'}  "
+             f"(smartctl -d {reading.dev_type or 'auto'})")
+        for label, value in H.table(reading):
+            _say(f"    {label:<24}{value}")
+        if H.is_smr(reading.model):
+            info("this model is shingled (SMR): fine for the archive's whole-file writes")
+        if not dry and not getattr(args, "no_self_test", False):
+            result = _short_self_test(disk.name, reading.dev_type)
+            if result:
+                reading.selftest_status = result
+                _say(f"    self-test: {result}")
+    v, reasons = H.verdict(reading, why)
+    if v == "fail":
+        for r in reasons:
+            err(r)
+        if (getattr(args, "accept_unhealthy", None) or "").removeprefix("/dev/") != disk.name:
+            err(f"refusing a failing drive; unplug it.  To use it anyway: "
+                f"--accept-unhealthy {disk.name}")
+            return 1, disk, reading
+        warn(f"--accept-unhealthy {disk.name}: going on with a failing drive")
+    elif v == "warn":
+        for r in reasons:
+            warn(r)
+        if not dry and getattr(args, "confirm", None) is None and not _ask(
+                "  Use this drive anyway? [y/N] "):
+            info(f"stopped; /dev/{disk.name} untouched")
+            return 1, disk, reading
+    elif v == "unknown":
+        info(f"health unknown: {reasons[0]}")
+    else:
+        ok("drive health: no warnings")
+    return 0, disk, reading
+
+
+def _write_health(reading) -> None:
+    now = _dt.datetime.now(_dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    HEALTH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = HEALTH.with_name(HEALTH.name + ".new")
+    tmp.write_text(json.dumps(H.health_doc(reading, reading, now), indent=2) + "\n")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, HEALTH)
+
+
+def _after_mount(reading, dry: bool) -> None:
+    if reading is not None:
+        _write_health(reading)
+    _run(["systemctl", "mask", "--now", "smartmontools.service"], dry)
+    _run(["systemctl", "enable", "--now", HEALTH_TIMER], dry)
+
+
+def _upgrade(args) -> int:
+    """Bring a drive added before 2026-11-13 up to date without formatting:
+    the automount fstab line, the new archive.toml keys, a health baseline."""
+    cfg = _config()
+    if not cfg.get("uuid"):
+        err("no archive drive to upgrade (`smd archive add` attaches one)")
+        return 1
+    uuid = str(cfg["uuid"])
+    fstab = ar.FSTAB.read_text() if ar.FSTAB.exists() else ""
+    if ar.fstab_needs_upgrade(fstab):
+        ar.FSTAB.write_text(ar.fstab_with_archive(fstab, uuid))
+        ok("fstab: the archive line now automounts after a replug")
+    disk = next((d for d in ar.list_disks().values() if d.serial and d.serial == cfg.get("serial")),
+                None)
+    reading = None
+    if disk is not None:
+        rc, disk, reading = _health_step(disk, args, False)
+    disk_serial = reading.disk_serial if reading else str(cfg.get("disk_serial", ""))
+    dev_type = reading.dev_type if reading else cfg.get("smart_dev_type")
+    d = disk or ar.Disk("", int(cfg.get("size_bytes", 0)), str(cfg.get("model", "")),
+                        str(cfg.get("serial", "")), None, None)
+    ar.CONFIG.write_text(ar.config_text(uuid, d, str(cfg.get("added_utc", "")),
+                                        disk_serial=disk_serial, smart_dev_type=dev_type))
+    ok(f"{ar.CONFIG} has the archiver's keys (archive_dtype f16, evict_first)")
+    _run(["systemctl", "daemon-reload"], False)
+    _after_mount(reading, False)
+    return 0
+
+
 def _add(args) -> int:
     _with_sbin_on_path()
+    if getattr(args, 'upgrade', False):
+        return _upgrade(args)
     dry = bool(getattr(args, 'dry_run', False))
     name = getattr(args, 'device', None)
     if name:
@@ -247,6 +431,10 @@ def _add(args) -> int:
             + ", ".join(f"{s} on {m}" for s, m in mounted.items())
             + ").  Unmount it first; `add` formats the whole drive")
         return 1
+
+    rc, disk, reading = _health_step(disk, args, dry)
+    if rc:
+        return rc
 
     channels = _channels_in_buffer()
     _say(f"\n  At about 15 GB per channel per day, {channels} channels fill this drive "
@@ -317,13 +505,19 @@ def _add(args) -> int:
     tmp.write_text(fstab_new)
     os.replace(tmp, ar.FSTAB)
     ar.CONFIG.parent.mkdir(parents=True, exist_ok=True)
-    ar.CONFIG.write_text(ar.config_text(uuid, disk, now))
+    ar.CONFIG.write_text(ar.config_text(
+        uuid, disk, now, disk_serial=reading.disk_serial if reading else "",
+        smart_dev_type=reading.dev_type if reading else None))
     if _run(["systemctl", "daemon-reload"], False) != 0:
         return 1
+    # Nothing, root included, may write into the bare mount point while the
+    # drive is away (design part 2: never archive onto the SSD).
+    _run(["chattr", "+i", str(ar.MOUNT)], False)
     if _mount_verified(part) != 0:
         err(f"the fstab line stands (backup {backup}); mount {ar.MOUNT} by hand to see why")
         return 1
     _make_client_dirs(ar.MOUNT)
+    _after_mount(reading, False)
     st = shutil.disk_usage(ar.MOUNT)
     ok(f"archive drive mounted at {ar.MOUNT}: {ar.human_bytes(st.free)} free, "
        f"about {ar.days_fit(st.free, channels):.0f} days at {channels} channels")
