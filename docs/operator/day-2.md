@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 5554c6e on 2026-11-13 — whole page re-read; verbs and flags against `smd <verb> --help`, archive section against commands/archive.py and hf-timestd b7f5a56 (archiver and prune timers), update section against bin/smd and update.py; sample outputs dated 2026-08 not re-run. Earlier: sigmond 913bfed on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 007bf72 on 2026-10-10: remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; held packages against sink_doors.py
+> **Verified against:** sigmond 5554c6e on 2026-11-13 — whole page re-read; verbs and flags against `smd <verb> --help`, archive section against commands/archive.py and hf-timestd b7f5a56 (archiver and prune timers), update section against bin/smd and update.py; sample outputs dated 2026-08 not re-run. Routing passages: sigmond 0d9e879 on 2026-11-13 — every spot goes to wsprdaemon.org, checked against uniform_routing.py, uploader_manifest.apply_proxying, upload.py, bin/smd `watch uploads` and wspr-recorder's hs_uploader_shim.py. Earlier: sigmond 913bfed on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 007bf72 on 2026-10-10: remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; held packages against sink_doors.py
 > **Canonical for:** day-2 operation — what healthy looks like, the weekly check, updates, power loss
 
 The station is meant to be boring. It runs itself, it restarts itself after a
@@ -357,7 +357,7 @@ while `smd sink status` on the very same station says
 
 | Line | The question it answers |
 |---|---|
-| `✓ ready: wsprnet.org, …` in `smd component list` | *"Does this path have the credentials and identity it would need?"* — `lib/sigmond/upload_creds.py`, whose `ready` field is documented as "are the required credentials/identity present?". wsprnet, wsprdaemon and PSKReporter need no registration at all ([registration.md §2–§4](registration.md#2-wsprnetorg--nothing-to-register)), so they are *always* "ready" on every station. |
+| `✓ ready: wsprnet.org, …` in `smd component list` | *"Does this path have the credentials and identity it would need?"* — `lib/sigmond/upload_creds.py`, whose `ready` field is documented as "are the required credentials/identity present?". wsprnet, wsprdaemon and PSKReporter need no registration at all ([registration.md §2–§4](registration.md#2-wsprnetorg--nothing-to-register)), so they are *always* "ready" on every station. The line still names all three, although wsprdaemon.org now forwards your spots to the other two. |
 | `⚠ site sink: off`, `⚠ site sink: fill` or `⚠ site sink: hold (legacy)` in `smd sink status` | *"May this station send data right now?"* The site sink switch answers that for the whole station. |
 
 So read the readiness block as **"nothing missing would stop these paths once

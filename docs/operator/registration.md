@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 5554c6e on 2026-11-13 — whole page re-read; `smd psws` and `smd config psws` against `--help` and psws.py, timers against the unit files, uploader unit names against bin/smd; sample outputs dated 2026-08 not re-run. Earlier: sigmond 913bfed on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 6406025 on 2026-10-10: remote-access words and the addresses the host relays checked against commands/remote.py, the wizard's switch and the appliance console panel; held packages against sink_doors.py
+> **Verified against:** sigmond 5554c6e on 2026-11-13 — whole page re-read; `smd psws` and `smd config psws` against `--help` and psws.py, timers against the unit files, uploader unit names against bin/smd; sample outputs dated 2026-08 not re-run. Routing passages: sigmond 0d9e879 on 2026-11-13 — every spot goes to wsprdaemon.org, checked against uniform_routing.py, uploader_manifest.apply_proxying, upload.py, bin/smd `watch uploads` and wspr-recorder's hs_uploader_shim.py. Earlier: sigmond 913bfed on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 6406025 on 2026-10-10: remote-access words and the addresses the host relays checked against commands/remote.py, the wizard's switch and the appliance console panel; held packages against sink_doors.py
 > **Canonical for:** getting a station's uploads accepted (PSWS, wsprnet, pskreporter, wsprdaemon; airframes.io, optional)
 
 Your station starts hearing signals the moment the install finishes. This page
@@ -11,9 +11,12 @@ file it under your name. Unfamiliar words are in the [glossary](glossary.md).
 
 The good news first, because it saves most people an afternoon of worry:
 
-- **wsprnet.org** — nothing to register. Ever.
-- **pskreporter.info** — nothing to register. Ever.
-- **wsprdaemon.org** — nothing to register; it registers itself on your first upload.
+- **wsprdaemon.org** — nothing to register; it registers itself on your first
+  upload. Your station sends its WSPR, FT8/FT4 and MSK144 spots here.
+- **wsprnet.org** — nothing to register. Ever. wsprdaemon.org forwards your
+  WSPR spots to it.
+- **pskreporter.info** — nothing to register. Ever. wsprdaemon.org forwards
+  your FT8, FT4 and MSK144 spots to it.
 - **PSWS (HamSCI)** — **the only place you fill in a form.** One account, one
   site, one instrument per product, then paste one key.
 
@@ -98,7 +101,11 @@ PSWS enrollment — site
 
 There is no account, no key, no form, and no waiting on anyone. WSPR reporting
 works on the honour system: your **reporter ID** is your identity, and the
-first spot you upload creates you in the database.
+first spot that reaches wsprnet creates you in the database.
+
+Your station sends its WSPR spots to wsprdaemon.org (§4). wsprdaemon.org keeps
+them and forwards a copy to wsprnet under the reporter ID each spot carries,
+which is your station's own.
 
 That is exactly why the reporter ID matters. It is one per receiver *and*
 antenna — `AC0G/B4`, `AC0G/B1`, `AC0G/S` are three different reporters at one
@@ -128,8 +135,13 @@ smd watch uploads
 ```
 
 That prints one line per two-minute WSPR cycle, e.g.
-`cycle=21:48 shipped wsprdaemon=199 wsprnet=posted:75/added:74 ft8=312 ft4=0`.
-It keeps printing until you press Ctrl-C; it changes nothing.
+`[21:48:05] cycle 21:48   wsprnet    0   wsprdaemon  199   ft8  312   ft4    0   tar 12.3kB`.
+It keeps printing until you press Ctrl-C; it changes nothing. The `wsprdaemon`
+count tells you the cycle left the station. The `wsprnet` count shows only the
+spots this station posted to wsprnet *itself*. Where wsprdaemon.org does the
+forwarding, that count reads 0, and 0 there is normal. Some stations still show
+a count there, because wspr-recorder's own uploader also posts directly; their
+spots reach wsprnet either way.
 
 #### When it says "no active uploader"
 
@@ -174,8 +186,11 @@ no operator page explains is
 
 ## 3. pskreporter.info — nothing to register
 
-Same story: no account, no key. Your FT8/FT4 spots are sent over an open
-connection tagged with your **bare callsign and grid** — no `/B4` suffix here
+Same story: no account, no key. Your station puts its FT8/FT4 spots, and its
+MSK144 spots if it runs meteor-scatter, into each WSPR cycle's upload to
+wsprdaemon.org. wsprdaemon.org forwards them to pskreporter; your station does
+not connect to pskreporter itself. pskreporter files them under your **bare
+callsign and grid**, with no `/B4` suffix
 (source: `hs-uploader/docs/PER-SITE-SETUP.md` §1 and §2).
 
 **How to confirm:** at [pskreporter.info](https://pskreporter.info), look
@@ -191,9 +206,11 @@ Or, again from the station — `[VM]`:
 smd watch uploads
 ```
 
-Lines from the PSK uploader carry `ft8=` and `ft4=` counters — that is what
-pskreporter is being sent. Not every line has them: WSPR cycle lines and PSK
-lines are two different shapes sharing one screen. If it returns at once with
+The `ft8` and `ft4` counts on each WSPR cycle line are the FT8 and FT4 spots
+that left in that cycle's upload to wsprdaemon.org, which forwards them to
+pskreporter. A line that starts `PSKReporter` comes only from a psk-recorder
+that still posts to pskreporter itself; a station on the wsprdaemon.org route
+prints none. If it returns at once with
 `✗ uploads-watch: no active uploader on this host`, see
 [when it says "no active uploader"](#when-it-says-no-active-uploader) — that is
 a station with its recorders switched off, not a fault.
@@ -206,8 +223,9 @@ a station with its recorders switched off, not a fault.
 
 ## 4. wsprdaemon.org — it registers itself
 
-wsprdaemon.org gets a second, richer copy of your WSPR data. You do **not**
-email anyone and you do **not** pre-register a key. The first time your station
+wsprdaemon.org receives your station's spots: WSPR, with the noise readings
+of each cycle, plus FT8/FT4 and MSK144. It keeps them and forwards copies to
+wsprnet (§2) and pskreporter (§3). You do **not** email anyone and you do **not** pre-register a key. The first time your station
 tries to upload, this happens by itself (source:
 `hs-uploader/docs/PER-SITE-SETUP.md` §4):
 
@@ -437,9 +455,9 @@ runs `smd sink upload`, and the end of this section explains the switch.
 
 | Product | Where to look | Typically appears |
 |---|---|---|
-| **WSPR spots** → wsprnet.org | [wsprnet.org](https://wsprnet.org) → Database → *Reporter* = your reporter ID | within ~15 minutes (2-minute cycles, then the upload batch) |
-| **FT8 / FT4 spots** → pskreporter.info | [pskreporter.info](https://pskreporter.info) → your **callsign as receiver** | within a few minutes (the station ships every 30 s) |
-| **WSPR copies** → wsprdaemon.org | `smd watch uploads`, the `wsprdaemon=` counter | same cycle as wsprnet; the very first ever may go the slower FTP route until the gateway registers you (§4) |
+| **WSPR, FT8/FT4 and MSK144 spots** → wsprdaemon.org | `smd watch uploads`, the `wsprdaemon` count | each 2-minute cycle; the very first ever may go the slower FTP route until the gateway registers you (§4) |
+| **WSPR spots** → wsprnet.org, forwarded by wsprdaemon.org | [wsprnet.org](https://wsprnet.org) → Database → *Reporter* = your reporter ID | within ~15 minutes (2-minute cycles, then wsprdaemon.org's forwarding) |
+| **FT8 / FT4 and MSK144 spots** → pskreporter.info, forwarded by wsprdaemon.org | [pskreporter.info](https://pskreporter.info) → your **callsign as receiver** | after wsprdaemon.org receives the cycle that carried them; the server sets the pace |
 | **GRAPE daily dataset** → PSWS | your site's page on the PSWS portal | next day — packaged and uploaded at **01:00 UTC** for the previous UTC day |
 | **Magnetometer daily file** → PSWS | your site's page on the PSWS portal | next day — uploaded at **03:00 UTC** |
 
@@ -575,7 +593,7 @@ yourself; the full diagnosis for each lives in
 
 | Symptom | First move | Then see |
 |---|---|---|
-| **No spots on wsprnet** after 30 minutes | `smd watch uploads` — three answers to tell apart. If it **returns at once** with `✗ uploads-watch: no active uploader on this host`, this station's recorders are switched off and zero spots is expected ([above](#when-it-says-no-active-uploader)). If it sits there printing **nothing at all**, the problem is decoding, not registration. If it prints `wsprnet=0`, check that you are searching the right identity with `smd admin instance list` (its REPORTER ID column, e.g. `AC0G/B4`) or in `/etc/sigmond/site-profile.toml` under `[reporters] reporter_id` | [troubleshooting.md → *No spots on wsprnet*](troubleshooting.md#no-spots-on-wsprnet) |
+| **No spots on wsprnet** after 30 minutes | `smd watch uploads` — three answers to tell apart. If it **returns at once** with `✗ uploads-watch: no active uploader on this host`, this station's recorders are switched off and zero spots is expected ([above](#when-it-says-no-active-uploader)). If it sits there printing **nothing at all**, the problem is decoding, not registration. If it prints cycle lines with a `wsprdaemon` count above 0, the station is shipping, and a `wsprnet` count of 0 is normal (§2). Check that you are searching the right identity with `smd admin instance list` (its REPORTER ID column, e.g. `AC0G/B4`) or in `/etc/sigmond/site-profile.toml` under `[reporters] reporter_id`; if the identity is right, wsprdaemon.org's forwarding is the next suspect, and only your fleet admin can check it | [troubleshooting.md → *No spots on wsprnet*](troubleshooting.md#no-spots-on-wsprnet) |
 | **Nothing on pskreporter** | Search your callsign **as receiver**, not sender (§3) — that is the answer more often than not | [troubleshooting.md → *Nothing on pskreporter*](troubleshooting.md#nothing-on-pskreporter) |
 | **Uploads pending, and the number keeps growing** | `smd sink status` first (§6); the site sink switch may hold uploads back | [troubleshooting.md → *Uploads pending and growing*](troubleshooting.md#uploads-pending-and-growing) |
 | **PSWS not verified** | `smd psws verify` and read which of the two failures it reports (§5c) | [troubleshooting.md → *PSWS not verified*](troubleshooting.md#psws-not-verified) |

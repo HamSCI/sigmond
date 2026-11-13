@@ -46,9 +46,11 @@ rather than through radiod.
   `hamsci-physics`, `hfdl-recorder`, `codar-sounder`.
 - **Additional clients:** `hf-tec`, `superdarn-sounder`.
 
-Decoded spots / products land in a **shared SQLite sink**
-(`/var/lib/sigmond/sink.db`) and are shipped upstream by `hs-uploader`
-to wsprnet.org, wsprdaemon.org, pskreporter.info, and PSWS / HamSCI.
+Decoded spots and products land in a **shared SQLite sink**
+(`/var/lib/sigmond/sink.db`), and `hs-uploader` ships them upstream.  WSPR,
+FT4/FT8 and MSK144 spots go to wsprdaemon.org, which forwards copies to
+wsprnet.org and pskreporter.info; GRAPE and magnetometer products go to
+PSWS / HamSCI.
 hfdl-recorder and codar-sounder send their timing rows to wsprdaemon.org
 the same way.  hfdl-recorder can also feed airframes.io directly through
 `dumphfdl`; that feed stays off until the operator turns it on.  Sigmond is the
@@ -639,8 +641,8 @@ bring-up (`smd bringup dasi2 --with-optional`) or one at a time
 |--------|-------------|------|
 | **radiod** | ka9q-radio SDR daemon — receives RF and multicasts IQ channels | [ka9q/ka9q-radio](https://github.com/ka9q/ka9q-radio) |
 | **hf-timestd** | HF time-standard analyzer (WWV/WWVH/CHU/BPM) — also the suite's **timing authority** (publishes the RTP↔UTC offset + tier other clients label against) | [HamSCI/hf-timestd](https://github.com/HamSCI/hf-timestd) |
-| **wspr-recorder** | WSPR/FST4W recorder + decoder — uploads to wsprnet.org / wsprdaemon.org | [HamSCI/wspr-recorder](https://github.com/HamSCI/wspr-recorder) |
-| **psk-recorder** | FT4/FT8 spot recorder — decodes and uploads to PSKReporter | [HamSCI/psk-recorder](https://github.com/HamSCI/psk-recorder) |
+| **wspr-recorder** | WSPR/FST4W recorder + decoder — uploads to wsprdaemon.org, which forwards to wsprnet.org | [HamSCI/wspr-recorder](https://github.com/HamSCI/wspr-recorder) |
+| **psk-recorder** | FT4/FT8 spot recorder — decodes; wsprdaemon.org forwards its spots to PSKReporter | [HamSCI/psk-recorder](https://github.com/HamSCI/psk-recorder) |
 | **mag-recorder** | RM3100 magnetometer recorder (USB-I²C, non-radiod) — daily datasets to PSWS | [HamSCI/mag-recorder](https://github.com/HamSCI/mag-recorder) |
 | **meteor-scatter** | Meteor-scatter ping decoder (`jt9 --msk144`) → local sink + hs-uploader | [HamSCI/meteor-scatter](https://github.com/HamSCI/meteor-scatter) |
 | **hfdl-recorder** | HFDL (High Frequency Data Link) recorder — one `dumphfdl` subprocess per band. Sends ground-station squitter timing to wsprdaemon.org; the airframes.io feed stays off unless you turn it on | [HamSCI/hfdl-recorder](https://github.com/HamSCI/hfdl-recorder) |

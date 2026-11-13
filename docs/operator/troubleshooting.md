@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 5554c6e on 2026-11-13 — whole page re-read; verbs and flags against `smd <verb> --help`, the restart table against etc/catalog.toml, doctor findings against sdr_events.py, console-panel lines against sigmond-appliance, disk numbers against hf-timestd b7f5a56; sample outputs dated 2026-08 not re-run. Earlier: sigmond 913bfed on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 16f47bc on 2026-10-11: the console panel's bring-up and guest-agent lines checked against sigmond-appliance 68e966a (`firstboot-v3.sh`) and `bin/sigmond-firstrun-bringup`; earlier checks, at 007bf72 on 2026-10-10: remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; sink words checked at 58fb909 against commands/sink.py and commands/config.py
+> **Verified against:** sigmond 5554c6e on 2026-11-13 — whole page re-read; verbs and flags against `smd <verb> --help`, the restart table against etc/catalog.toml, doctor findings against sdr_events.py, console-panel lines against sigmond-appliance, disk numbers against hf-timestd b7f5a56; sample outputs dated 2026-08 not re-run. Routing passages: sigmond 0d9e879 on 2026-11-13 — every spot goes to wsprdaemon.org, checked against uniform_routing.py, uploader_manifest.apply_proxying, upload.py, bin/smd `watch uploads` and wspr-recorder's hs_uploader_shim.py. Earlier: sigmond 913bfed on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 16f47bc on 2026-10-11: the console panel's bring-up and guest-agent lines checked against sigmond-appliance 68e966a (`firstboot-v3.sh`) and `bin/sigmond-firstrun-bringup`; earlier checks, at 007bf72 on 2026-10-10: remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; sink words checked at 58fb909 against commands/sink.py and commands/config.py
 > **Amended 2026-09-02** (not re-walked): the SDR sentinel was retired, so a
 > re-seated RX888 is now brought back with `smd status` + `smd adopt`, not by
 > waiting two minutes.
@@ -175,14 +175,22 @@ for about three minutes.
 3. **The site sink switch holds uploads back.** A new station starts at `off`
    until someone runs `smd sink upload`. A station with no antenna, or one still
    under construction, stays out of the public databases on purpose.
-4. **Nothing is being decoded at all** — which is a different problem, and a
+4. **wsprdaemon.org has not forwarded them.** Your station does not post to
+   wsprnet itself. It sends its spots to wsprdaemon.org, which forwards them to
+   wsprnet under your reporter ID. For now the server forwards only the spots
+   your station marks for forwarding; sigmond sets that mark, and a change on
+   the server will drop the need for it. You cannot see the server side from
+   the station; your fleet admin can.
+5. **Nothing is being decoded at all** — which is a different problem, and a
    bigger one.
-5. **Propagation.** An hour with no spots is weather. A week with zero is a
+6. **Propagation.** An hour with no spots is weather. A week with zero is a
    fault ([day-2.md §2](day-2.md#2-are-your-spots-arriving)).
 
 **What to check**
 
-`[VM]`:
+Check three things, in this order: that your station sends its upload, that
+wsprdaemon.org receives it, and that wsprdaemon.org forwards it. You can check
+only the first from the station. Start there — `[VM]`:
 
 ```bash
 smd watch uploads
@@ -193,8 +201,8 @@ It follows the uploader until you press Ctrl-C; it changes nothing. There are
 
 | What you see | What it means |
 |---|---|
-| One line per two-minute cycle, e.g. `cycle=21:48 shipped wsprdaemon=199 wsprnet=posted:75/added:74 ft8=312 ft4=0 tar=12.3kB` | *Good.* The station is shipping. |
-| `wsprnet=0` on those lines | The station is shipping but found zero WSPR spots — empty bands, or you are searching the wrong reporter ID. |
+| One line per two-minute cycle, e.g. `[21:48:05] cycle 21:48   wsprnet    0   wsprdaemon  199   ft8  312   ft4    0   tar 12.3kB` | *Good.* The station is shipping to wsprdaemon.org. A `wsprnet` count of 0 is normal: it counts only spots the station posted to wsprnet itself, and wsprdaemon.org forwards yours. |
+| A `wsprnet` count above 0 on those lines | Also shipping. wspr-recorder's own uploader still posts this station's WSPR spots to wsprnet directly, beside wsprdaemon.org. The spots reach wsprnet either way; mention it to your fleet admin. |
 | **Nothing printed at all** for more than five minutes | Nothing is reaching the uploader; the problem is upstream of uploading. |
 | It **returns immediately** with `✗ uploads-watch: no active uploader on this host (wspr-uploader.service, wspr-recorder@*, psk-recorder@*, wd-upload-hs@* all inactive).` | The spot recorders and uploaders are **not running on this station** — usually because they were deliberately switched off (no antenna, or a station still being built). This is DASI002's answer, and it is correct there. Nothing has failed and there is nothing to Ctrl-C. |
 
@@ -240,9 +248,11 @@ while the site switch reads `upload`.
 
 **What to do**
 
-- `wsprnet=0` with cycles printing → your station is healthy and shipping;
-  either the bands are empty or you are searching the wrong reporter ID. Search
-  the one `smd admin instance list` printed.
+- Cycles printing with a `wsprdaemon` count above 0 → your station is healthy
+  and shipping. Search the reporter ID `smd admin instance list` printed. If
+  that finds nothing after an hour, the spots stop somewhere past the station:
+  at wsprdaemon.org's receipt or at its forwarding (cause 4). Ask your fleet
+  admin.
 - Nothing printed at all → the problem is upstream of uploading. Go to
   [Spots stopped](#spots-stopped-were-fine-before). (Only if it **sat there**
   silently. An *immediate* `✗ … no active uploader on this host` is the fourth
@@ -260,8 +270,10 @@ while the site switch reads `upload`.
 **When to stop and ask**
 
 `site sink: upload`, `radiod` active, signals visible on the waterfall, cycles
-printing with real counts — and still nothing on wsprnet an hour later. That
-combination is not something you can fix from the station.
+printing with real `wsprdaemon` counts — and still nothing on wsprnet an hour
+later. That combination is not something you can fix from the station: ask
+your fleet admin whether wsprdaemon.org received your cycles and forwarded
+them.
 
 ---
 
@@ -286,19 +298,44 @@ combination is not something you can fix from the station.
    there is nothing to fix
    ([day-2.md → *Installed, enabled, shown*](day-2.md#installed-enabled-shown)).
 4. **`psk-recorder` is enabled but not running.**
-5. **Nothing is being decoded** — see [Spots stopped](#spots-stopped-were-fine-before).
+5. **No wspr-recorder carries the spots.** Your FT8/FT4 and MSK144 spots leave
+   the station inside wspr-recorder's upload to wsprdaemon.org. A station that
+   runs psk-recorder or meteor-scatter without wspr-recorder has nothing to
+   carry them.
+6. **wsprdaemon.org has not forwarded them.** Your station does not post to
+   pskreporter itself; wsprdaemon.org forwards your spots. For now the server
+   forwards only the spots your station marks for forwarding, and sigmond sets
+   that mark. Only your fleet admin can see the server side.
+7. **Nothing is being decoded** — see [Spots stopped](#spots-stopped-were-fine-before).
 
 **What to check**
 
-`[VM]`:
+Check three things, in this order: that your station sends its upload, that
+wsprdaemon.org receives it, and that wsprdaemon.org forwards it. You can check
+only the first from the station. `[VM]`:
 
 ```bash
 smd watch uploads
 ```
 
-Lines carrying `ft8=` and `ft4=` counters are the PSK path. *Good* is a non-zero
-`ft8=`. Note that WSPR cycle lines and PSK lines are two different shapes sharing
-one screen, so not every line has them.
+The `ft8` and `ft4` counts on each WSPR cycle line are the FT8 and FT4 spots
+that left in that cycle's upload to wsprdaemon.org. *Good* is a non-zero
+`ft8`. A line that starts `PSKReporter` comes from a psk-recorder that still
+posts to pskreporter itself; a station on the wsprdaemon.org route prints none.
+
+Then ask sigmond whether each psk-recorder and meteor-scatter instance sends
+via wsprdaemon.org. This changes nothing — `[VM]`:
+
+```bash
+smd admin uploader routing
+```
+
+*Good:* `routing: N instance(s) already deliver via wsprdaemon.org`. A line
+`routing: ERROR … no wspr-recorder is enabled to carry its spots` is cause 5.
+A line `routing: would set …` names an instance still on an older route; the
+next `smd sink upload` or `smd update --apply` moves it. A line
+`routing: left alone … its sink reads below upload` means the sink switch
+holds that client back on purpose.
 
 Then `[VM]`:
 
@@ -314,17 +351,15 @@ searching pskreporter will find a station that is not reporting.
 **What to do**
 
 Search pskreporter again as the **receiver**, using the bare callsign. If
-`ft8=` counters are moving, your station is doing its job.
-
-A quiet log is *also* the healthy case here: the PSK upload path only writes a
-line when something goes wrong. On AC0G/B4 a full day produced six log lines,
-all `Broken pipe — reconnecting`, each of which recovered by itself (observed
-2026-08-18). So "nothing in the log" is not evidence of a problem.
+the `ft8` counts are moving, your station is doing its job; the rest happens
+at wsprdaemon.org.
 
 **When to stop and ask**
 
-`ft8=` counters at zero for an hour while the waterfall shows signals and
-`psk-recorder` is active.
+`ft8` counts at zero for an hour while the waterfall shows signals and
+`psk-recorder` is active. Or counts moving, the routing check clean, and still
+nothing on pskreporter after an hour: ask your fleet admin whether
+wsprdaemon.org received your cycles and forwarded them.
 
 > **Don't poll pskreporter's query API** in a script — it is rate-limited and a
 > loop will get you blocked ([registration.md §3](registration.md#3-pskreporterinfo--nothing-to-register)).
@@ -457,9 +492,13 @@ and no uploader reads them, so the trim alone bounds that table. At AC0G-ND,
 about 14,000 rows a day arrive there.
 
 **So: queue depth is not a delivery measure. Check the destination instead.**
-(There is no one command that answers "are my uploads being accepted?" across
-all four destinations — that gap is row 8 of the
-[docs-gap ledger](../contributor/docs-gap-ledger.md).)
+Your spots have one destination, wsprdaemon.org, which forwards copies to
+wsprnet and pskreporter; the GRAPE and magnetometer products go to PSWS. For
+spots, check in order: the station's own upload (`smd watch uploads`), then
+wsprdaemon.org's receipt, then its forwarding. Only the first shows from the
+station; ask your fleet admin about the other two. (There is no one command
+that answers "are my uploads being accepted?" across every destination — that
+gap is row 8 of the [docs-gap ledger](../contributor/docs-gap-ledger.md).)
 
 **Likely causes, most common first**
 
@@ -1483,9 +1522,12 @@ logs and wspr-recorder shared-memory directories; the plan lists those. The
 rows already in `sink.db` stay as they are. Nothing is lost; the old files are
 just not renamed.
 
-Uploader note: spots decoded after the rename are filed under receiver
-`<new>` on wsprdaemon. To keep the old name, set `receiver_override` in
-`pipelines.toml`.
+Uploader note: the rename does not change where your spots go or whose name
+they carry. The station sends them to wsprdaemon.org under its reporter ID,
+not under the radiod's name, and wsprdaemon.org forwards them to wsprnet and
+pskreporter the same way. The command's own closing line still suggests
+`receiver_override` in `pipelines.toml`; no uploader reads that key, so leave
+it out.
 
 **When to stop and ask**
 

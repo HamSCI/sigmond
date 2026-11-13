@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 5554c6e on 2026-11-13 — whole page re-read; ports, relays, the `smd` verbs and the page links checked against pm-align.py, the wizard and `smd <verb> --help`. Earlier: sigmond 007bf72 on 2026-10-10 — remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; walk-through fixes (live dasi002 + b4) as of 4aec0c2
+> **Verified against:** sigmond 5554c6e on 2026-11-13 — whole page re-read; ports, relays, the `smd` verbs and the page links checked against pm-align.py, the wizard and `smd <verb> --help`. Routing passages: sigmond 0d9e879 on 2026-11-13 — every spot goes to wsprdaemon.org, checked against uniform_routing.py, uploader_manifest.apply_proxying, upload.py, bin/smd `watch uploads` and wspr-recorder's hs_uploader_shim.py. Earlier: sigmond 007bf72 on 2026-10-10 — remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; walk-through fixes (live dasi002 + b4) as of 4aec0c2
 > **Canonical for:** the operator's table of contents
 
 You are hosting a *station*: one small computer that listens to the whole
@@ -19,14 +19,14 @@ the contents page; unfamiliar words are in the [glossary](glossary.md).
 - **The kit.** A small always-on x86-64 PC, an RX888 Mk II receiver, a
   broadband HF antenna, a GPS-disciplined clock (*GPSDO*), and a **wired**
   Ethernet cable — no Wi-Fi. Models and cost → [hardware.md](hardware.md).
-- **What it does.** It runs by itself, 24/7, uploading WSPR spots to
-  [wsprnet.org](https://wsprnet.org), FT8/FT4 spots to
-  [pskreporter.info](https://pskreporter.info), copies of both to
-  [wsprdaemon.org](https://wsprdaemon.org), and daily HF time-standard —
-  plus magnetometer, if you have one — products to HamSCI's
-  [PSWS](https://pswsnetwork.eng.ua.edu/). It also sends timing rows from
-  aircraft data links (HFDL) and coastal ocean radars (CODAR) to
-  wsprdaemon.org.
+- **What it does.** It runs by itself, 24/7. It sends its WSPR, FT8/FT4
+  and MSK144 spots to [wsprdaemon.org](https://wsprdaemon.org), which keeps
+  them and forwards copies to [wsprnet.org](https://wsprnet.org) and
+  [pskreporter.info](https://pskreporter.info) under your reporter ID. It
+  sends daily HF time-standard products, and magnetometer products if you
+  have a magnetometer, to HamSCI's [PSWS](https://pswsnetwork.eng.ua.edu/).
+  It also sends timing rows from aircraft data links (HFDL) and coastal
+  ocean radars (CODAR) to wsprdaemon.org.
 - **Your job.** Keep it powered, keep the cable in, glance at one page a week,
   and tell your fleet admin when something goes wrong. No Linux experience
   needed: one USB stick installs it all, and every command you need is here.
