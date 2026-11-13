@@ -192,7 +192,7 @@ except ImportError:
 # import; tests/test_snapshot.py keeps it equal to SNAPSHOT_COMMANDS' keys.
 _SNAPSHOT_NAMES_FALLBACK = ('check', 'components', 'catalog', 'instances',
                             'validate', 'viewers', 'manifest', 'heartbeat', 'docs',
-                            'cli-reference')
+                            'cli-reference', 'storage')
 
 # Cache for `smd admin docs index` (root reads and writes it; tests redirect it).
 DOCS_INDEX_CACHE = Path('/var/lib/sigmond/docs-index-cache.json')

@@ -49,6 +49,9 @@ SNAPSHOT_COMMANDS: Dict[str, List[str]] = {
     "docs": ["admin", "docs", "index", "--json"],
     # Reads the files `smd admin cli-reference build` wrote; runs no walk.
     "cli-reference": ["admin", "cli-reference", "show", "--json"],
+    # The storage ledger's last tick (sigmond-storage.timer, every 2 min): stores, clients,
+    # alarms.  Reads the status file the tick wrote; runs no measurement.
+    "storage": ["storage", "status", "--json"],
 }
 
 OUT_DIR = Path("/run/sigmond/snapshot")
