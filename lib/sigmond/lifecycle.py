@@ -188,6 +188,14 @@ CONFIG_RADIOD_DEFAULTS = {
 }
 _PLACEHOLDER_STATUS = "<configure-via-config-init>"
 
+# Clients whose /etc/<client>/*.toml are never per-instance configs, so
+# instance discovery skips them.  hf-timestd's metrology instances live in
+# metrology-channels/<instance>.env; its TOMLs are global (timestd-config,
+# events).  Reading events.toml as an instance had `smd restart hf-timestd`
+# start a phantom timestd-metrology@events that looped on its missing env
+# file (AC0G/B4, 2026-11-13).
+NO_INSTANCE_TOMLS = {"hf-timestd"}
+
 
 def _config_radiods(component: str) -> set:
     """Radiod status names in /etc/<component>/<component>-config.toml's
@@ -303,7 +311,7 @@ def _expand_template(
         etc_exists = etc_dir.exists()
     except PermissionError:
         etc_exists = False
-    if etc_exists:
+    if etc_exists and component not in NO_INSTANCE_TOMLS:
         legacy_names = {
             "config.toml",
             f"{component}-config.toml",
