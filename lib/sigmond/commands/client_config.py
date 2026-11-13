@@ -176,7 +176,32 @@ def _run_client_entrypoint(client: str, deploy_path: Path,
     except OSError as e:
         err(f"failed to invoke {exe}: {e}")
         return 1
+    if proc.returncode == 0 and verb == "init":
+        _enable_configured_units(repo_root)
     return proc.returncode
+
+
+def _enable_configured_units(repo_root: Path) -> None:
+    """Enable the client's declared units, and start its timers, now that
+    its config exists.
+
+    Install does not enable them: a unit enabled before its config or its
+    service user exists is started by the next `smd start` and fails
+    (v3.91 nested test, 2026-11-13).  Doing it here still closes KJ6MKI
+    (2026-11-12), where grape-daily.timer stayed linked and inactive after
+    `smd install hamsci-physics`.  Never fails the init.
+    """
+    from ..installer import apply_systemd_enables
+    try:
+        msgs = apply_systemd_enables(repo_root, elevate=_maybe_elevate)
+    except Exception as e:  # noqa: BLE001 — the config is written; say so and go on
+        warn(f"could not enable {repo_root.name}'s units: {e}")
+        return
+    for msg in msgs:
+        if msg.lstrip().startswith("warning"):
+            warn(msg.strip())
+        else:
+            ok(msg.strip())
 
 
 # ---------------------------------------------------------------------------

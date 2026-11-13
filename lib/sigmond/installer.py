@@ -442,7 +442,8 @@ def run_install_script(
 
 
 def apply_systemd_enables(repo_dir: Path, dry_run: bool = False,
-                          *, start_timers: bool = True) -> list[str]:
+                          *, start_timers: bool = True,
+                          elevate=None) -> list[str]:
     """Ensure every non-template unit in `[systemd] units` is enabled.
 
     A unit can be installed (link/copy step in deploy.toml writes the file
@@ -468,7 +469,11 @@ def apply_systemd_enables(repo_dir: Path, dry_run: bool = False,
     2026-11-12: grape-daily.timer linked, never enabled or started after
     `smd install hamsci-physics` — no GRAPE dataset, no PSWS upload).  A
     timer only schedules its service; services are never started here.
+
+    ``elevate`` wraps the mutating ``systemctl`` calls (enable, start) for
+    a caller that is not root, e.g. ``smd config init``'s sudo wrapper.
     """
+    elevate = elevate or (lambda argv: argv)
     deploy_toml = repo_dir / 'deploy.toml'
     if not deploy_toml.exists():
         return []
@@ -528,13 +533,13 @@ def apply_systemd_enables(repo_dir: Path, dry_run: bool = False,
             msgs.append(f"  (dry-run) would enable {unit} (was: {state})")
             continue
         r2 = subprocess.run(
-            ['systemctl', 'enable', unit],
+            elevate(['systemctl', 'enable', unit]),
             capture_output=True, text=True, check=False,
         )
         if r2.returncode == 0:
             msgs.append(f"  enabled {unit} (was: {state})")
             if start_timers and unit.endswith('.timer'):
-                r3 = subprocess.run(['systemctl', 'start', unit],
+                r3 = subprocess.run(elevate(['systemctl', 'start', unit]),
                                     capture_output=True, text=True,
                                     check=False)
                 if r3.returncode == 0:
@@ -871,9 +876,10 @@ def install_client(
 
     if reload_needed:
         subprocess.run(['systemctl', 'daemon-reload'], capture_output=True)
-    if ok and not dry_run:
-        # `smd apply` reconciles this at boot-readiness; an install that
-        # stops short of apply must leave its declared units wanted too.
-        for msg in apply_systemd_enables(repo_dir):
-            print(msg)
+    # No enabling here: an installed client is not yet a configured one.
+    # Its units are enabled (and its timers started) when `smd config init`
+    # succeeds, or by `smd apply`.  Enabling at install let the next
+    # `smd start` start services whose config or service user did not
+    # exist yet (v3.91 nested test, 2026-11-13: timestd-core-recorder with
+    # no timestd-config.toml, station-web before its stationweb user).
     return ok
