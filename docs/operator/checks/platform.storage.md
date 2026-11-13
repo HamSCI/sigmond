@@ -26,7 +26,7 @@ Any figure of 10 % or more passes.
 Less than 10 % of the disk remains. A full disk stops the recorders and loses
 data, so act before it reaches zero.
 
-**wait: `... no writer waits for the data disk at /var/lib/timestd.  run: sudo smd storage guard`**
+**wait: `... no writer waits for the data disk at /var/lib/timestd.  run: smd storage guard`**
 The station has a separate data disk, but the programs that write to it could
 start without it and fill the system disk. `smd storage guard` makes them wait
 for it; `smd update` runs it too.

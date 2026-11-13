@@ -45,7 +45,7 @@ The archiver is behind or the drive is misbehaving. `smd archive status` shows m
 Only today's and yesterday's recordings are left on it. Use a larger drive.
 
 **wait: `... still moves raw days with --archive-root`**
-An old hf-timestd cleanup drop-in. Run `sudo smd admin storage tune-timestd --apply`.
+An old hf-timestd cleanup drop-in. Run `smd admin storage tune-timestd --apply`.
 
 **FAIL: pending or unreadable sectors, or a failed SMART verdict**
 The drive is failing. Copy off what you need and replace it.

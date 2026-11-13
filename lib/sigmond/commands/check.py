@@ -943,7 +943,7 @@ def storage_line(env: Env, path: str = STORAGE_PATH) -> Line:
     loose = unguarded_data_mounts()
     if pct >= STORAGE_MIN_FREE_PCT and loose:
         return Line(WAIT, label, f'{path} has {int(pct)} % free; no writer waits for the data '
-                                 f'disk at {", ".join(loose)}.  {RUN}sudo smd storage guard')
+                                 f'disk at {", ".join(loose)}.  {RUN}smd storage guard')
     if pct >= STORAGE_MIN_FREE_PCT:
         return Line(OK, label, f'{path} has {int(pct)} % free')
     return Line(FAIL, label, f'{path} has only {int(pct)} % free.  Tell the fleet admin.')
@@ -1032,7 +1032,7 @@ def archive_line(env: Env) -> Optional[Line]:
         try:
             if '--archive-root' in f.read_text():
                 warn.append(f'{f} still moves raw days with --archive-root; '
-                            f'{RUN}sudo smd admin storage tune-timestd --apply')
+                            f'{RUN}smd admin storage tune-timestd --apply')
                 break
         except OSError:
             pass
