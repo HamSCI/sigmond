@@ -385,14 +385,12 @@ def test_an_env_file_older_than_the_units_start_is_left_alone(rig):
             "routing: 1 instance(s) already deliver via wsprdaemon.org"]
 
 
-def test_a_failed_or_inactive_unit_is_restarted(rig):
-    _routed(rig)
-    for state in ("failed", "inactive"):
-        rig.restarts.clear()
-        rig.states[PSK] = (state, None)
+def test_an_inactive_or_failed_unit_is_never_restarted(rig):
+    _routed(rig, mtime=1000)
+    for state in ("inactive", "failed"):
+        rig.states[PSK] = (state, 900.0)    # started before the file, too
         res = rig.run(ALL, lowered=frozenset(), heal=True)
-        assert rig.restarts == [[PSK]]
-        assert res.stale == [(PSK, f"its unit reads {state}")]
+        assert rig.restarts == [] and res.stale == [], state
 
 
 def test_an_unreadable_unit_state_or_start_restarts_nothing(rig):
@@ -405,7 +403,7 @@ def test_an_unreadable_unit_state_or_start_restarts_nothing(rig):
 
 def test_the_heal_skips_a_dry_run_a_lowered_client_and_no_reader(rig):
     _routed(rig, mtime=1000)
-    rig.states[PSK] = ("failed", None)
+    rig.states[PSK] = ("active", 900.0)
     rig.run(ALL, lowered=frozenset(), heal=True, apply=False)
     rig.run(ALL, lowered=frozenset({"psk-recorder"}), heal=True)
     rig.run(ALL, lowered=frozenset())               # no unit_state reader
@@ -413,8 +411,8 @@ def test_the_heal_skips_a_dry_run_a_lowered_client_and_no_reader(rig):
 
 
 def test_a_stale_restart_that_fails_is_a_failure(rig):
-    _routed(rig)
-    rig.states[PSK] = ("failed", None)
+    _routed(rig, mtime=1000)
+    rig.states[PSK] = ("active", 900.0)
     rig.restart_error = sink_levers.RestartFailed([(PSK, "exit 1")])
     res = rig.run(ALL, lowered=frozenset(), heal=True)
     assert res.stale == [] and not res.ok

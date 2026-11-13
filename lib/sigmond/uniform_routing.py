@@ -22,9 +22,11 @@ Restarts go only through ``sink_levers.restart_units``, which refuses
 radiod and raises ``RadiodMoved`` if radiod's start time changes.
 
 A restart that failed on an earlier run heals on the next one.  Given a
-``unit_state`` reader, the migration also restarts an instance already on
-the server route when its unit reads inactive or failed, or started before
-its env file last changed: it still runs the old route.
+``unit_state`` reader, the migration also restarts an ACTIVE instance
+already on the server route when it started before its env file last
+changed: it still runs the old route.  An inactive or failed unit stays as
+it stands: it reads the env file at its next start, an operator's stop
+stands, and a failed unit raises its own alarm (ruling R10).
 """
 
 from __future__ import annotations
@@ -72,7 +74,7 @@ def lowered_from_state(state) -> frozenset:
     return frozenset(out)
 
 
-_DOWN = ("inactive", "failed")
+_ACTIVE = "active"
 
 
 def unit_state(unit: str, *, systemctl=subprocess.run
@@ -91,15 +93,16 @@ def unit_state(unit: str, *, systemctl=subprocess.run
 
 def _stale_why(unit: str, path: Path, unit_state) -> Optional[str]:
     """Why ``unit``, already on the server route, still runs the old one:
-    its unit reads inactive or failed, or it started before ``path`` last
-    changed (whole seconds, as systemd prints them).  None when it runs
+    it runs, and it started before ``path`` last changed (whole seconds,
+    as systemd prints them).  A unit that does not read active never
+    counts.  None when it runs
     the current file, or when either time cannot be read."""
     try:
         state, started = unit_state(unit)
     except OSError:
         return None
-    if state in _DOWN:
-        return f"its unit reads {state}"
+    if state != _ACTIVE:
+        return None
     try:
         mtime = path.stat().st_mtime
     except OSError:
