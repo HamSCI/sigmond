@@ -549,13 +549,10 @@ def build_plan(profile, *, local_radiod: bool,
                               'enable',
                               argv=[smd, 'admin', 'instance', 'add', '--force',
                                     client, rep_id]))
-            # Enable the instance's upstream upload.  For psk-recorder, pass
-            # --via server-raw: it starts no in-process sender and leaves
-            # forward_to_pskreporter false, so the daemon's psk-pskreporter
-            # pipeline is the one sender for these rows, under the site sink
-            # switch (tasks/plan-sink-control.md §10.2 step 1).  Without --via,
-            # `--on` writes direct, and the in-process sender would post beside
-            # the daemon.  Idempotent.
+            # Enable the instance's upstream upload.  `--on` alone writes the
+            # server route (psk server-merge, meteor deposit): the rows ride
+            # the wspr-recorder tar to wsprdaemon.org, which forwards them.
+            # The site sink switch governs the tar.  Idempotent.
             # A receiver that does not upload (one sharing another's antenna)
             # gets --off, which takes no --via.
             if _reporter_key(rep_id) in off_keys:
@@ -565,13 +562,11 @@ def build_plan(profile, *, local_radiod: bool,
                                   argv=[smd, 'config', 'upload', client,
                                         rep_id, '--off']))
                 continue
-            argv = [smd, 'config', 'upload', client, rep_id, '--on']
-            if client == 'psk-recorder':
-                argv += ['--via', 'server-raw']
             steps.append(Step(STAGE3A,
                               f'enable upload {client}@{rep_id}',
                               'config',
-                              argv=argv))
+                              argv=[smd, 'config', 'upload', client,
+                                    rep_id, '--on']))
 
     # The instances made just above were seeded from each client's shared
     # config, whose radiod came from coordination, so on a host with several

@@ -2144,7 +2144,11 @@ def cmd_config_upload(args) -> int:
             if delivery_knob:
                 dkey = delivery_knob[0]
                 dval = upload.read_flag(e, dkey)
-                extra = f"  [{dkey}={dval if dval is not None else 'unset (default server-merge)'}]"
+                if dval is None:
+                    dval = ("unset (reads direct: posts from this station)"
+                            if client == "meteor-scatter"
+                            else "unset (default server-merge)")
+                extra = f"  [{dkey}={dval}]"
             from ..instance import identity_for_key
             print(f"    {state}  {display_reporter_id(identity_for_key(client, e.stem))}    "
                   f"({flag}={val if val is not None else 'unset'}){extra}")
@@ -2158,6 +2162,9 @@ def cmd_config_upload(args) -> int:
     try:
         path, flag, dests, delivery_set = upload.apply_enable(
             client, instance, on, delivery=via)
+    except upload.DirectRouteRefused as e:
+        err(str(e))
+        return 1
     except ValueError as e:
         err(str(e))
         if delivery_knob:
@@ -2175,9 +2182,14 @@ def cmd_config_upload(args) -> int:
     if delivery_set:
         dkey, dval = delivery_set
         info(f"delivery: {dkey}={dval}"
-             + ("  (standalone direct-to-pskreporter)" if dval == "direct"
-                else "  (via wsprdaemon server)"))
+             + "  (wsprdaemon.org forwards it)")
     info(f"wrote {path}")
+    if on and client in upload.STANDARD_ROUTE:
+        from ..topology import load_topology
+        if "wspr-recorder" not in load_topology().enabled_components():
+            err(f"no wspr-recorder is enabled on this host, so nothing "
+                f"carries {client}'s spots to wsprdaemon.org; "
+                f"run: smd enable wspr-recorder")
     if on:
         info("identity: `smd config render` (site-profile)  ·  "
              "credentials: `smd admin secrets`")

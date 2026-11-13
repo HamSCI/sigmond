@@ -284,7 +284,7 @@ uploading client:
 ```bash
 smd config upload wspr-recorder                     # status: which instances upload
 smd config upload wspr-recorder AC0G/SIGMA --on     # enable (wsprnet + wsprdaemon)
-smd config upload psk-recorder  AC0G/SIGMA --on     # enable (pskreporter, direct)
+smd config upload psk-recorder  AC0G/SIGMA --on     # enable (wsprdaemon.org forwards to pskreporter)
 sudo systemctl restart 'wspr-recorder@AC0G/SIGMA'   # apply
 ```
 
@@ -293,12 +293,14 @@ This flips the enable flag — **identity** comes from `smd config render`
 validate` (`rule_upload_enabled`) warns about any active recorder still
 decoding-but-not-uploading, so a forgotten instance can't stay silent.
 
-> **psk-recorder delivery pipeline.** Enabling psk-recorder also sets
-> `PSK_DELIVERY_PIPELINES=direct` — the node POSTs straight to pskreporter.info,
-> which needs no account/key. The recorder's bare default (`server-merge`) would
-> instead route every spot through a wsprdaemon server, so on a standalone node
-> it ships nothing. Only override on a merge-fleet receiver that feeds a
-> wsprdaemon server: `smd config upload psk-recorder AC0G/SIGMA --on --via server-merge`.
+> **psk-recorder delivery pipeline.** `--on` writes
+> `PSK_DELIVERY_PIPELINES=server-merge` (`METEOR_SCATTER_DELIVERY_MODE=deposit`
+> for meteor-scatter). The rows ride the wspr-recorder tar to wsprdaemon.org,
+> which forwards them to pskreporter.info and wsprnet.org under the spot's own
+> reporter id. No station posts to those sites itself, so `--via direct`,
+> `server-raw`, `both` and `off` are refused. The tar needs a carrier: enable
+> wspr-recorder on the host (`smd enable wspr-recorder`), or `--on` prints an
+> error saying nothing carries the spots.
 
 > **wsprdaemon.org / PSWS need a one-time enrollment.** The SFTP/SSH key
 > self-generates on the host, but its **public** key must be registered with

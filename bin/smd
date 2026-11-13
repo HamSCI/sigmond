@@ -31780,11 +31780,10 @@ def _build_parser() -> argparse.ArgumentParser:
     g.add_argument('--off', action='store_true', help='disable upload for the instance')
     p.add_argument('--via',
                    choices=['direct', 'server-merge', 'server-raw', 'deposit', 'off'],
-                   help='delivery when enabling.  psk-recorder: direct (default; '
-                        'POST straight to pskreporter.info), server-merge (feed a '
-                        'wsprdaemon server in a merge fleet) or server-raw.  '
-                        'meteor-scatter: deposit (wsprdaemon server forwards), '
-                        'direct or off; left as is when omitted')
+                   help='delivery when enabling: server-merge (psk-recorder) or '
+                        'deposit (meteor-scatter), the defaults.  direct, '
+                        'server-raw and off are refused: wsprdaemon.org '
+                        'forwards every spot')
 
     p = config_sub.add_parser(
         'catalog-prune',

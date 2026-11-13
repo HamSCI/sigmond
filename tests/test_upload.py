@@ -80,26 +80,15 @@ class TestUploadEnable(unittest.TestCase):
         self.assertEqual(flag, "WSPR_USE_HS_UPLOADER")
         self.assertEqual(path, self._env("wspr-recorder", "AC0G-S"))
         self.assertIn("WSPR_USE_HS_UPLOADER=1", path.read_text())
-        self.assertIn("wsprdaemon.org", dests)
+        self.assertIn("wsprdaemon.org (forwards to wsprnet.org)", dests)
         self.assertIsNone(delivery)  # wspr has no delivery-pipeline knob
 
-    def test_psk_enable_sets_direct_pipeline(self):
-        # Enabling psk must ALSO set the direct pipeline — the boolean alone
-        # leaves the default server-merge path, which delivers nothing on a
-        # standalone node.
-        path, _, _, delivery = upload.apply_enable(
+    def test_psk_on_writes_server_merge(self):
+        path, _, dests, delivery = upload.apply_enable(
             "psk-recorder", "AC0G/S", True, base=str(self.base))
-        body = path.read_text()
-        self.assertIn("PSK_USE_HS_UPLOADER=1", body)
-        self.assertIn("PSK_DELIVERY_PIPELINES=direct", body)
-        self.assertEqual(delivery, ("PSK_DELIVERY_PIPELINES", "direct"))
-
-    def test_psk_enable_via_server_merge(self):
-        path, _, _, delivery = upload.apply_enable(
-            "psk-recorder", "AC0G/S", True, base=str(self.base),
-            delivery="server-merge")
         self.assertIn("PSK_DELIVERY_PIPELINES=server-merge", path.read_text())
         self.assertEqual(delivery, ("PSK_DELIVERY_PIPELINES", "server-merge"))
+        self.assertEqual(dests, ["wsprdaemon.org (forwards to pskreporter.info)"])
 
     def test_psk_invalid_via_raises(self):
         with self.assertRaises(ValueError):
@@ -120,12 +109,33 @@ class TestUploadEnable(unittest.TestCase):
         self.assertIn("METEOR_SCATTER_USE_HS_UPLOADER=1", body)
         self.assertIn("METEOR_SCATTER_DELIVERY_MODE=deposit", body)
 
-    def test_meteor_on_alone_leaves_the_mode_as_it_stands(self):
-        upload.apply_enable("meteor-scatter", "KFS/NW", True,
-                            base=str(self.base), delivery="deposit")
+    def test_meteor_on_writes_deposit_over_a_seeded_off(self):
+        p = self._env("meteor-scatter", "KFS-NW")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("METEOR_SCATTER_DELIVERY_MODE=off\n")
         upload.apply_enable("meteor-scatter", "KFS/NW", True, base=str(self.base))
-        body = self._env("meteor-scatter", "KFS-NW").read_text()
-        self.assertIn("METEOR_SCATTER_DELIVERY_MODE=deposit", body)
+        self.assertIn("METEOR_SCATTER_DELIVERY_MODE=deposit", p.read_text())
+
+    def test_every_direct_via_is_refused_and_writes_nothing(self):
+        for client, vias in upload.REFUSED_VIA.items():
+            for via in vias:
+                with self.assertRaises(upload.DirectRouteRefused) as cm:
+                    upload.apply_enable(client, "AC0G/S", True,
+                                        base=str(self.base), delivery=via)
+                self.assertIn("wsprdaemon.org", str(cm.exception))
+                self.assertIn(via, str(cm.exception))
+                self.assertFalse(upload.env_path_for(
+                    client, "AC0G/S", base=str(self.base)).exists())
+
+    def test_the_standard_via_is_accepted(self):
+        upload.apply_enable("psk-recorder", "AC0G/S", True,
+                            base=str(self.base), delivery="server-merge")
+        upload.apply_enable("meteor-scatter", "AC0G/S", True,
+                            base=str(self.base), delivery="deposit")
+
+    def test_wspr_labels_name_wsprdaemon_only(self):
+        self.assertEqual(upload.UPLOAD_ENABLE["wspr-recorder"][1],
+                         ["wsprdaemon.org (forwards to wsprnet.org)"])
 
     def test_meteor_refuses_a_psk_pipeline_name(self):
         with self.assertRaises(ValueError):
@@ -137,7 +147,7 @@ class TestUploadEnable(unittest.TestCase):
         upload.apply_enable("psk-recorder", "AC0G/S", False, base=str(self.base))
         body = self._env("psk-recorder", "AC0G-S").read_text()
         self.assertIn("PSK_USE_HS_UPLOADER=0", body)
-        self.assertIn("PSK_DELIVERY_PIPELINES=direct", body)  # not reverted
+        self.assertIn("PSK_DELIVERY_PIPELINES=server-merge", body)  # not reverted
 
     def test_apply_preserves_other_keys(self):
         env = self._env("wspr-recorder", "AC0G=S")
@@ -212,6 +222,52 @@ class TestConfigUploadCommand(unittest.TestCase):
             upload.apply_enable = orig
         self.assertEqual(rc, 0)
         self.assertEqual(calls, [("wspr-recorder", "AC0G/S", True)])
+
+    def _run(self, **kw):
+        from sigmond.commands import config as C
+        out, errb = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(errb):
+            rc = C.cmd_config_upload(self._args(**kw))
+        return rc, out.getvalue(), errb.getvalue()
+
+    def test_a_refused_via_returns_1_and_names_the_standard(self):
+        rc, o, e = self._run(client="psk-recorder", instance="AC0G/S",
+                             on=True, via="direct")
+        self.assertEqual(rc, 1)
+        self.assertIn(upload.STANDARD_NOTE, o + e)
+        self.assertNotIn("valid --via choices", o + e)
+
+    def test_on_without_wspr_recorder_says_error(self):
+        from unittest import mock
+        from sigmond.commands import config as C
+        base = Path(tempfile.mkdtemp())
+        topo = mock.Mock()
+        topo.enabled_components.return_value = ["psk-recorder"]
+        real = upload.apply_enable
+        with mock.patch("sigmond.topology.load_topology", return_value=topo), \
+             mock.patch.object(upload, "apply_enable",
+                               lambda c, i, on, base_=None, delivery=None:
+                               real(c, i, on, base=str(base), delivery=delivery)):
+            rc, o, e = self._run(client="psk-recorder", instance="AC0G/S", on=True)
+        self.assertEqual(rc, 0)
+        self.assertIn("PSK_DELIVERY_PIPELINES=server-merge",
+                      (base / "psk-recorder/env/AC0G-S.env").read_text())
+        self.assertIn("no wspr-recorder", o + e)
+        self.assertIn("smd enable wspr-recorder", o + e)
+
+    def test_status_view_names_the_meteor_unset_default_as_direct(self):
+        from unittest import mock
+        base = Path(tempfile.mkdtemp())
+        f = base / "meteor-scatter/env/KFS-NW.env"
+        f.parent.mkdir(parents=True)
+        f.write_text("METEOR_SCATTER_USE_HS_UPLOADER=1\n")
+        real_path = Path
+        with mock.patch("sigmond.commands.config.Path",
+                        lambda *a: real_path(str(base)) if a == ("/etc",)
+                        else real_path(*a)):
+            rc, o, e = self._run(client="meteor-scatter")
+        self.assertEqual(rc, 0)
+        self.assertIn("unset (reads direct: posts from this station)", o)
 
 
 # ---- set_env_flag on the safe writer (plan Ruling 17, spec section 8.2) ----

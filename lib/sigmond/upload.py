@@ -23,34 +23,45 @@ from .instance import (
 # wires the client into `smd config upload` AND rule_upload_enabled.
 UPLOAD_ENABLE: dict[str, Tuple[str, List[str]]] = {
     "wspr-recorder":  ("WSPR_USE_HS_UPLOADER",
-                       ["wsprnet.org", "wsprdaemon.org"]),
-    "psk-recorder":   ("PSK_USE_HS_UPLOADER", ["pskreporter.info"]),
-    "meteor-scatter": ("METEOR_SCATTER_USE_HS_UPLOADER", ["pskreporter.info"]),
+                       ["wsprdaemon.org (forwards to wsprnet.org)"]),
+    "psk-recorder":   ("PSK_USE_HS_UPLOADER",
+                       ["wsprdaemon.org (forwards to pskreporter.info)"]),
+    "meteor-scatter": ("METEOR_SCATTER_USE_HS_UPLOADER",
+                       ["wsprdaemon.org (forwards to pskreporter.info)"]),
 }
 
-# Clients whose upload needs a delivery-pipeline selection, not just the
-# boolean enable flag.  psk-recorder's default pipeline is ``server-merge``,
-# which ships every row to a wsprdaemon server that forwards to
-# pskreporter.info on the node's behalf — so on a standalone node (no
-# wsprdaemon-server SFTP) the boolean alone delivers nothing.  ``direct`` is
-# the standalone-correct lever: the client POSTs straight to pskreporter.info.
-# Enabling sets the default; merge-fleet nodes override (`--via server-merge`).
-# meteor-scatter has METEOR_SCATTER_DELIVERY_MODE (core/recorder.py):
-# ``deposit`` rides the wsprdaemon tar and the server owns the PSKReporter
-# hop (forward_to_pskreporter=True), ``direct`` posts from this host, ``off``
-# leaves the rows to this host's hs-uploader psk-pskreporter pipeline.  Its
-# default is None: `--on` alone leaves the mode as it stands (sigmond seeds
-# ``off``), and only an explicit `--via` sets it.  KFS-MAIN (2026-11-12)
-# needed ``deposit`` to send meteor decodes only to wsprdaemon.org, as its
-# radiod VMs did, and had no verb for it.  wspr-recorder's wsprnet path needs
-# no pipeline selection, so it does not appear here.
-# client -> (env var, default pipeline or None, valid choices).
+# The standard: every spot goes to wsprdaemon.org, which forwards copies
+# under the spot's own reporter id.  Enabling therefore writes the server
+# route and nothing else.  psk-recorder's PSK_DELIVERY_PIPELINES takes
+# ``server-merge``; meteor-scatter's METEOR_SCATTER_DELIVERY_MODE takes
+# ``deposit`` (the rows ride the wsprdaemon tar flagged for the server's
+# forwarder).  The direct routes, which post from this station, have no
+# lever here.  wspr-recorder needs no pipeline selection.
+# client -> (env var, route written on enable, valid choices).
 DELIVERY_ON_ENABLE: dict[str, Tuple[str, "str | None", List[str]]] = {
-    "psk-recorder": ("PSK_DELIVERY_PIPELINES", "direct",
-                     ["direct", "server-merge", "server-raw"]),
-    "meteor-scatter": ("METEOR_SCATTER_DELIVERY_MODE", None,
-                       ["deposit", "direct", "off"]),
+    "psk-recorder": ("PSK_DELIVERY_PIPELINES", "server-merge", ["server-merge"]),
+    "meteor-scatter": ("METEOR_SCATTER_DELIVERY_MODE", "deposit", ["deposit"]),
 }
+
+# --via values that would post from this station.  Refused before any write.
+REFUSED_VIA: dict[str, Tuple[str, ...]] = {
+    "psk-recorder": ("direct", "server-raw", "both"),
+    "meteor-scatter": ("direct", "off"),
+}
+
+# client -> (env var, value) that `--on` writes.
+STANDARD_ROUTE: dict[str, Tuple[str, str]] = {
+    "psk-recorder": ("PSK_DELIVERY_PIPELINES", "server-merge"),
+    "meteor-scatter": ("METEOR_SCATTER_DELIVERY_MODE", "deposit"),
+}
+
+STANDARD_NOTE = ("every spot goes to wsprdaemon.org, which forwards it to "
+                 "wsprnet.org and pskreporter.info; no station posts to "
+                 "them itself")
+
+
+class DirectRouteRefused(ValueError):
+    """A --via value that would post from this station."""
 
 
 def env_path_for(client: str, instance: str, base: str = "/etc") -> Path:
@@ -128,13 +139,16 @@ def apply_enable(client: str, instance: str, on: bool, base: str = "/etc",
     ``(env_key, value)`` if a delivery pipeline was also written, else None.
 
     When enabling a client that needs a delivery-pipeline selection (see
-    DELIVERY_ON_ENABLE), the pipeline is set to ``delivery`` or the client's
-    standalone-correct default — so the boolean flag alone never leaves the
-    node routing to an unreachable path.  Disabling leaves the pipeline
-    untouched.  Raises KeyError for an unknown client, ValueError for an
-    invalid ``delivery`` choice."""
+    DELIVERY_ON_ENABLE), the pipeline is set to the standard server route.
+    Disabling leaves the pipeline untouched.  Raises KeyError for an unknown
+    client, DirectRouteRefused for a direct ``delivery`` (nothing written),
+    ValueError for any other invalid ``delivery`` choice."""
     if client not in UPLOAD_ENABLE:
         raise KeyError(client)
+    if delivery in REFUSED_VIA.get(client, ()):
+        raise DirectRouteRefused(
+            f"--via {delivery} would post from this station; "
+            f"{STANDARD_NOTE}. Use --on alone.")
     flag, dests = UPLOAD_ENABLE[client]
     path = env_path_for(client, instance, base=base)
     set_env_flag(path, flag, "1" if on else "0")

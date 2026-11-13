@@ -117,7 +117,7 @@ def test_a_shared_antenna_receiver_uploads_off():
     on = [s.argv for s in ups if s.argv[4] == 'AC0G/B1A']
     assert len(off) == 2 and all(a[-1] == '--off' for a in off)
     assert not any('--via' in a for a in off)
-    assert any(a[-2:] == ['--via', 'server-raw'] for a in on)
+    assert not any('--via' in a for a in on)
     assert all('--on' in a for a in on)
 
 

@@ -230,12 +230,7 @@ def gather_upload_rows() -> list:
     return rows
 
 
-_VIA_CHOICES = [
-    ("(default)", ""),
-    ("direct", "direct"),
-    ("server-merge", "server-merge"),
-    ("server-raw", "server-raw"),
-]
+_VIA_CHOICES = [("(default)", "")]
 
 
 class PswsScreen(Vertical):
