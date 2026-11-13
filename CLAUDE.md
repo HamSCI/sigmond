@@ -323,11 +323,16 @@ ClickHouse install, use `smd admin storage migrate-to-sqlite` to clean it up.
     `sigmond-storage.timer`) — design and rationale in
     `docs/superpowers/specs/2026-11-04-storage-capacity-design.md`.
 
-## Proxied uploads (`[station] wsprnet_proxy`)
+## Uniform routing through wsprdaemon.org
 
-A station can hand an upstream to the WsprDaemon servers instead of posting to
-it itself.  The spots already travel in the wsprdaemon tar, so the second
-upload simply stops existing.  Measured on AC0G/B4, 2026-10-27:
+Every WSPR, FT4/FT8 and MSK144 spot goes only to wsprdaemon.org.  The server
+stores it and forwards copies to wsprnet.org and pskreporter.info under the
+spot's own reporter id.  No station should post to either itself; one gap
+remains, below.  Only a merge
+(`merge_into`) rewrites the reporter id, and the server carries it out.
+
+The spots already travel in the wsprdaemon tar, so the station's second and
+third uploads simply stop.  Measured on AC0G/B4, 2026-10-27, before the change:
 
 | | MB/day |
 |---|---|
@@ -337,54 +342,93 @@ upload simply stops existing.  Measured on AC0G/B4, 2026-10-27:
 | **today, all direct** | **24.77** |
 | **proxied** | **5.75 (77% less)** |
 
-Fleet-wide that is ~790 MB/day leaving stations' own links today, against ~304
-MB/day from one WD server afterwards.  The WSPR half is mostly *overhead* —
-78 % of a direct wsprnet upload is a fresh TLS handshake every two minutes,
-and a 500-spot/day site spends ~13 kB of link per spot delivered.  The FT8
-half is mostly *data*: 39.6 B/spot as PSKReporter frames against ~10 B/spot
-compressed in the tar.
+Fleet-wide that came to ~790 MB/day leaving stations' own links, against ~304
+MB/day from one WD server afterwards.  Overhead dominates the WSPR share:
+78 % of a direct wsprnet upload went to a fresh TLS handshake every two
+minutes, and a 500-spot/day site spent ~13 kB of link per spot delivered.
+Data dominates the FT8 share: 39.6 B/spot as PSKReporter frames against
+~10 B/spot compressed in the tar.
 
-Set it in site-profile.toml (`[reporters] wsprnet_proxy = true`), which
-`smd config render` carries into coordination.toml's `[station]`, which
-`uploader_manifest.apply_proxying` turns into two manifest changes:
-`forward_to_wsprnet = true` on the wspr-wsprdaemon transport, and the
-`wspr-wsprnet` pipeline removed.
+### What enforces it
 
-Three rules the implementation depends on, each because its opposite is a bug
-that hides itself:
+- **`smd config upload <client> <id> --on`** (`upload.apply_enable`) writes
+  the server route: `PSK_DELIVERY_PIPELINES=server-merge` for psk-recorder,
+  `METEOR_SCATTER_DELIVERY_MODE=deposit` for meteor-scatter.  It refuses the
+  `--via` values `direct`, `server-raw` and `both` for psk-recorder, and
+  `direct` and `off` for meteor-scatter (`upload.REFUSED_VIA`) before it writes anything.
+  While the client's sink reads below `upload`, it writes the enable flag and
+  leaves the delivery key alone.  With no wspr-recorder enabled, it still
+  writes the route and prints an ERROR naming `smd enable wspr-recorder`.
+- **`uploader_manifest.apply_proxying`** flags `forward_to_wsprnet = true` on
+  the wspr-wsprdaemon transport and drops the `wspr-wsprnet` pipeline, on
+  every station.  When the carrier pipeline is missing it keeps
+  `wspr-wsprnet` and logs ERROR (first rule below), so "never renders
+  `wspr-wsprnet`" holds only where the tar renders.
+  `drop_server_delivered_pipelines` does the same for the psk and meteor
+  pskreporter pipelines.
+- **`uniform_routing.migrate_routing`** moves running psk-recorder and
+  meteor-scatter instances onto the server route and restarts only the
+  instances it changed, through `sink_levers.restart_units`, which never
+  touches radiod.  A second run changes nothing.  It also restarts an active
+  instance already on the route whose start predates its env file (a restart
+  that failed last time).  Four verbs run it: `smd sink upload`,
+  `smd update --apply`, `smd align --apply`, and
+  `smd admin uploader routing --apply` (without `--apply` it only reports).
 
-- **⛔ The two halves move together, and only together.**  Dropping the direct
-  pipeline without flagging the tar leaves NOBODY posting: the station stops,
-  the server never starts, and spots stop appearing upstream with no error
-  anywhere.  So a missing or malformed carrier pipeline REFUSES to drop the
-  direct one and logs at ERROR.  A station that keeps posting for itself
-  merely forfeits the saving; the other way round loses data.
-- **⛔ Off writes nothing, never `false`.**  Absent is what the whole chain
-  reads as unset, down to the per-spot field the server leaves alone — and
-  hs-uploader writes that field 0 when unset, so switching off still switches
-  off.  An explicit `false` in every station's config would read as a
-  decision each operator made.
+### Three rules the implementation depends on
+
+Each guards against a bug that hides itself.
+
+- **⛔ The two halves move together, and only together.**  Dropping a direct
+  pipeline without flagging the carrier leaves nobody posting: the station
+  stops, the server never starts, and spots vanish upstream with no error
+  anywhere.  The carrier holds for psk and meteor too: their rows reach
+  wsprdaemon.org only inside wspr-recorder's `wspr-wsprdaemon` tar.  So a
+  missing carrier keeps the direct pipeline and logs ERROR, and the migration
+  leaves every psk/meteor instance as it stands on a station with no enabled
+  wspr-recorder.  A station that keeps posting for itself merely forfeits the
+  saving; the other way round loses data.
+- **⛔ A sink lever value below `upload` stays.**  Below `upload` the lever
+  step writes `PSK_DELIVERY_PIPELINES=server-raw` and
+  `METEOR_SCATTER_DELIVERY_MODE=off`, and keeps no undo record.  Nothing in
+  the routing code raises one.  The sink state, not a record, tells a lever
+  value from an operator's choice: the migration skips a client whose sink
+  reads below `upload`, and a sink state it cannot read changes nothing.
+  `smd sink upload` moves those instances when it raises the switch.
 - **⛔ NO IDENTITY IS SENT, and `[station] wsprnet_call` is NOT it.**  The
-  server posts under the spot's own rx_sign, which *is* the reporter id the
-  direct pipeline used, so switching to the proxy cannot change who the
-  spots are credited to.  `wsprnet_call` looks like the key for this and is
-  read by no upload path, direct or proxied — the direct wsprnet transport
-  takes `[identity] call`.  Found set to `"AC0G"` on AC0G/B4 while the
-  station posted as `"AC0G/B4"`; honouring it would have silently moved a
-  live station's wsprnet credit the moment it opted in.  A contradiction
-  now logs a warning instead.  A site that genuinely needs a different
-  wsprnet identity sets it once on the server, in `wsprnet_reporters.json`,
-  where whoever has to debug it can see it.
+  server posts under the spot's own rx_sign, which the station's reporter id
+  sets, so the route cannot change who gets the credit.  `wsprnet_call`
+  looks like the key for this, and no upload path reads it; the old direct
+  wsprnet transport took `[identity] call`.  On AC0G/B4 it read `"AC0G"`
+  while the station posted as `"AC0G/B4"`; honouring it would have silently
+  moved a live station's wsprnet credit.  A contradiction logs a warning
+  instead.  A site that needs a different wsprnet identity sets it once on
+  the server, in `wsprnet_reporters.json`, where whoever debugs it can see it.
 
-**⚠ This puts the station's callsign on uploads sent from a WD server's
-address.**  It is the operator's decision — never a site-profile default, and
-never something a fleet-wide change should switch on for someone.
+`[reporters] wsprnet_proxy` and `smd config reporters --wsprnet-proxy`
+retired on 2026-11-13.  Sigmond reads the key, ignores it and warns once:
+`smd config render` warns on each render while the key stays in
+site-profile.toml, and the manifest render warns once per process.
+
+### The interim, and the gap
+
+Until Rob's server change lands, the server forwards only the rows a station
+flags.  So sigmond keeps setting the flags: `forward_to_wsprnet` on the tar,
+and `forward_to_pskreporter` on each psk and MSK row, which psk-recorder sets
+under `server-merge` and meteor-scatter under `deposit`.
+
+⚠ wspr-recorder's own uploader (`hs_uploader_shim.py`, armed by
+`WSPR_USE_HS_UPLOADER=1`, which `smd config upload wspr-recorder <id> --on`
+writes) builds its pipelines from its environment, not from the manifest.
+It still builds a direct `wsprnet` pipeline whenever the sink exists, so a
+station running it still posts WSPR to wsprnet.org itself.  Its cycle line
+then shows `wsprnet=N`.  `apply_proxying` cannot reach it.
 
 Server side (the `proxy_upload` column, the forwarder, the batching window):
 `rrobinett/wsprdaemon-server`, CLAUDE.md § "wsprnet.org forwarder".
 `tests/test_uploader_manifest_proxy.py` holds a cross-repo test that the
-manifest keys are the ones hs-uploader's `pipeline_factory` actually reads —
-a rename on either side is silent.
+manifest keys match what hs-uploader's `pipeline_factory` reads; a rename on
+either side would otherwise pass silently.
 
 ## Still to build
 
