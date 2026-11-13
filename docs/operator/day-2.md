@@ -628,7 +628,9 @@ fleet admin says a release is out and `smd update` answers
 actual commit of every component, and that is the number that settles it.
 
 To actually perform it: `smd update --apply`. **Do this only when your fleet
-admin tells you the release is blessed.** That is not bureaucracy — the fleet
+admin tells you the release is blessed.** Leave `smd update --latest` alone
+too: it takes every component to the newest code on its main branch, past any
+blessed release, and serves test stations. That is not bureaucracy — the fleet
 runs every release through one [canary](glossary.md) station (today, AC0G/B4) before anyone
 else takes it, so a bad build breaks one station instead of all of them.
 
@@ -739,6 +741,14 @@ restarts the recorders itself. Full steps:
 ---
 
 ## The heartbeat — what your station tells the fleet
+
+> **On hold.** Since v3.84 (2026-10-29) the setup wizard no longer asks about
+> the heartbeat, and it switches off both heartbeat timers, in the VM and on
+> the host. A station installed since then sends no heartbeat. An older
+> station keeps sending one until someone reruns its wizard. HamSCI plans a
+> new way to report station status, over the same upload path that already
+> carries the data; it has not shipped. The rest of this section describes a
+> station that still sends a heartbeat.
 
 Every **5 minutes**, your station assembles a small status record and ships it
 to the fleet board, where your admin watches it

@@ -488,7 +488,7 @@ Don't judge PSWS on day one.
 > | It says | Meaning |
 > |---|---|
 > | `✓ site sink: upload (store and send)` | normal |
-> | `⚠ site sink: off — no data ships and no backlog builds` | no data leaves; only the heartbeat goes out. A new station starts here, with the reason `new station: …`, until someone checks it and runs `smd sink upload`; a bench machine being provisioned sits here too. `smd sink upload` sends the GRAPE and magnetometer packages for today and yesterday (UTC), even if the station built them while off. Older packages stay on the station, and nothing else recorded before it ships. Some stations built before v3.69 run senders of their own, and the site sink switch does not stop them: psk-recorder or meteor-scatter set to `direct`, B4's wspr-uploader, an optional hfdl-recorder feed. Ask your fleet admin |
+> | `⚠ site sink: off — no data ships and no backlog builds` | no data leaves; only the heartbeat goes out, on a station that still sends one. A new station starts here, with the reason `new station: …`, until someone checks it and runs `smd sink upload`; a bench machine being provisioned sits here too. `smd sink upload` sends the GRAPE and magnetometer packages for today and yesterday (UTC), even if the station built them while off. Older packages stay on the station, and nothing else recorded before it ships. Some stations built before v3.69 run senders of their own, and the site sink switch does not stop them: psk-recorder or meteor-scatter set to `direct`, B4's wspr-uploader, hfdl-recorder's airframes.io feed, if someone turned it on. Ask your fleet admin |
 > | `⚠ site sink: hold (legacy) — stores for a while and sends no data; …` | an older pause, set with `smd upload hold`. The station keeps FT8 spots for one hour and WSPR spots for 24 hours, then drops them. `smd sink upload` sends what remains; `smd sink off` drops it. DASI002 reads `no HF antenna; no PSWS station/instrument ids` |
 >
 > A station whose software carries the sink switch files (sink control step 2b
@@ -512,8 +512,9 @@ Don't judge PSWS on day one.
 > switch files they set `fill` and `off`; on an older one, the legacy modes that
 > `smd sink status` reports as `hold (legacy)` and `off`. Ask your fleet admin
 > before changing the switch, unless the reason reads `new station: …` and you have
-> just finished INSTALL.md §9. The station's 5-minute [heartbeat](glossary.md) ignores
-> the switch, so a station that sends no data still shows up on the fleet board.
+> just finished INSTALL.md §9. On a station that still sends the 5-minute
+> [heartbeat](glossary.md) (on hold since v3.84), the heartbeat ignores the
+> switch, so such a station still shows up on the fleet board while it sends no data.
 >
 > On a station that has not enrolled in PSWS the command also prints one or more
 > lines like `uploader-manifest: skipping pipeline grape-psws (hf-timestd) —

@@ -20,10 +20,11 @@ plus the handful below that its pages use without defining.
 
 | Term | What it means |
 |---|---|
-| **appliance** | The ready-made Sigmond USB image that installs a whole station — Proxmox host, decoder VM and all the software — onto a blank machine in one pass. Installing any other way makes you a contributor, not an operator. |
+| **appliance** | The ready-made Sigmond USB image that installs a whole station — Proxmox host, decoder VM and all the software — onto a blank machine in one pass. To put a station on a Linux machine you already run, follow [install-bare-metal.md](../install-bare-metal.md) instead. |
 | **canary** | The one fleet station that takes every update first, so a bad release breaks one station instead of all of them. Today that is AC0G/B4. |
-| **client** | A *component* that records or ships a science product — `wspr-recorder`, `psk-recorder`, `hf-timestd`, `mag-recorder`, `meteor-scatter`, `gpsdo-monitor`. Every component that owns systemd units gets a block in `smd status`; the recording clients also get a summary line — see [day-2.md §1](day-2.md#1-smd-status--is-everything-running). |
+| **client** | A *component* that records or ships a science product — `wspr-recorder`, `psk-recorder`, `hf-timestd`, `mag-recorder`, `meteor-scatter`, `hfdl-recorder`, `codar-sounder`, `gpsdo-monitor`. Every component that owns systemd units gets a block in `smd status`; the recording clients also get a summary line — see [day-2.md §1](day-2.md#1-smd-status--is-everything-running). |
 | **component** | Anything `smd` manages and versions: a *client*, a shared library (`ka9q-python`, `hs-uploader`, `hamsci-dsp`), the radio server itself, or `smd`. `smd version` lists **every** component; `smd status` shows only the enabled clients among them, which is why the two lists are different lengths. |
+| **codar-sounder** | A core client since 2026-11-12. It records CODAR ocean-radar transmitters and sends their arrival times to wsprdaemon.org. HamSCI uses those times to learn each transmitter's timing offset, which in turn sharpens the timing every station takes from WWV and WWVH. A station brought up before that date may not run it yet. |
 | **Costas array** | A pattern of tones whose time/frequency shifts never repeat, so a receiver can find *when* a burst started even in noise. The 2026-08-12 eclipse experiment transmitted one on 14.110 MHz; "the Costas client" is the recorder built for it. |
 | **dBFS** | Decibels relative to full scale — signal level measured against the largest number the digitiser can represent, so it is always ≤ 0 and more negative means quieter. A receiver with nothing plugged in reads around −127 dBFS. |
 | **decoder VM** (**VM**) | The virtual machine running inside the station computer, where `radiod` and every recorder actually run. Named after the *designator* (e.g. `AC0G-B4`). Commands tagged `[VM]` run here. |
@@ -36,11 +37,12 @@ plus the handful below that its pages use without defining.
 | **GPSDO** | GPS-disciplined oscillator — a reference clock steered by GPS instead of by the temperature of your shack. We run the Leo Bodnar LBE-1421; it is required. |
 | **GRAPE** | HamSCI's HF time-standard data product, and the reason the timing client records at all: one packaged dataset per UTC day, built by `hf-timestd` from the WWV/WWVH/CHU channels and uploaded to *PSWS* at 01:00 UTC by `grape-daily.timer`. When these pages say "no GRAPE", they mean that daily dataset is not being produced. |
 | **grid square** | Your Maidenhead locator, 6 characters (e.g. `EM38ww`) — where the station is, to a few km. The *wizard* asks for it once. |
-| **heartbeat** | A small status record your station sends to the fleet board every 5 minutes. If it stops arriving the board turns your station red — that is exactly what it is for (`CONTRIBUTING.md` §10). |
+| **heartbeat** | A small status record a station sent to the fleet board every 5 minutes. If it stopped arriving the board turned the station red. **On hold:** since v3.84 the setup wizard turns it off, so a newer station sends none. A new way to report status, over the same upload path the data takes, is planned ([day-2.md](day-2.md#the-heartbeat--what-your-station-tells-the-fleet)). |
+| **hfdl-recorder** | A core client since 2026-11-12. It decodes the HFDL data links between aircraft and their ground stations, and sends the ground stations' timing signals (*squitters*) to wsprdaemon.org for the same timing work as *codar-sounder*. Sending decodes to airframes.io stays off unless you turn it on ([registration.md §9](registration.md#9-airframesio--optional-off-by-default)). |
 | **holdover** | What a *GPSDO* does when it loses its GPS fix: it keeps producing a clock from its own oscillator, coasting and drifting slowly away from GPS. `smd status` prints `gpsdo=holdover` and marks it ⚠. The station keeps recording and keeps producing spots the whole time — it only loses timing quality, and it is a thing to report, not a thing to fix. |
 | **host** (**PM**, **Proxmox**) | The bare machine itself, running the Proxmox virtualisation system; named `<designator>-PM`, web GUI on port 8006. Commands tagged `[host]` run here. |
 | **igmp-querier** | A tiny always-on service on the VM that keeps your LAN switch forwarding the station's *multicast* streams. Switches stop forwarding multicast a few minutes after the last query, and then the recorders go deaf, so this exists to ask the question nothing else on a home network asks. One of the four components that are cheap to restart. |
-| **in-process sender** | A sender that runs inside a recorder or in its own unit, outside hs-uploader: psk-recorder or meteor-scatter set to `direct`, wspr-uploader, the magnetometer's fallback. With the sink switch files, sigmond turns each one off whenever its client reads below `upload`. An optional hfdl-recorder feed stays outside the switch. |
+| **in-process sender** | A sender that runs inside a recorder or in its own unit, outside hs-uploader: psk-recorder or meteor-scatter set to `direct`, wspr-uploader, the magnetometer's fallback. With the sink switch files, sigmond turns each one off whenever its client reads below `upload`. hfdl-recorder's airframes.io feed, off unless someone turned it on, stays outside the switch. |
 | **installed** | Present on the station: the code is checked out and `smd version` prints its commit. Installed does **not** mean running and does not mean *enabled* — dasi002 listed 23 installed components while `smd status` showed 7 client blocks (live, 2026-08-23). |
 | **ka9q-web** | The live receiver web page on the VM, port 8081: waterfall plus the channel list. The quickest "is the radio hearing anything?" check. |
 | **multicast** | How `radiod` hands each channel to the recorders — one stream on your local network that many programs subscribe to at once. It is why the station needs wired Ethernet; Wi-Fi handles multicast badly. |
@@ -132,9 +134,7 @@ standard DASI2 kit.
 | Name | What it is |
 |---|---|
 | **callhash** | A small shared library for hashing callsigns consistently across clients. |
-| **codar-sounder** | An optional client that records CODAR ocean-radar signals. |
 | **hf-tec** | An optional client for total-electron-content work from HF. |
-| **hfdl-recorder** | An optional client that decodes HFDL aircraft data links. |
 | **superdarn-sounder** | An optional client that records SuperDARN radar signals. |
 | **sigmond-rac** | The packaging of the remote-access tunnel — see [remote-access.md](remote-access.md). |
 | **ft8_lib** | The FT8/FT4 decoder library the spot recorders are built against. A build ingredient, not a service. |

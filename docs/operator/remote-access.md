@@ -370,7 +370,9 @@ time limit: it stays on until you turn it off.
   A silent station that never registered reads "remote access was off (never
   registered) at its last heartbeat".
   Your admin sees a decision, not a station to chase. The board hears from your
-  station only when it sends status heartbeats; the wizard asks about them.
+  station only when it sends status heartbeats. Since v3.84 the wizard turns
+  them off, and a new way to report status is planned
+  ([day-2.md](day-2.md#the-heartbeat--what-your-station-tells-the-fleet)).
 
 **How the VM asks.** The host has no keyboard of its own once the install
 ends: the USB ports belong to the decoder VM, so a keyboard plugged into the

@@ -42,14 +42,16 @@ rather than through radiod.
 
 - **Core clients:** `hf-timestd` (timing authority — publishes the
   RTP↔UTC offset and tier that the other RF clients label against),
-  `wspr-recorder`, `psk-recorder`, `mag-recorder`.
-- **Additional clients:** `codar-sounder`, `hfdl-recorder`,
-  `hf-tec`, `meteor-scatter`.
+  `wspr-recorder`, `psk-recorder`, `mag-recorder`, `meteor-scatter`,
+  `hamsci-physics`, `hfdl-recorder`, `codar-sounder`.
+- **Additional clients:** `hf-tec`, `superdarn-sounder`.
 
 Decoded spots / products land in a **shared SQLite sink**
 (`/var/lib/sigmond/sink.db`) and are shipped upstream by `hs-uploader`
-to wsprnet.org, wsprdaemon.org, pskreporter.info, and PSWS / HamSCI
-(HFDL feeds airframes.io directly via `dumphfdl`).  Sigmond is the
+to wsprnet.org, wsprdaemon.org, pskreporter.info, and PSWS / HamSCI.
+hfdl-recorder and codar-sounder send their timing rows to wsprdaemon.org
+the same way.  hfdl-recorder can also feed airframes.io directly through
+`dumphfdl`; that feed stays off until the operator turns it on.  Sigmond is the
 oversight layer wrapping the whole software stack: install, configure,
 lifecycle, CPU-pinning, and the shared sink.
 
@@ -124,7 +126,7 @@ magnetometer for mag-recorder).  Bring-up writes them to
 `/etc/sigmond/site-profile.toml` and into each recorder's config;
 `smd config psws` sets them later.
 `dasi2`, the default profile, gives you a local radiod, hf-timestd (GRAPE),
-WSPR, FT4/FT8, meteor scatter and the magnetometer.  `base` stops at radiod
+WSPR, FT4/FT8, meteor scatter, HFDL and CODAR timing, and the magnetometer.  `base` stops at radiod
 and timing; `client` decodes from radiods on other machines; see "Decode-only host"
 below.  Bring-up skips, with a warning, anything
 whose hardware it cannot find on the USB bus.
@@ -199,9 +201,11 @@ whichever machine it runs on.  Bring-up prints one line for each radiod
 it would keep, with the radiod's host, its advertised name and the reason,
 then asks before it binds them.
 
-Each kept radiod gets one instance of each recorder the profile carries.
-The `client` profile carries two: wspr-recorder (WSPR) and psk-recorder
-(FT4/FT8).  Bring-up names the instances after the radiod:
+Each kept radiod gets one instance of each per-reporter recorder the
+profile carries.  The `client` profile carries two: wspr-recorder (WSPR)
+and psk-recorder (FT4/FT8).  It also installs hfdl-recorder and
+codar-sounder, which run one instance per radiod named in their own config
+files; `smd start` starts one for each.  Bring-up names the instances after the radiod:
 `ac0g-b1-a-status.local` gives the reporter ID AC0G/B1A.  With a single
 radiod, `--reporter` still sets the name.  With several, `--reporter`
 counts as an error, because one name cannot cover two instances.
@@ -479,6 +483,11 @@ instance) narrows the scope.
 | `smd component add\|remove <name>` | Clone/remove a component repo and its topology entry |
 | `smd config show\|migrate` | Inspect or migrate coordination config |
 | `smd config init\|edit <client>` | Run a client's first-run wizard or edit flow |
+| `smd update [--apply] [--latest]` | Plan an update (dry run by default); `--apply` performs it.  `--latest` takes every component to the tip of its main branch and pins the station there; it serves test stations |
+| `smd version` | Each component's commit, against the image and upstream |
+| `smd sink status\|upload\|fill\|off` | The site sink switch: whether this station sends its data |
+| `smd config reporters [--uploader-call NAME] [--wsprnet-proxy on\|off]` | The name this machine uploads under, and whether the WsprDaemon servers post its WSPR spots to wsprnet.org |
+| `smd remote status\|on\|off` | Remote access for the fleet admin |
 
 **Observe & diagnose** — most diagnostics now live under the `admin` group.
 
@@ -486,7 +495,7 @@ instance) narrows the scope.
 |---------|-------------|
 | `smd watch <target>` | Live tail for `wspr`, `psk`, `hfdl`, `codar`, `hf-tec`, `mag`, `ka9q`, `radiod`, `uploads`, `verifier` |
 | `smd admin log [<client>] [--files] [--level L]` | Follow journal (or `--files` for file logs); `--level` sets the client's level via `coordination.env` + SIGHUP |
-| `smd admin diag [net\|cpu-affinity\|cpu-freq]` | Network / CPU diagnostics |
+| `smd admin diag [net\|cpu-affinity\|cpu-freq]` | Network / CPU diagnostics; `cpu-freq --radiod-max-mhz N --other-max-mhz N --save` keeps the caps across reboots |
 | `smd admin validate` | Cross-client harmonization rules |
 | `smd admin environment list\|probe\|describe` | Situational awareness of network peers (KIWISDRs, GPSDOs, NTP) |
 | `smd admin verifier\|storage\|sources\|timing\|radiod\|instance\|rac …` | Specialized maintenance — see `smd admin --help` |
@@ -584,7 +593,7 @@ and timing chain verification.
 
 ## Adding a discretionary client later
 
-The additional clients (codar-sounder, hf-tec, hfdl-recorder, meteor-scatter)
+The additional clients (hf-tec, superdarn-sounder)
 are installed at your discretion. **Installing a client enables it** — there is
 no separate enable step:
 
@@ -593,13 +602,13 @@ no separate enable step:
 smd component list --catalog
 
 # Install it — this also enables it in topology
-smd install hfdl-recorder
+smd install hf-tec
 
 # Configure it for your station (first-run wizard, or $EDITOR fallback)
-smd config init hfdl-recorder
+smd config init hf-tec
 
 # Start it
-smd start hfdl-recorder
+smd start hf-tec
 
 # Verify
 smd status
@@ -617,7 +626,9 @@ enabling (e.g. to stage config first).
 
 Clients fall into two groups. **Core clients** are the DASI2 grant
 station's primary instruments — they install and run by default (the
-`dasi2` profile: hf-timestd, wspr-recorder, psk-recorder, mag-recorder).
+`dasi2` profile: hf-timestd, wspr-recorder, psk-recorder, mag-recorder,
+meteor-scatter, hamsci-physics, hfdl-recorder, codar-sounder, plus the
+gmag-webui and station-web pages).
 **Additional clients** extend the same station to other HF science and are
 installed **at your discretion** — either all at once during guided
 bring-up (`smd bringup dasi2 --with-optional`) or one at a time
@@ -631,13 +642,15 @@ bring-up (`smd bringup dasi2 --with-optional`) or one at a time
 | **wspr-recorder** | WSPR/FST4W recorder + decoder — uploads to wsprnet.org / wsprdaemon.org | [HamSCI/wspr-recorder](https://github.com/HamSCI/wspr-recorder) |
 | **psk-recorder** | FT4/FT8 spot recorder — decodes and uploads to PSKReporter | [HamSCI/psk-recorder](https://github.com/HamSCI/psk-recorder) |
 | **mag-recorder** | RM3100 magnetometer recorder (USB-I²C, non-radiod) — daily datasets to PSWS | [HamSCI/mag-recorder](https://github.com/HamSCI/mag-recorder) |
+| **meteor-scatter** | Meteor-scatter ping decoder (`jt9 --msk144`) → local sink + hs-uploader | [HamSCI/meteor-scatter](https://github.com/HamSCI/meteor-scatter) |
+| **hfdl-recorder** | HFDL (High Frequency Data Link) recorder — one `dumphfdl` subprocess per band. Sends ground-station squitter timing to wsprdaemon.org; the airframes.io feed stays off unless you turn it on | [HamSCI/hfdl-recorder](https://github.com/HamSCI/hfdl-recorder) |
+| **codar-sounder** | Opportunistic ionospheric sounder using CODAR chirp transmissions | [HamSCI/codar-sounder](https://github.com/HamSCI/codar-sounder) |
+| **hamsci-physics** | Ionospheric science products (TEC/dTEC, TID, GRAPE/PSWS) from hf-timestd observations | [mijahauan/hamsci-physics](https://github.com/mijahauan/hamsci-physics) |
 
 | Additional client | What it does | Repo |
 |--------|-------------|------|
-| **codar-sounder** | Opportunistic ionospheric sounder using CODAR chirp transmissions | [HamSCI/codar-sounder](https://github.com/HamSCI/codar-sounder) |
-| **hfdl-recorder** | HFDL (High Frequency Data Link) recorder — one `dumphfdl` subprocess per band (→ airframes.io) | [HamSCI/hfdl-recorder](https://github.com/HamSCI/hfdl-recorder) |
 | **hf-tec** | HF PRN-coded beacon recorder for ionospheric specification (TEC) | [HamSCI/hf-tec](https://github.com/HamSCI/hf-tec) |
-| **meteor-scatter** | Meteor-scatter ping decoder (`jt9 --msk144`) → local sink + hs-uploader | [HamSCI/meteor-scatter](https://github.com/HamSCI/meteor-scatter) |
+| **superdarn-sounder** | Passive SuperDARN coherent-radar monitor (detection / identification) | [HamSCI/superdarn-sounder](https://github.com/HamSCI/superdarn-sounder) |
 
 ### Infrastructure components
 

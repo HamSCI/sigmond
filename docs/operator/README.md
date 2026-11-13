@@ -24,7 +24,9 @@ the contents page; unfamiliar words are in the [glossary](glossary.md).
   [pskreporter.info](https://pskreporter.info), copies of both to
   [wsprdaemon.org](https://wsprdaemon.org), and daily HF time-standard —
   plus magnetometer, if you have one — products to HamSCI's
-  [PSWS](https://pswsnetwork.eng.ua.edu/).
+  [PSWS](https://pswsnetwork.eng.ua.edu/). It also sends timing rows from
+  aircraft data links (HFDL) and coastal ocean radars (CODAR) to
+  wsprdaemon.org.
 - **Your job.** Keep it powered, keep the cable in, glance at one page a week,
   and tell your fleet admin when something goes wrong. No Linux experience
   needed: one USB stick installs it all, and every command you need is here.
