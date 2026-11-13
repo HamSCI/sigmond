@@ -63,6 +63,9 @@ def cmd_storage(args) -> int:
         return _share(args)
     if verb == "directive":
         return _directive(args)
+    if verb == "guard":
+        from ..storage.guard import guard
+        return guard(dry_run=bool(getattr(args, "dry_run", False)))
     if verb == "tick":
         from ..storage.tick import default_runners, run_tick
         return run_tick(datetime.now(timezone.utc), default_runners())

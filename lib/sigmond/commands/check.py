@@ -909,10 +909,41 @@ def grape_line(env: Env) -> Line:
                              f'Tell the fleet admin.')
 
 
+GUARD_MOUNTINFO = Path('/proc/self/mountinfo')
+GUARD_ETC = Path('/etc/systemd/system')
+
+
+def unguarded_data_mounts(mountinfo: Path = None, etc: Path = None) -> List[str]:
+    """Data mounts under /var/lib (not the archive drive) that no unit's
+    drop-in names in RequiresMountsFor: its writers would start without it."""
+    mountinfo, etc = mountinfo or GUARD_MOUNTINFO, etc or GUARD_ETC
+    try:
+        mounts = [ln.partition(' - ')[0].split()[4] for ln in mountinfo.read_text().splitlines()
+                  if len(ln.partition(' - ')[0].split()) >= 5]
+    except OSError:
+        return []
+    data = [m for m in mounts if m.startswith('/var/lib/') and not m.startswith('/var/lib/sigmond/archive')]
+    if not data:
+        return []
+    required = set()
+    for f in etc.glob('*.d/*.conf'):
+        try:
+            for ln in f.read_text().splitlines():
+                if ln.strip().startswith('RequiresMountsFor='):
+                    required.update(ln.split('=', 1)[1].split())
+        except OSError:
+            pass
+    return sorted(m for m in data if m not in required)
+
+
 def storage_line(env: Env, path: str = STORAGE_PATH) -> Line:
     label = 'storage'
     total, free = env.disk(path)
     pct = 100.0 * free / total if total else 0.0
+    loose = unguarded_data_mounts()
+    if pct >= STORAGE_MIN_FREE_PCT and loose:
+        return Line(WAIT, label, f'{path} has {int(pct)} % free; no writer waits for the data '
+                                 f'disk at {", ".join(loose)}.  {RUN}sudo smd storage guard')
     if pct >= STORAGE_MIN_FREE_PCT:
         return Line(OK, label, f'{path} has {int(pct)} % free')
     return Line(FAIL, label, f'{path} has only {int(pct)} % free.  Tell the fleet admin.')

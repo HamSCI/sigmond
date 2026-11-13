@@ -382,6 +382,9 @@ def _upgrade(args) -> int:
                                         disk_serial=disk_serial, smart_dev_type=dev_type))
     ok(f"{ar.CONFIG} has the archiver's keys (archive_dtype f16, evict_first)")
     _run(["systemctl", "daemon-reload"], False)
+    if ar.mount_state(uuid) == "mounted":
+        from ..storage.guard import seal_bare_dir
+        ok(f"the bare {ar.MOUNT} beneath the drive: {seal_bare_dir(str(ar.MOUNT), mode=None)}")
     _after_mount(reading, False)
     return 0
 

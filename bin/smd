@@ -31957,6 +31957,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_storage = sub.add_parser('storage',
         help='the storage capacity ledger: status | share | directive | tick')
     storage_sub = p_storage.add_subparsers(dest='storage_command')
+    st_guard = storage_sub.add_parser('guard',
+        help='data disks: every writer waits for its mount (RequiresMountsFor drop-ins) and '
+             'the bare directory beneath refuses writes; smd apply/update run it')
+    st_guard.add_argument('--dry-run', action='store_true', help='say what it would do')
     st_status = storage_sub.add_parser('status',
         help="each store's fill and stage, each client's holding and target, the alarms")
     st_status.add_argument('--json', action='store_true',
@@ -32943,9 +32947,25 @@ def main() -> int:
             return 1
         if _HAS_SIGMOND_LIB:
             with lifecycle_lock(reason=args.command):
-                return dispatch[args.command](args)
+                return _guard_after(args, dispatch[args.command](args))
 
-    return dispatch[args.command](args)
+    return _guard_after(args, dispatch[args.command](args))
+
+
+def _guard_after(args, rc: int) -> int:
+    """After a successful apply or update, as root: `smd storage guard`
+    (data-volume design 2026-11-08): every writer waits for its data mount and
+    the bare directory beneath refuses writes.  Best effort, one line each,
+    never changes the command's exit code, never restarts a unit."""
+    if (rc != 0 or args.command not in ('apply', 'update') or os.geteuid() != 0
+            or getattr(args, 'dry_run', False) or not _HAS_SIGMOND_LIB):
+        return rc
+    try:
+        from sigmond.storage.guard import guard
+        guard(say=lambda m: print(f'  {m}'))
+    except Exception as exc:  # noqa: BLE001 -- never fails the apply/update
+        print(f'  storage guard: skipped ({type(exc).__name__}: {exc})')
+    return rc
 
 
 def _install_sigint_handler() -> None:
