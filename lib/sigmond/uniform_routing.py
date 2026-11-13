@@ -20,10 +20,17 @@ and a sink state that cannot be read changes nothing at all.
 
 Restarts go only through ``sink_levers.restart_units``, which refuses
 radiod and raises ``RadiodMoved`` if radiod's start time changes.
+
+A restart that failed on an earlier run heals on the next one.  Given a
+``unit_state`` reader, the migration also restarts an instance already on
+the server route when its unit reads inactive or failed, or started before
+its env file last changed: it still runs the old route.
 """
 
 from __future__ import annotations
 
+import math
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -65,11 +72,49 @@ def lowered_from_state(state) -> frozenset:
     return frozenset(out)
 
 
+_DOWN = ("inactive", "failed")
+
+
+def unit_state(unit: str, *, systemctl=subprocess.run
+               ) -> "tuple[str, Optional[float]]":
+    """``(ActiveState, ActiveEnterTimestamp as unix seconds or None)`` for
+    ``unit``, through ``sink_levers``' systemctl seam.  Raises OSError when
+    systemctl fails."""
+    p = sink_levers._unit_props(systemctl, unit,
+                                ("ActiveState", "ActiveEnterTimestamp"))
+    try:
+        started = float(p.get("ActiveEnterTimestamp", "").lstrip("@"))
+    except ValueError:
+        started = None
+    return p.get("ActiveState", ""), started
+
+
+def _stale_why(unit: str, path: Path, unit_state) -> Optional[str]:
+    """Why ``unit``, already on the server route, still runs the old one:
+    its unit reads inactive or failed, or it started before ``path`` last
+    changed (whole seconds, as systemd prints them).  None when it runs
+    the current file, or when either time cannot be read."""
+    try:
+        state, started = unit_state(unit)
+    except OSError:
+        return None
+    if state in _DOWN:
+        return f"its unit reads {state}"
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return None
+    if started is not None and math.floor(started) < math.floor(mtime):
+        return "it started before its env file last changed"
+    return None
+
+
 @dataclass
 class RoutingResult:
     applied: bool
     changed: list = field(default_factory=list)      # (unit, key, old, new)
     restarted: list = field(default_factory=list)
+    stale: list = field(default_factory=list)        # (unit, why) restarted
     lowered: list = field(default_factory=list)      # (unit, "KEY=value")
     upload_off: list = field(default_factory=list)
     already: list = field(default_factory=list)
@@ -94,6 +139,8 @@ class RoutingResult:
             else:
                 out.append(f"routing: would set {unit}: {key} {old} -> {new}")
         out += [f"routing: restarted {u}" for u in self.restarted]
+        out += [f"routing: restarted (stale) {u}: {why}"
+                for u, why in self.stale]
         out += [f"routing: left alone {u} ({kv}: its sink reads below upload; "
                 "`smd sink upload` routes it)" for u, kv in self.lowered]
         out += [f"routing: left alone {u} (its upload is off)"
@@ -119,13 +166,16 @@ def migrate_routing(topology, *, lowered: Optional[frozenset],
                     instance_units=ips._instance_units,
                     show=ips._systemctl_show,
                     restart=sink_levers.restart_units,
-                    undecided_why: str = "") -> RoutingResult:
+                    undecided_why: str = "",
+                    unit_state=None) -> RoutingResult:
     """Put each enabled psk-recorder / meteor-scatter instance on the
     wsprdaemon.org route, restarting only the instances it changed.
 
     ``lowered`` names the clients whose sink reads below ``upload``
     (``lowered_from_state``); None means the sink state could not be read,
-    and then nothing changes.  ``apply=False`` reports what would change."""
+    and then nothing changes.  ``apply=False`` reports what would change.
+    ``unit_state`` (see :func:`unit_state`) turns on the stale heal; None
+    leaves every instance already on the route alone."""
     res = RoutingResult(applied=apply)
     if lowered is None:
         res.undecided = undecided_why or "no reason given"
@@ -133,6 +183,7 @@ def migrate_routing(topology, *, lowered: Optional[frozenset],
     enabled = set(topology.enabled_components())
     carrier = CARRIER_CLIENT in enabled
     queued = []
+    stale = []                                        # (unit, why)
     for client in ROUTED_CLIENTS:
         if client not in enabled:
             continue
@@ -152,6 +203,17 @@ def migrate_routing(topology, *, lowered: Optional[frozenset],
                 continue
             if via_server(client, env):
                 res.already.append(unit)
+                if apply and unit_state is not None and client not in lowered:
+                    try:
+                        epath = env_path_for(
+                            client, sink_levers._instance_of(unit),
+                            base=str(etc))
+                    except (OSError, ValueError):
+                        epath = None
+                    why = (None if epath is None
+                           else _stale_why(unit, epath, unit_state))
+                    if why is not None:
+                        stale.append((unit, why))
                 continue
             if client in lowered:
                 res.lowered.append((unit, _effective(client, env)))
@@ -189,10 +251,10 @@ def migrate_routing(topology, *, lowered: Optional[frozenset],
                 continue
             res.changed.append((unit, key, old, value))
             queued.append(unit)
-    if apply and queued:
+    if apply and (queued or stale):
         failed = []
         try:
-            restart(queued)
+            restart(queued + [u for u, _ in stale])
         except sink_levers.RadiodMoved as exc:
             failed = list(exc.failures)
             res.failures.extend(exc.failures)
@@ -202,4 +264,5 @@ def migrate_routing(topology, *, lowered: Optional[frozenset],
             res.failures.extend(exc.failures)
         bad = {u for u, _ in failed}
         res.restarted = [u for u in queued if u not in bad]
+        res.stale = [(u, why) for u, why in stale if u not in bad]
     return res

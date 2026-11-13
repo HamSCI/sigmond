@@ -2136,6 +2136,15 @@ def _update_routing() -> int:
     return _run_smd_child(ROUTING_CHILD, 'sigmond', 'routing')
 
 
+def _update_route_step() -> bool:
+    """`smd update --apply`'s routing step, printed; True when it failed."""
+    print('\n  [routing] psk-recorder and meteor-scatter via wsprdaemon.org')
+    rc = _update_routing()
+    if rc:
+        _err(f'routing: exit {rc}; re-run: smd admin uploader routing --apply')
+    return bool(rc)
+
+
 def _align_routing():
     """`smd align --apply`'s routing step, after its bring-up re-run: the
     same child as `smd update --apply`'s."""
@@ -2144,7 +2153,7 @@ def _align_routing():
     if rc:
         return align_apply.Step(
             'admin uploader routing --apply', 'failed',
-            f'exit {rc}; re-run: sudo smd admin uploader routing --apply')
+            f'exit {rc}; re-run: smd admin uploader routing --apply')
     return align_apply.Step('admin uploader routing --apply', 'ran')
 
 
@@ -5850,6 +5859,10 @@ def cmd_update(args) -> int:
             _warn(f'{target}: HELD — {reason}')
         code, line = _no_actionable_outcome(blocking_targets)
         (_warn if blocking_targets else _ok)(line)
+        # A current host still routes: this retries a routing run that
+        # failed on an earlier update (uniform routing, ruling R7).
+        if getattr(args, 'apply', False) and _update_route_step():
+            code = code or 1
         _say_sink_notice(update_notice)
         return code
 
@@ -5989,12 +6002,8 @@ def cmd_update(args) -> int:
     # the wsprdaemon.org route.  A child runs the smd on disk, so the update
     # that ships this code also runs it (this process preloaded the old
     # modules).  Idempotent: a second run changes nothing.
-    if apply_ and not failed:
-        print('\n  [routing] psk-recorder and meteor-scatter via wsprdaemon.org')
-        rc = _update_routing()
-        if rc:
-            failed += 1
-            _err(f'routing: exit {rc}; re-run: sudo smd admin uploader routing --apply')
+    if apply_ and not failed and _update_route_step():
+        failed += 1
 
     # Record what was done.  Without this the host keeps asserting the
     # image version it was installed with — the exact way DASI002 came to
@@ -6013,6 +6022,8 @@ def cmd_update(args) -> int:
     # an install had broken. DASI002's rc=1 on 2026-08-17 came entirely
     # from the HELD refusal; ka9q-python's `install.sh exit 127` in the
     # same run contributed nothing to it.
+    # A routing step that failed counts in `failed` too, so it alone skips
+    # this refresh, although every pull and install landed.
     if apply_ and not failed:
         _refresh_cli_reference()
     _say_sink_notice(update_notice)
@@ -9293,7 +9304,11 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
             quiet = False     # unknown staleness is not "nothing to do"
         if quiet:
             print('  aligned — nothing to do')
-            return 0
+            # Still route: this retries a routing run that failed on an
+            # earlier align or update (uniform routing, ruling R7).
+            routing_step = _align_routing()
+            _align_print_steps([routing_step])
+            return 1 if routing_step.outcome in _ALIGN_BLOCKING else 0
 
     bringup_steps = _align_bringup(site_timing_refreshed=any(
         s.component == _ALIGN_SITE_TIMING and s.outcome == 'refreshed' for s in image_steps))

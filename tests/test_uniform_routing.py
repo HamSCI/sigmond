@@ -34,6 +34,7 @@ class Rig:
         self.overrides = {}        # unit -> dict that show() returns instead
         self.restarts = []
         self.restart_error = None
+        self.states = {}           # unit -> (ActiveState, started) or OSError
 
     def path(self, client, inst):
         return env_path_for(client, inst, base=str(self.etc))
@@ -70,11 +71,19 @@ class Rig:
         if self.restart_error is not None:
             raise self.restart_error
 
-    def run(self, enabled, *, lowered, apply=True, undecided_why=""):
+    def unit_state(self, unit):
+        st = self.states.get(unit, ("active", None))
+        if isinstance(st, Exception):
+            raise st
+        return st
+
+    def run(self, enabled, *, lowered, apply=True, undecided_why="",
+            heal=False):
         return R.migrate_routing(
             Topo(enabled), lowered=lowered, apply=apply, etc=self.etc,
             instance_units=self.instance_units, show=self.show,
-            restart=self.restart, undecided_why=undecided_why)
+            restart=self.restart, undecided_why=undecided_why,
+            unit_state=self.unit_state if heal else None)
 
 
 @pytest.fixture
@@ -338,3 +347,86 @@ def test_lowered_from_state_counts_a_missing_client_under_a_lowered_site():
     st = SinkState(enforced=True, site=_site("upload"),
                    clients={"psk-recorder": _client("upload")})
     assert R.lowered_from_state(st) == frozenset()
+
+
+# ---------------------------------------------------------------------------
+# The stale heal (ruling R7): a restart that failed on an earlier run
+# ---------------------------------------------------------------------------
+
+PSK = "psk-recorder@AC0G-S.service"
+
+
+def _routed(rig, mtime=1000):
+    import os
+    p = rig.env("psk-recorder", "AC0G-S", PSK_USE_HS_UPLOADER="1",
+                PSK_DELIVERY_PIPELINES="server-merge")
+    os.utime(p, (mtime, mtime))
+    return p
+
+
+def test_an_env_file_newer_than_the_units_start_is_restarted(rig):
+    _routed(rig, mtime=1000)
+    rig.states[PSK] = ("active", 900.0)
+    res = rig.run(ALL, lowered=frozenset(), heal=True)
+    assert rig.restarts == [[PSK]]
+    assert res.stale == [(PSK, "it started before its env file last changed")]
+    assert ("routing: restarted (stale) psk-recorder@AC0G-S.service: it "
+            "started before its env file last changed") in res.lines()
+    assert res.ok and res.changed == []
+
+
+def test_an_env_file_older_than_the_units_start_is_left_alone(rig):
+    _routed(rig, mtime=1000)
+    for started in (1100.0, 1000.5):        # later, or the same second
+        rig.states[PSK] = ("active", started)
+        res = rig.run(ALL, lowered=frozenset(), heal=True)
+        assert rig.restarts == [] and res.stale == []
+        assert res.lines() == [
+            "routing: 1 instance(s) already deliver via wsprdaemon.org"]
+
+
+def test_a_failed_or_inactive_unit_is_restarted(rig):
+    _routed(rig)
+    for state in ("failed", "inactive"):
+        rig.restarts.clear()
+        rig.states[PSK] = (state, None)
+        res = rig.run(ALL, lowered=frozenset(), heal=True)
+        assert rig.restarts == [[PSK]]
+        assert res.stale == [(PSK, f"its unit reads {state}")]
+
+
+def test_an_unreadable_unit_state_or_start_restarts_nothing(rig):
+    _routed(rig)
+    for st in (OSError("systemctl show exited 1"), ("active", None)):
+        rig.states[PSK] = st
+        res = rig.run(ALL, lowered=frozenset(), heal=True)
+        assert rig.restarts == [] and res.stale == []
+
+
+def test_the_heal_skips_a_dry_run_a_lowered_client_and_no_reader(rig):
+    _routed(rig, mtime=1000)
+    rig.states[PSK] = ("failed", None)
+    rig.run(ALL, lowered=frozenset(), heal=True, apply=False)
+    rig.run(ALL, lowered=frozenset({"psk-recorder"}), heal=True)
+    rig.run(ALL, lowered=frozenset())               # no unit_state reader
+    assert rig.restarts == []
+
+
+def test_a_stale_restart_that_fails_is_a_failure(rig):
+    _routed(rig)
+    rig.states[PSK] = ("failed", None)
+    rig.restart_error = sink_levers.RestartFailed([(PSK, "exit 1")])
+    res = rig.run(ALL, lowered=frozenset(), heal=True)
+    assert res.stale == [] and not res.ok
+
+
+def test_unit_state_reads_systemctl_show():
+    import subprocess as sp
+    seen = []
+
+    def systemctl(cmd, **kw):
+        seen.append(cmd)
+        return sp.CompletedProcess(
+            cmd, 0, "ActiveState=active\nActiveEnterTimestamp=@1790000000\n", "")
+    assert R.unit_state(PSK, systemctl=systemctl) == ("active", 1790000000.0)
+    assert seen[0][:2] == ["systemctl", "show"] and "--timestamp=unix" in seen[0]

@@ -162,6 +162,29 @@ class SinkUploadTests(_Station):
         self.assertEqual(rc, 0, text)
         self.assertEqual(self.routed, [(frozenset(), "")])
 
+    def test_a_site_switch_that_was_not_written_moves_nothing(self):
+        state = _state(site="fill", psk_recorder=_client("upload", "fill"))
+        self.gate(state=state)
+        with mock.patch.object(cfg, "_set_site", return_value="exit 1: boom"):
+            rc, text = self.verb("on")
+        self.assertEqual(rc, 1, text)
+        self.assertEqual(self.routed,
+                         [(None, "the site sink switch was not written")])
+
+    def test_a_coordination_write_that_failed_before_the_marker_moves_nothing(self):
+        self.gate(marker=False)
+        real = cfg._patch_uploads_block
+
+        def patch(path, up):
+            if Path(path) == self.coord:
+                raise PermissionError(13, "Permission denied", str(path))
+            return real(path, up)
+        with mock.patch.object(cfg, "_patch_uploads_block", side_effect=patch):
+            rc, text = self.verb("on")
+        self.assertEqual(rc, 1, text)
+        self.assertEqual(self.routed,
+                         [(None, "the site sink switch was not written")])
+
     def test_sink_fill_never_routes(self):
         for path in ("gate", "no gate"):
             for verb in ("hold", "discard"):
@@ -256,6 +279,31 @@ class RouteViaWsprdaemonTests(unittest.TestCase):
         self.assertIn("boom", e.call_args.args[0])
 
 
+class MigrateWiringTests(unittest.TestCase):
+
+    def test_migrate_reads_unit_state_through_the_lever_systemctl(self):
+        import subprocess as sp
+        seen, got = [], {}
+
+        def systemctl(cmd, **kw):
+            seen.append(cmd)
+            return sp.CompletedProcess(
+                cmd, 0, "ActiveState=failed\nActiveEnterTimestamp=\n", "")
+
+        def migrate(topology, **kw):
+            got.update(kw)
+            return ur.RoutingResult(applied=True)
+        roots = types.SimpleNamespace(topology=Path("/nonexistent/t.toml"),
+                                      etc=Path("/nonexistent"))
+        with mock.patch.object(up_cmd, "_step_roots", return_value=roots), \
+                mock.patch.object(up_cmd, "_lever_systemctl", systemctl), \
+                mock.patch.object(ur, "migrate_routing", side_effect=migrate):
+            up_cmd._migrate(frozenset(), apply=True)
+        self.assertEqual(got["unit_state"]("psk-recorder@X.service"),
+                         ("failed", None))
+        self.assertEqual(seen[0][:2], ["systemctl", "show"])
+
+
 class RoutingVerbTests(unittest.TestCase):
 
     def setUp(self):
@@ -314,6 +362,8 @@ class RoutingVerbTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertEqual(self.calls, [])
         self.assertIn("root", err)
+        self.assertIn("`smd admin uploader routing --apply`", err)
+        self.assertNotIn("sudo", err)
 
     def test_routing_verb_defers_the_render_without_a_marker(self):
         with mock.patch.object(sink_state, "update_notice",
@@ -405,8 +455,27 @@ class UpdateRoutingTests(_Rig):
         rc, text = self.run_update(apply=True)
         self.assertEqual(self.recorded, [ROUTING_ARGV])
         self.assertEqual(rc, 1, text)
-        self.assertIn("routing: exit 1; re-run: sudo smd admin uploader "
+        self.assertIn("routing: exit 1; re-run: smd admin uploader "
                       "routing --apply", text)
+        self.assertNotIn("sudo smd", text)
+
+    def test_update_with_nothing_runnable_still_routes(self):
+        from test_update_executor import _git
+        _git("pull", "--ff-only", cwd=self.host)
+        rc, text = self.run_update(apply=True)
+        self.assertNotIn("[pull]", text)
+        self.assertEqual(self.recorded, [ROUTING_ARGV], text)
+        self.assertEqual(rc, 0, text)
+        self.child_rc = 1
+        rc, text = self.run_update(apply=True)
+        self.assertEqual(rc, 1, text)
+        self.assertIn("re-run: smd admin uploader routing --apply", text)
+
+    def test_update_dry_run_with_nothing_runnable_never_routes(self):
+        from test_update_executor import _git
+        _git("pull", "--ff-only", cwd=self.host)
+        self.run_update(apply=False)
+        self.assertEqual(self.recorded, [])
 
     def test_update_dry_run_never_routes(self):
         rc, text = self.run_update(apply=False)
@@ -448,7 +517,8 @@ class AlignRoutingStepTests(unittest.TestCase):
         step, _ = self.run_step(2)
         self.assertEqual(step.outcome, "failed")
         self.assertIn("exit 2", step.detail)
-        self.assertIn("sudo smd admin uploader routing --apply", step.detail)
+        self.assertIn("re-run: smd admin uploader routing --apply", step.detail)
+        self.assertNotIn("sudo", step.detail)
         self.assertIn(step.outcome, smd._ALIGN_BLOCKING)
 
 
@@ -497,6 +567,41 @@ class AlignApplyRoutesTests(unittest.TestCase):
                 rc, order, text = self.align("failed", no_restart=no_restart)
                 self.assertEqual(rc, 1, text)
                 self.assertIn("routing", order)
+
+    def align_noop(self, outcome):
+        """A run with nothing to do: every component current, aligned.json
+        naming this release with a live stage that passed, nothing stale."""
+        import test_align_cli as tac
+        from sigmond import align_apply
+        order = []
+        m_routing = mock.Mock(side_effect=lambda: order.append("routing") or
+                              align_apply.Step("admin uploader routing --apply",
+                                               outcome))
+        m_bringup = mock.Mock(side_effect=lambda **kw:
+                              order.append("bringup") or [])
+        out = io.StringIO()
+        with contextlib.ExitStack() as st:
+            tac._apply_patches(
+                st, rel=tac.APPLY_REL, live=tac.LIVE_ALIGNED,
+                _align_routing=m_routing, _align_bringup=m_bringup,
+                _align_aligned_release=lambda: tac.APPLY_REL.tag,
+                _align_aligned_live=lambda: dict(tac._LIVE_PASSED))
+            st.enter_context(mock.patch(
+                "sigmond.align_apply.apply_plan",
+                return_value=[align_apply.Step("sigmond", "current"),
+                              align_apply.Step("hf-timestd", "current")]))
+            st.enter_context(contextlib.redirect_stdout(out))
+            rc = tac.smd.cmd_align(tac._apply_args("/opt/git/sigmond"))
+        return rc, order, out.getvalue()
+
+    def test_align_with_nothing_to_do_still_routes(self):
+        rc, order, text = self.align_noop("ran")
+        self.assertIn("aligned — nothing to do", text)
+        self.assertEqual(order, ["routing"])
+        self.assertEqual(rc, 0, text)
+        rc, order, text = self.align_noop("failed")
+        self.assertEqual(order, ["routing"])
+        self.assertEqual(rc, 1, text)
 
     def test_a_failed_bringup_never_routes(self):
         rc, order, _ = self.align("ran", bringup_fails=True)

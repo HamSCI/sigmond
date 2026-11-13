@@ -604,7 +604,8 @@ def _migrate(lowered: Optional[frozenset], why: str = "", *, apply: bool):
         load_topology(roots.topology), lowered=lowered, apply=apply,
         etc=roots.etc, undecided_why=why,
         show=lambda unit: ips._systemctl_show(unit, run=sc),
-        restart=lambda units: sink_levers.restart_units(units, systemctl=sc))
+        restart=lambda units: sink_levers.restart_units(units, systemctl=sc),
+        unit_state=lambda unit: uniform_routing.unit_state(unit, systemctl=sc))
 
 
 ROUTING_DEFERRED = ("routing: the manifest render waits for the next "
@@ -623,8 +624,8 @@ def cmd_uploader_routing(args) -> int:
     apply = bool(getattr(args, "apply", False))
     if apply and _euid() != 0:
         _err("moving instances onto the wsprdaemon.org route writes root-owned "
-             "files and restarts recorders; run it as root (sudo smd admin "
-             "uploader routing --apply)")
+             "files and restarts recorders, so it needs root; run "
+             "`smd admin uploader routing --apply`, which elevates itself")
         return 1
     roots = _step_roots()
     try:

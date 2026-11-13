@@ -2017,6 +2017,7 @@ def _site_change(mode: str, reason: str, coord, words, roots) -> int:
 
     # 3. site.toml
     why = _set_site(new, reason, roots)
+    site_written = why is None
     if why is None:
         ok(f'{site_path}: site sink switch set to {new}')
     else:
@@ -2053,8 +2054,13 @@ def _site_change(mode: str, reason: str, coord, words, roots) -> int:
             rc = 1
 
     # 4a. route via wsprdaemon.org, before the render
+    # (a site switch that did not land, or a coordination.toml the
+    # carry-over would copy back, leaves the station where it stood: no
+    # instance moves; ruling R8)
     if new == 'upload':
-        if change is not None:
+        if not site_written or (coord_failed and not marker):
+            route = (None, 'the site sink switch was not written')
+        elif change is not None:
             route = (frozenset(change.below), '')
         elif marker:
             route = (None, 'the sink status could not be read')
