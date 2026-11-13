@@ -256,6 +256,28 @@ A read or write error on the drive ends the run, logs once, and leaves the next 
 The recorder never touches the drive, so it cannot notice. Files that age off the SSD while the drive is
 away are lost to the archive only.
 
+### Coming back after a replug
+
+Found in the field (AI6VN-1, 2026-11-13): the plain `nofail` fstab line mounts only at boot. A drive pulled
+while mounted and plugged back in enumerates fine but stays unmounted, and its ext4 journal needs replaying.
+
+- `add` writes the fstab line with `x-systemd.automount` added (keeping `nofail`,
+  `x-systemd.device-timeout=10s`, and pass 2). systemd mounts the drive on the first access after a replug,
+  and because the pass is 2, the generated mount runs `systemd-fsck@` (`e2fsck -p`) first, which replays the
+  journal after an unclean removal. An `e2fsck -p` that wants a manual repair leaves the drive unmounted, and
+  status says so. `add` upgrades an existing line from an earlier `add`.
+- Nothing that only reports may touch the mount point, because an access to an absent drive's automount
+  blocks for the device timeout. `smd archive status`, `smd check` and the heartbeat read
+  `/proc/self/mountinfo` and `blkid` instead. The archiver accesses it (its access is what remounts).
+- The anti-goal still holds: the mount point is an autofs mount when the drive is away, never a plain
+  directory, and stays `chattr +i` underneath.
+- `smd archive status` and `smd check` report three states: mounted; **present but not mounted** (the UUID
+  is on a block device but no ext4 is at the mount, e.g. fsck refused) as a WARN with the command to run;
+  absent.
+- `smd archive eject` (writer's call: a new verb; `remove` forgets the drive) waits for an archiver run in
+  progress, unmounts, and prints that the drive can be pulled. The station console shows the same line
+  while the drive is mounted.
+
 ### Status
 
 Each run writes `/var/lib/timestd/archive-status.json` (on the SSD): time of run, drive present, newest and
@@ -309,6 +331,9 @@ ages and bridges.
 The first real-drive `add` (Seagate Portable 2 TB on USB 2, controller passed through) worked in 37 s and
 found three bugs, fixed in sigmond: `add` searches `/usr/sbin` and `/sbin` for its tools; it creates
 `<mount>/timestd` owned by `timestd`; all of its output goes to one stream, in order.
+
+2026-11-13 04:02Z: the drive, pulled while mounted at 23:49Z, came back as `sdb1 SIGMOND-ARCHIVE` but stayed
+unmounted until a hand `e2fsck -p` ("recovering journal ... clean") and `mount`. Hence the replug section.
 
 ## Who builds what
 
