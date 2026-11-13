@@ -467,3 +467,15 @@ def test_upgrade_never_switches_uas_while_mounted(env, health, udev, monkeypatch
     monkeypatch.setattr(G, "seal_bare_dir", lambda *a, **k: "already")
     assert cmd.cmd_archive(_args(upgrade=True, device=None, confirm=None, switch_uas=True)) == 0
     assert health.rebinds == []
+
+
+def test_unit_active_counts_activating(monkeypatch):
+    # A oneshot run in progress reads "activating", not "active" (AI6VN-1, 11-13:
+    # --upgrade's umount hit an archiver run it had not waited for).
+    import subprocess as sp
+    for state, want in (("active", True), ("activating", True), ("deactivating", True),
+                        ("reloading", True), ("inactive", False), ("failed", False)):
+        monkeypatch.setattr(cmd.subprocess, "run",
+                            lambda argv, _s=state, **kw: sp.CompletedProcess(
+                                argv, 0 if _s == "active" else 3, _s + "\n", ""))
+        assert cmd._unit_active("x.service") is want, state

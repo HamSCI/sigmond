@@ -645,7 +645,10 @@ def _unit_name(path: Path) -> str:
 
 
 def _unit_active(unit: str) -> bool:
-    return subprocess.run(["systemctl", "is-active", "--quiet", unit]).returncode == 0
+    """Running, or on its way in or out.  A oneshot mid-run reads
+    "activating", which `is-active --quiet` counts as not active."""
+    r = subprocess.run(["systemctl", "is-active", unit], capture_output=True, text=True)
+    return (r.stdout or "").strip() in ("active", "activating", "deactivating", "reloading")
 
 
 def _wait_for_archiver() -> None:
