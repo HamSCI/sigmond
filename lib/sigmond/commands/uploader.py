@@ -570,13 +570,19 @@ def routing_lowered(roots: co.CarryRoots, coord
 
     With the gate offered and the carry-over marker standing, hs-uploader's
     own reading of the switches decides; a read that fails returns
-    ``(None, cause)``, and the migration then changes nothing.  Otherwise
-    the ``[uploads]`` mode decides: ``upload`` lowers nobody, anything else
-    lowers every routed client."""
+    ``(None, cause)``, and the migration then changes nothing.  With the
+    marker standing and a features probe that failed, nobody can say which
+    switches rule, so the answer is ``(None, cause)`` too: ``[uploads]``
+    no longer decides once the marker stands.  Otherwise the ``[uploads]``
+    mode decides: ``upload`` lowers nobody, anything else lowers every
+    routed client."""
     from .. import uniform_routing
     features = um.hs_uploader_features(python=roots.python)
-    if (features is not None and um.GATE_FEATURE in features
-            and sink_state.marker_stands(roots.marker)):
+    marker = sink_state.marker_stands(roots.marker)
+    if features is None and marker:
+        return None, ("the hs-uploader features probe failed while the "
+                      f"carry-over marker {roots.marker} stands")
+    if (features is not None and um.GATE_FEATURE in features and marker):
         relayed: list = []
         with _relayed_stderr(relayed):
             state = sink_state.read_state(
@@ -605,7 +611,8 @@ def _migrate(lowered: Optional[frozenset], why: str = "", *, apply: bool):
         etc=roots.etc, undecided_why=why,
         show=lambda unit: ips._systemctl_show(unit, run=sc),
         restart=lambda units: sink_levers.restart_units(units, systemctl=sc),
-        unit_state=lambda unit: uniform_routing.unit_state(unit, systemctl=sc))
+        unit_state=lambda unit: uniform_routing.unit_state(unit, systemctl=sc),
+        shim_py=uniform_routing.WSPR_SHIM)
 
 
 ROUTING_DEFERRED = ("routing: the manifest render waits for the next "

@@ -50,9 +50,16 @@ class ServerDeliveredProducers(unittest.TestCase):
             'psk-recorder': [('psk-recorder@A', {})]}))
         self.assertEqual(got, {'psk-recorder'})
 
-    def test_unset_meteor_env_is_direct_and_keeps_the_pipeline(self):
+    def test_unset_meteor_env_reads_deposit(self):
+        # meteor-scatter 907c7b2: an unset mode is deposit (final fix F4).
         got = um.server_delivered_producers(None, units_env=_env({
             'meteor-scatter': [('meteor-scatter@A', {})]}))
+        self.assertEqual(got, {'meteor-scatter'})
+
+    def test_direct_meteor_env_keeps_the_pipeline(self):
+        got = um.server_delivered_producers(None, units_env=_env({
+            'meteor-scatter': [('meteor-scatter@A', {
+                'METEOR_SCATTER_DELIVERY_MODE': 'direct'})]}))
         self.assertEqual(got, set())
 
     def test_one_lowered_instance_keeps_the_pipeline(self):

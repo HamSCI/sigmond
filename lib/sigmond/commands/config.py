@@ -2156,6 +2156,17 @@ def cmd_config_profile_install(args, chown=os.chown) -> int:
 # smd config upload — flip a recorder instance's per-instance upload enable flag
 # ---------------------------------------------------------------------------
 
+def _upload_on_lowered() -> "tuple[Optional[frozenset], str]":
+    """``routing_lowered`` for `smd config upload --on`: the clients whose
+    sink reads below upload, or ``(None, cause)`` when nobody can say."""
+    from . import uploader as up_cmd
+    try:
+        return up_cmd.routing_lowered(up_cmd._step_roots(),
+                                      load_coordination(COORDINATION_PATH))
+    except Exception as exc:
+        return None, f'{type(exc).__name__}: {exc}'
+
+
 def cmd_config_upload(args) -> int:
     """Enable/disable a recorder instance's upstream upload.
 
@@ -2196,7 +2207,7 @@ def cmd_config_upload(args) -> int:
                 dkey = delivery_knob[0]
                 dval = upload.read_flag(e, dkey)
                 if dval is None:
-                    dval = ("unset (reads direct: posts from this station)"
+                    dval = ("unset (reads deposit: wsprdaemon.org forwards it)"
                             if client == "meteor-scatter"
                             else "unset (default server-merge)")
                 extra = f"  [{dkey}={dval}]"
@@ -2210,11 +2221,23 @@ def cmd_config_upload(args) -> int:
         err("an instance is required to change the flag, e.g. "
             f"`smd config upload {client} AC0G/S --on`")
         return 1
+    # A station still filling is never moved onto the upload route.  The
+    # same reading the routing step uses decides (routing_lowered); when
+    # nobody can read the switches, --on writes nothing at all.
     hold = None
     if on and delivery_knob:
-        hold = upload.sink_level(client)
-        if hold == "upload":
-            hold = None
+        try:
+            upload.refuse_direct(client, via)
+        except upload.DirectRouteRefused as e:
+            err(str(e))
+            return 1
+        lowered, why = _upload_on_lowered()
+        if lowered is None:
+            err(f"cannot tell whether {client}'s sink reads below upload "
+                f"({why}); nothing written")
+            return 1
+        if client in lowered:
+            hold = "below upload"
     try:
         kw = {"hold_level": hold} if hold else {}
         path, flag, dests, delivery_set = upload.apply_enable(
@@ -2244,7 +2267,7 @@ def cmd_config_upload(args) -> int:
     if hold and client in upload.STANDARD_ROUTE:
         cur = upload.read_flag(path, upload.STANDARD_ROUTE[client][0])
         info(f"{client}: delivery stays {cur if cur is not None else 'unset'} "
-             f"while the sink reads {hold}; `smd sink upload` moves it to "
+             f"while its sink reads {hold}; `smd sink upload` moves it to "
              f"the wsprdaemon.org route")
     carrier = None
     if on and client in upload.STANDARD_ROUTE:

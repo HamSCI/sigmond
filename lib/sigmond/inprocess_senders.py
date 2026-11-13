@@ -14,7 +14,7 @@ and applies the client's own rule, copied from the client:
   the default ``server-merge``, which runs no sender.
 * meteor-scatter (``core/recorder.py``, ``_delivery_mode`` and
   ``_start_uploaders``): ``METEOR_SCATTER_DELIVERY_MODE``, read as
-  ``direct`` when unset or empty; ``off``, ``none``, ``disabled`` and
+  ``deposit`` when unset or empty; ``off``, ``none``, ``disabled`` and
   ``deposit`` run no sender.  In ``direct`` mode it starts its sender only
   when ``[station] callsign`` and ``grid_square`` in its config are both
   set.  It finds that config the way ``config.resolve_config_path`` does:
@@ -157,10 +157,11 @@ def _ms_config_path(env: dict, unit: str) -> Path:
 
 def _ms_delivery_mode(env: dict) -> str:
     """meteor-scatter's delivery mode for ``env`` (its ``_delivery_mode``):
-    ``METEOR_SCATTER_DELIVERY_MODE``, ``direct`` when unset or empty.  Any
-    mode but ``off``, ``none``, ``disabled`` and ``deposit`` starts the
-    in-process sender; ``deposit`` marks rows for a server to forward."""
-    return (env.get("METEOR_SCATTER_DELIVERY_MODE") or "direct").strip().lower()
+    ``METEOR_SCATTER_DELIVERY_MODE``, ``deposit`` when unset or empty
+    (meteor-scatter 907c7b2).  Any mode but ``off``, ``none``, ``disabled``
+    and ``deposit`` starts the in-process sender; ``deposit`` marks rows for
+    a server to forward."""
+    return (env.get("METEOR_SCATTER_DELIVERY_MODE") or "deposit").strip().lower()
 
 
 def _meteor_scatter_sends(env: dict, unit: str) -> bool:

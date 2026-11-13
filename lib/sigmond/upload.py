@@ -132,20 +132,13 @@ def set_env_flag(path: Path, key: str, value: str) -> None:
     rewrite_owned(path, edit, mode=None, keep_owner=True)
 
 
-def sink_level(client: str, reader=None) -> "str | None":
-    """The client's effective sink state (upload, fill, off ...), read with
-    sink_state's own reader; None when it cannot be read."""
-    try:
-        if reader is None:
-            from . import sink_state
-            reader = sink_state.read_state
-        state = reader()
-        if state is None:
-            return None
-        c = state.clients.get(client)
-        return None if c is None else c.effective
-    except Exception:
-        return None
+def refuse_direct(client: str, delivery: "str | None") -> None:
+    """Raise DirectRouteRefused when ``delivery`` would post from this
+    station."""
+    if delivery in REFUSED_VIA.get(client, ()):
+        raise DirectRouteRefused(
+            f"--via {delivery} would post from this station; "
+            f"{STANDARD_NOTE}. Use --on alone.")
 
 
 def apply_enable(client: str, instance: str, on: bool, base: str = "/etc",
@@ -161,15 +154,13 @@ def apply_enable(client: str, instance: str, on: bool, base: str = "/etc",
     client, DirectRouteRefused for a direct ``delivery`` (nothing written),
     ValueError for any other invalid ``delivery`` choice.
 
-    ``hold_level`` is the client's effective sink state when known.  Below
-    ``upload`` it is a sink lever's turn: the flag is written and the
-    delivery key stays as it stands (delivery_set is None)."""
+    ``hold_level`` names a sink that reads below ``upload`` (any value but
+    ``upload``).  Then a sink lever owns the delivery key: the flag gets
+    written and the delivery key stays as it stands (delivery_set is
+    None)."""
     if client not in UPLOAD_ENABLE:
         raise KeyError(client)
-    if delivery in REFUSED_VIA.get(client, ()):
-        raise DirectRouteRefused(
-            f"--via {delivery} would post from this station; "
-            f"{STANDARD_NOTE}. Use --on alone.")
+    refuse_direct(client, delivery)
     flag, dests = UPLOAD_ENABLE[client]
     path = env_path_for(client, instance, base=base)
     set_env_flag(path, flag, "1" if on else "0")

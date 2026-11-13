@@ -78,12 +78,14 @@ class Rig:
         return st
 
     def run(self, enabled, *, lowered, apply=True, undecided_why="",
-            heal=False):
+            heal=False, shim_py=None, now=None):
+        kw = {} if now is None else {"now": lambda: now}
         return R.migrate_routing(
             Topo(enabled), lowered=lowered, apply=apply, etc=self.etc,
             instance_units=self.instance_units, show=self.show,
             restart=self.restart, undecided_why=undecided_why,
-            unit_state=self.unit_state if heal else None)
+            unit_state=self.unit_state if heal else None, shim_py=shim_py,
+            **kw)
 
 
 @pytest.fixture
@@ -127,18 +129,23 @@ def test_legacy_both_and_server_raw_at_upload_move(rig):
     assert len(rig.restarts) == 1
 
 
-def test_meteor_unset_and_off_at_upload_move_to_deposit(rig):
+def test_meteor_off_and_direct_at_upload_move_to_deposit_unset_stays(rig):
+    # meteor-scatter 907c7b2 reads an unset mode as deposit (final fix F4).
     rig.env("meteor-scatter", "AC0G-S", METEOR_SCATTER_USE_HS_UPLOADER="1")
     rig.env("meteor-scatter", "AC0G-T", METEOR_SCATTER_USE_HS_UPLOADER="1",
             METEOR_SCATTER_DELIVERY_MODE="off")
+    rig.env("meteor-scatter", "AC0G-U", METEOR_SCATTER_USE_HS_UPLOADER="1",
+            METEOR_SCATTER_DELIVERY_MODE="direct")
     res = rig.run(["wspr-recorder", "meteor-scatter"], lowered=frozenset())
     assert res.changed == [
-        ("meteor-scatter@AC0G-S.service", "METEOR_SCATTER_DELIVERY_MODE", "unset", "deposit"),
         ("meteor-scatter@AC0G-T.service", "METEOR_SCATTER_DELIVERY_MODE", "off", "deposit"),
+        ("meteor-scatter@AC0G-U.service", "METEOR_SCATTER_DELIVERY_MODE", "direct", "deposit"),
     ]
-    for inst in ("AC0G-S", "AC0G-T"):
+    assert res.already == ["meteor-scatter@AC0G-S.service"]
+    assert "METEOR_SCATTER_DELIVERY_MODE" not in rig.text("meteor-scatter", "AC0G-S")
+    for inst in ("AC0G-T", "AC0G-U"):
         assert "METEOR_SCATTER_DELIVERY_MODE=deposit" in rig.text("meteor-scatter", inst)
-    assert "routing: meteor-scatter@AC0G-S.service: METEOR_SCATTER_DELIVERY_MODE unset -> deposit" in res.lines()
+    assert "routing: meteor-scatter@AC0G-T.service: METEOR_SCATTER_DELIVERY_MODE off -> deposit" in res.lines()
     assert res.ok
 
 
@@ -205,7 +212,6 @@ def test_psk_instance_with_flag_at_zero_is_routed(rig):
     res = rig.run(ALL, lowered=frozenset())
     assert "PSK_DELIVERY_PIPELINES=server-merge" in rig.text(
         "psk-recorder", "AC0G-S")
-    assert res.upload_off == []
     assert [c[0] for c in res.changed] == ["psk-recorder@AC0G-S.service"]
 
 
@@ -217,6 +223,51 @@ def test_psk_instance_with_flag_at_zero_stays_when_lowered(rig):
     assert rig.text("psk-recorder", "AC0G-S") == before
     assert rig.restarts == [] and res.changed == []
     assert [u for u, _ in res.lowered] == ["psk-recorder@AC0G-S.service"]
+
+
+def test_meteor_instance_with_flag_at_zero_is_routed(rig):
+    # Final fix F1: no meteor-scatter code reads its flag; at 0 an instance
+    # still posts directly.
+    rig.env("meteor-scatter", "AC0G-S", METEOR_SCATTER_USE_HS_UPLOADER="0",
+            METEOR_SCATTER_DELIVERY_MODE="direct")
+    res = rig.run(ALL, lowered=frozenset())
+    assert "METEOR_SCATTER_DELIVERY_MODE=deposit" in rig.text(
+        "meteor-scatter", "AC0G-S")
+    assert res.restarted == ["meteor-scatter@AC0G-S.service"]
+    assert not any("upload is off" in l for l in res.lines())
+    assert res.ok
+
+
+def test_meteor_instance_with_flag_at_zero_keeps_every_guard(rig):
+    rig.env("meteor-scatter", "AC0G-S", METEOR_SCATTER_USE_HS_UPLOADER="0",
+            METEOR_SCATTER_DELIVERY_MODE="direct")
+    before = rig.text("meteor-scatter", "AC0G-S")
+    lowered = rig.run(ALL, lowered=frozenset({"meteor-scatter"}))
+    dry = rig.run(ALL, lowered=frozenset(), apply=False)
+    bare = rig.run(["meteor-scatter"], lowered=frozenset())
+    assert rig.text("meteor-scatter", "AC0G-S") == before
+    assert rig.restarts == []
+    assert [u for u, _ in lowered.lowered] == ["meteor-scatter@AC0G-S.service"]
+    assert [c[0] for c in dry.changed] == ["meteor-scatter@AC0G-S.service"]
+    assert bare.no_carrier == ["meteor-scatter@AC0G-S.service"]
+
+
+def test_a_routed_instance_without_a_carrier_is_an_error(rig):
+    # An unset meteor mode reads deposit; with no wspr-recorder its spots
+    # stay on the station.  It posts nothing, so the line says so.
+    rig.env("meteor-scatter", "AC0G-S", METEOR_SCATTER_USE_HS_UPLOADER="1")
+    rig.env("psk-recorder", "AC0G-S", PSK_DELIVERY_PIPELINES="server-merge")
+    res = rig.run(["psk-recorder", "meteor-scatter"], lowered=frozenset())
+    assert rig.restarts == [] and res.changed == [] and res.already == []
+    errors = [l for l in res.lines() if l.startswith("routing: ERROR")]
+    assert errors == [
+        f"routing: ERROR {u}: its spots stay on this station: no "
+        "wspr-recorder is enabled to carry them to wsprdaemon.org "
+        "(smd enable wspr-recorder)"
+        for u in ("psk-recorder@AC0G-S.service",
+                  "meteor-scatter@AC0G-S.service")]
+    assert not any("posts from this station" in l for l in res.lines())
+    assert not res.ok
 
 
 def test_unreadable_env_is_named_and_untouched(rig):
@@ -436,3 +487,154 @@ def test_unit_state_reads_systemctl_show():
             cmd, 0, "ActiveState=active\nActiveEnterTimestamp=@1790000000\n", "")
     assert R.unit_state(PSK, systemctl=systemctl) == ("active", 1790000000.0)
     assert seen[0][:2] == ["systemctl", "show"] and "--timestamp=unix" in seen[0]
+
+
+# ---------------------------------------------------------------------------
+# Final fix F2: psk on server-merge beside a meteor instance off deposit
+# ---------------------------------------------------------------------------
+
+MS = "meteor-scatter@AC0G-S.service"
+
+
+def _f2_line(unit, rx):
+    return (f"routing: ERROR meteor-scatter {unit} still flags its rows "
+            "unforwarded; hs-uploader marks the whole receiver not-forwarded, "
+            f"so FT8/FT4 spots from {rx} stop reaching pskreporter — fix "
+            f"{unit} (smd admin uploader routing --apply)")
+
+
+def test_psk_routed_beside_an_overridden_meteor_is_an_error(rig):
+    rig.env("psk-recorder", "AC0G-S", PSK_DELIVERY_PIPELINES="server-merge")
+    rig.env("meteor-scatter", "AC0G-S", METEOR_SCATTER_DELIVERY_MODE="off")
+    rig.overrides[MS] = {"METEOR_SCATTER_DELIVERY_MODE": "off"}
+    res = rig.run(ALL, lowered=frozenset())
+    assert res.unforwarded == [(MS, "AC0G-S")]
+    assert _f2_line(MS, "AC0G-S") in res.lines()
+    assert not res.ok
+
+
+def test_psk_routed_beside_an_unreadable_meteor_is_an_error(rig):
+    rig.env("psk-recorder", "AC0G-S", PSK_DELIVERY_PIPELINES="direct")
+    rig.env("meteor-scatter", "AC0G-S", METEOR_SCATTER_DELIVERY_MODE="off")
+    rig.broken.add(MS)
+    res = rig.run(ALL, lowered=frozenset())
+    assert res.restarted == [PSK]
+    assert res.unforwarded == [(MS, "AC0G-S")]
+
+
+def test_psk_routed_beside_a_meteor_whose_restart_failed_is_an_error(rig):
+    rig.env("psk-recorder", "AC0G-S", PSK_DELIVERY_PIPELINES="server-merge")
+    rig.env("meteor-scatter", "AC0G-S", METEOR_SCATTER_DELIVERY_MODE="off")
+    rig.restart_error = sink_levers.RestartFailed([(MS, "exit 1")])
+    res = rig.run(ALL, lowered=frozenset())
+    assert res.unforwarded == [(MS, "AC0G-S")]
+    assert not res.ok
+
+
+def test_no_error_when_meteor_reaches_deposit_or_psk_is_not_routed(rig):
+    rig.env("psk-recorder", "AC0G-S", PSK_DELIVERY_PIPELINES="server-merge")
+    rig.env("meteor-scatter", "AC0G-S", METEOR_SCATTER_DELIVERY_MODE="off")
+    res = rig.run(ALL, lowered=frozenset())
+    assert res.unforwarded == [] and res.ok
+    # psk lowered and left on server-raw: no psk row asks for forwarding.
+    rig2 = Rig(rig.etc.parent / "two")
+    rig2.env("psk-recorder", "AC0G-S", PSK_DELIVERY_PIPELINES="server-raw")
+    rig2.env("meteor-scatter", "AC0G-S", METEOR_SCATTER_DELIVERY_MODE="off")
+    rig2.broken.add(MS)
+    res = rig2.run(ALL, lowered=frozenset({"psk-recorder"}))
+    assert res.unforwarded == []
+
+
+# ---------------------------------------------------------------------------
+# Final fix F3: a wspr-recorder still running the old shim
+# ---------------------------------------------------------------------------
+
+WSPR = "wspr-recorder@AC0G-S.service"
+
+
+def _shim(tmp_path, mtime=1000):
+    import os
+    p = tmp_path / "hs_uploader_shim.py"
+    p.write_text("# shim\n")
+    os.utime(p, (mtime, mtime))
+    return p
+
+
+def test_a_wspr_recorder_older_than_its_shim_is_restarted_once(rig, tmp_path):
+    shim = _shim(tmp_path)
+    rig.units["wspr-recorder"] = [WSPR]
+    rig.states[WSPR] = ("active", 900.0)
+    res = rig.run(ALL, lowered=frozenset(), heal=True, shim_py=shim,
+                  now=2000.0)
+    assert rig.restarts == [[WSPR]]
+    assert res.stale == [(WSPR, "it started before hs_uploader_shim.py "
+                                "last changed")]
+    assert ("routing: restarted (stale) wspr-recorder@AC0G-S.service: it "
+            "started before hs_uploader_shim.py last changed") in res.lines()
+    assert res.ok
+
+
+def test_a_wspr_recorder_newer_than_its_shim_is_left(rig, tmp_path):
+    shim = _shim(tmp_path)
+    rig.units["wspr-recorder"] = [WSPR]
+    for st in (("active", 1100.0), ("active", 1000.4), ("inactive", 900.0),
+               ("active", None)):
+        rig.states[WSPR] = st
+        res = rig.run(ALL, lowered=frozenset(), heal=True, shim_py=shim,
+                      now=2000.0)
+        assert rig.restarts == [] and res.stale == [], st
+
+
+def test_the_shim_restart_needs_the_carrier_a_reader_and_apply(rig, tmp_path):
+    shim = _shim(tmp_path)
+    rig.units["wspr-recorder"] = [WSPR]
+    rig.states[WSPR] = ("active", 900.0)
+    rig.run(["psk-recorder"], lowered=frozenset(), heal=True, shim_py=shim)
+    rig.run(ALL, lowered=frozenset(), shim_py=shim)
+    rig.run(ALL, lowered=frozenset(), heal=True, shim_py=shim, apply=False)
+    rig.run(ALL, lowered=None, heal=True, shim_py=shim)
+    assert rig.restarts == []
+
+
+def test_a_missing_shim_says_align_and_restarts_nothing(rig, tmp_path):
+    rig.units["wspr-recorder"] = [WSPR]
+    rig.states[WSPR] = ("active", 900.0)
+    missing = tmp_path / "nope" / "hs_uploader_shim.py"
+    res = rig.run(ALL, lowered=frozenset(), heal=True, shim_py=missing)
+    assert rig.restarts == []
+    notes = [l for l in res.lines() if "smd align --apply" in l]
+    assert len(notes) == 1 and str(missing) in notes[0]
+    assert res.ok
+
+
+def test_the_real_shim_path_is_the_editable_checkout():
+    assert R.WSPR_SHIM == Path(
+        "/opt/git/sigmond/wspr-recorder/wspr_recorder/hs_uploader_shim.py")
+
+
+# ---------------------------------------------------------------------------
+# Final fix F5: a file dated in the future restarts nothing
+# ---------------------------------------------------------------------------
+
+def test_an_env_file_in_the_future_is_named_not_restarted(rig):
+    p = _routed(rig, mtime=5000)
+    rig.states[PSK] = ("active", 900.0)
+    res = rig.run(ALL, lowered=frozenset(), heal=True, now=4000.0)
+    assert rig.restarts == [] and res.stale == []
+    assert (f"routing: {PSK}: {p} mtime in the future (host clock?) — not "
+            "restarted") in res.lines()
+    # Within five seconds of the clock counts as now.
+    res = rig.run(ALL, lowered=frozenset(), heal=True, now=4996.0)
+    assert rig.restarts == [[PSK]]
+
+
+def test_a_shim_in_the_future_is_named_once_not_restarted(rig, tmp_path):
+    shim = _shim(tmp_path, mtime=5000)
+    rig.units["wspr-recorder"] = [WSPR, "wspr-recorder@AC0G-T.service"]
+    rig.states[WSPR] = ("active", 900.0)
+    rig.states["wspr-recorder@AC0G-T.service"] = ("active", 900.0)
+    res = rig.run(ALL, lowered=frozenset(), heal=True, shim_py=shim,
+                  now=4000.0)
+    assert rig.restarts == []
+    assert [l for l in res.lines() if "future" in l] == [
+        f"routing: {shim} mtime in the future (host clock?) — not restarted"]

@@ -238,8 +238,19 @@ class RoutingLoweredTests(unittest.TestCase):
         self.assertIsNone(lowered)
         self.assertTrue(why)
 
+    def test_a_failed_probe_under_the_marker_decides_nothing(self):
+        # Final fix F6: [uploads] no longer rules once the marker stands.
+        for mode in ("upload", "hold"):
+            with self.subTest(mode=mode):
+                (lowered, why), rs = self.lowered(features=None, marker=True,
+                                                  mode=mode)
+                self.assertIsNone(lowered)
+                self.assertIn("features probe failed", why)
+                self.assertIn("/x/marker", why)
+                rs.assert_not_called()
+
     def test_without_the_gate_or_the_marker_the_uploads_mode_decides(self):
-        for features, marker in ((GATE, False), (NO_GATE, True), (None, True)):
+        for features, marker in ((GATE, False), (NO_GATE, True), (None, False)):
             with self.subTest(features=features, marker=marker):
                 (lowered, _), rs = self.lowered(features=features,
                                                 marker=marker, mode="upload")
@@ -302,6 +313,7 @@ class MigrateWiringTests(unittest.TestCase):
         self.assertEqual(got["unit_state"]("psk-recorder@X.service"),
                          ("failed", None))
         self.assertEqual(seen[0][:2], ["systemctl", "show"])
+        self.assertEqual(got["shim_py"], ur.WSPR_SHIM)      # final fix F3
 
 
 class RoutingVerbTests(unittest.TestCase):

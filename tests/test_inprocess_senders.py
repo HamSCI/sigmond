@@ -22,6 +22,7 @@ from test_uploader_manifest_split import (SHARED_BLOCK, _Topo, _coord,
 
 PSK = ("psk-recorder", "pskreporter")
 MS = ("meteor-scatter", "pskreporter")
+DIRECT = {"METEOR_SCATTER_DELIVERY_MODE": "direct"}
 
 
 def _fake_show(envs):
@@ -41,7 +42,7 @@ class Senders(unittest.TestCase):
     def setUp(self):
         self.addCleanup(mock.patch.stopall)
         # meteor-scatter's config dir: a legacy shared config that names a
-        # callsign and a grid, so an unset mode reads as a sender.
+        # callsign and a grid, so a direct mode reads as a sender.
         self.cfg = Path(tempfile.mkdtemp())
         (self.cfg / "meteor-scatter-config.toml").write_text(_STATION)
         mock.patch.object(ips, "MS_CONFIG_DIR", self.cfg).start()
@@ -54,7 +55,7 @@ class Senders(unittest.TestCase):
     def run_(self, psk_env=None, ms_env=None, clients=("psk-recorder",
                                                        "meteor-scatter")):
         envs = {"psk-recorder@a.service": {} if psk_env is None else psk_env,
-                "meteor-scatter@a.service": {} if ms_env is None else ms_env}
+                "meteor-scatter@a.service": DIRECT if ms_env is None else ms_env}
         return ips.inprocess_senders(_Topo(list(clients)), show=_fake_show(envs))
 
     # psk-recorder
@@ -92,15 +93,18 @@ class Senders(unittest.TestCase):
     def test_ms_direct(self):
         self.assertIn(MS, self.run_(None, {"METEOR_SCATTER_DELIVERY_MODE": "direct"}))
 
-    def test_ms_unset_is_direct(self):
-        self.assertEqual(self.run_({}, {}), {MS})
+    def test_ms_unset_is_deposit_and_reads_no_config(self):
+        # meteor-scatter 907c7b2: an unset mode reads as deposit.
+        (self.cfg / "meteor-scatter-config.toml").unlink()
+        self.assertEqual(self.run_({}, {}), set())
+        self.assertEqual(ips._ms_delivery_mode({}), "deposit")
 
     def test_ms_off_values_none(self):
         for v in ("off", "none", "disabled", "deposit", " OFF "):
             self.assertNotIn(MS, self.run_(None, {"METEOR_SCATTER_DELIVERY_MODE": v}), v)
 
-    def test_ms_empty_value_reads_as_direct(self):
-        self.assertIn(MS, self.run_(None, {"METEOR_SCATTER_DELIVERY_MODE": ""}))
+    def test_ms_empty_value_reads_as_deposit(self):
+        self.assertNotIn(MS, self.run_(None, {"METEOR_SCATTER_DELIVERY_MODE": ""}))
 
     # meteor-scatter starts no sender without a callsign and a grid (M1)
     def test_ms_direct_without_callsign_or_grid_sends_nothing(self):
@@ -109,20 +113,21 @@ class Senders(unittest.TestCase):
                      '[station]\ncallsign = ""\ngrid_square = "EM38"\n',
                      '[paths]\n'):
             (self.cfg / "meteor-scatter-config.toml").write_text(body)
-            self.assertNotIn(MS, self.run_(None, {}), body)
+            self.assertNotIn(MS, self.run_(None, DIRECT), body)
 
     def test_ms_per_instance_config_wins_over_the_shared_one(self):
         (self.cfg / "a.toml").write_text('[station]\ncallsign = "AC0G"\n')
-        self.assertNotIn(MS, self.run_(None, {}))
+        self.assertNotIn(MS, self.run_(None, DIRECT))
         (self.cfg / "a.toml").write_text(_STATION)
         (self.cfg / "meteor-scatter-config.toml").write_text("[paths]\n")
-        self.assertIn(MS, self.run_(None, {}))
+        self.assertIn(MS, self.run_(None, DIRECT))
 
     def test_ms_config_env_wins_over_both(self):
         other = self.cfg / "elsewhere.toml"
         other.write_text("[paths]\n")
         (self.cfg / "a.toml").write_text(_STATION)
-        self.assertNotIn(MS, self.run_(None, {"METEOR_SCATTER_CONFIG": str(other)}))
+        self.assertNotIn(MS, self.run_(None, {**DIRECT,
+                                             "METEOR_SCATTER_CONFIG": str(other)}))
 
     def test_ms_escaped_instance_reads_its_key_named_config(self):
         # A pre-key unit (AC0G\\x3dB4) and a key unit both read AC0G-B4.toml.
@@ -131,7 +136,7 @@ class Senders(unittest.TestCase):
         (self.cfg / "AC0G-B4.toml").write_text(_STATION)
         got = ips.inprocess_senders(
             _Topo(["meteor-scatter"]),
-            show=_fake_show({"meteor-scatter@AC0G\\x3dB4.service": {}}))
+            show=_fake_show({"meteor-scatter@AC0G\\x3dB4.service": DIRECT}))
         self.assertEqual(got, {MS})
 
     def test_ms_unreadable_config_cannot_tell_so_no_pair(self):
@@ -144,7 +149,7 @@ class Senders(unittest.TestCase):
             ctx = (mock.patch.object(Path, "read_bytes", side_effect=PermissionError)
                    if setup == "denied" else contextlib.nullcontext())
             with ctx, self.assertLogs("sigmond.inprocess_senders", "WARNING"):
-                self.assertNotIn(MS, self.run_(None, {}), setup)
+                self.assertNotIn(MS, self.run_(None, DIRECT), setup)
 
     def test_ms_off_reads_no_config(self):
         (self.cfg / "meteor-scatter-config.toml").unlink()
@@ -154,7 +159,7 @@ class Senders(unittest.TestCase):
     # unreadable
     def test_unreadable_environment_gives_no_pair_for_that_client(self):
         envs = {"psk-recorder@a.service": OSError("denied"),
-                "meteor-scatter@a.service": {}}
+                "meteor-scatter@a.service": DIRECT}
         got = ips.inprocess_senders(_Topo(["psk-recorder", "meteor-scatter"]),
                                     show=_fake_show(envs))
         self.assertEqual(got, {MS})
@@ -162,7 +167,7 @@ class Senders(unittest.TestCase):
     def test_one_unreadable_instance_voids_the_client(self):
         self.units["meteor-scatter"] = ["meteor-scatter@a.service",
                                         "meteor-scatter@b.service"]
-        envs = {"meteor-scatter@a.service": {},
+        envs = {"meteor-scatter@a.service": DIRECT,
                 "meteor-scatter@b.service": OSError("x")}
         self.assertEqual(ips.inprocess_senders(
             _Topo(["meteor-scatter"]), show=_fake_show(envs)), set())

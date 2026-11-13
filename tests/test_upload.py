@@ -146,16 +146,6 @@ class TestUploadEnable(unittest.TestCase):
                             base=str(self.base), hold_level="upload")
         self.assertIn("PSK_DELIVERY_PIPELINES=server-merge", p.read_text())
 
-    def test_sink_level_reads_the_clients_effective_state(self):
-        from types import SimpleNamespace as NS
-        st = NS(clients={"psk-recorder": NS(effective="fill")})
-        self.assertEqual(upload.sink_level("psk-recorder", lambda: st), "fill")
-        self.assertIsNone(upload.sink_level("psk-recorder", lambda: None))
-        self.assertIsNone(upload.sink_level("meteor-scatter", lambda: st))
-        def boom():
-            raise OSError("x")
-        self.assertIsNone(upload.sink_level("psk-recorder", boom))
-
     def test_every_direct_via_is_refused_and_writes_nothing(self):
         for client, vias in upload.REFUSED_VIA.items():
             for via in vias:
@@ -270,6 +260,92 @@ class TestConfigUploadCommand(unittest.TestCase):
             rc = C.cmd_config_upload(self._args(**kw))
         return rc, out.getvalue(), errb.getvalue()
 
+    def _lowered(self, value):
+        from unittest import mock
+        return mock.patch("sigmond.commands.config._upload_on_lowered",
+                          return_value=value)
+
+    # Final fix F7: --on decides "below upload" the way routing does.
+    def _on_with(self, *, features, marker, mode, state=None, body=None):
+        """--on for psk-recorder AC0G/S through the real routing_lowered;
+        returns (rc, out+err, env text or None)."""
+        import types
+        from unittest import mock
+        from sigmond import sink_state as ss
+        from sigmond import uploader_manifest as um
+        from sigmond.commands import uploader as up_cmd
+        base = Path(tempfile.mkdtemp())
+        f = base / "psk-recorder/env/AC0G-S.env"
+        if body is not None:
+            f.parent.mkdir(parents=True)
+            f.write_text(body)
+        topo = mock.Mock()
+        topo.enabled_components.return_value = ["wspr-recorder", "psk-recorder"]
+        roots = types.SimpleNamespace(
+            python=Path("/x/python"), manifest=Path("/x/p.toml"),
+            sinks=Path("/x/sinks"), marker=Path("/x/marker"), store=None)
+        coord = types.SimpleNamespace(uploads=types.SimpleNamespace(mode=mode))
+        real = upload.apply_enable
+        with mock.patch("sigmond.topology.load_topology", return_value=topo), \
+             mock.patch.object(up_cmd, "_step_roots", return_value=roots), \
+             mock.patch("sigmond.commands.config.load_coordination",
+                        return_value=coord), \
+             mock.patch.object(um, "hs_uploader_features", return_value=features), \
+             mock.patch.object(ss, "marker_stands", return_value=marker), \
+             mock.patch.object(ss, "read_state", return_value=state), \
+             mock.patch.object(upload, "apply_enable",
+                               lambda c, i, on, delivery=None, hold_level=None:
+                               real(c, i, on, base=str(base), delivery=delivery,
+                                    hold_level=hold_level)):
+            rc, o, e = self._run(client="psk-recorder", instance="AC0G/S", on=True)
+        return rc, o + e, (f.read_text() if f.exists() else None)
+
+    def test_on_with_an_unreadable_sink_writes_nothing_and_says_why(self):
+        from sigmond import uploader_manifest as um
+        for features, state in (({um.GATE_FEATURE}, None), (None, None)):
+            with self.subTest(features=features):
+                rc, text, body = self._on_with(features=features, marker=True,
+                                               mode="upload", state=state,
+                                               body="PSK_DELIVERY_PIPELINES=server-raw\n")
+                self.assertEqual(rc, 1)
+                self.assertEqual(body, "PSK_DELIVERY_PIPELINES=server-raw\n")
+                self.assertIn("cannot tell whether psk-recorder's sink reads "
+                              "below upload", text)
+                self.assertIn("nothing written", text)
+
+    def test_on_with_no_switch_file_under_a_lowered_site_keeps_the_lever(self):
+        from sigmond import uploader_manifest as um
+        from sigmond.sink_state import ClientState, SinkState, SiteState
+        st = SinkState(enforced=True,
+                       site=SiteState(state="fill", error="", set_at="",
+                                      set_by="", reason=""),
+                       clients={"wspr-recorder": ClientState(
+                           file_state="fill", effective="fill", held_by="site",
+                           error="")})
+        rc, text, body = self._on_with(features={um.GATE_FEATURE}, marker=True,
+                                       mode="upload", state=st,
+                                       body="PSK_DELIVERY_PIPELINES=server-raw\n")
+        self.assertEqual(rc, 0)
+        self.assertIn("PSK_DELIVERY_PIPELINES=server-raw", body)
+        self.assertIn("PSK_USE_HS_UPLOADER=1", body)
+        self.assertIn("while its sink reads below upload", text)
+
+    def test_on_without_a_marker_under_hold_or_discard_keeps_the_lever(self):
+        for mode in ("hold", "discard"):
+            with self.subTest(mode=mode):
+                rc, text, body = self._on_with(
+                    features=None, marker=False, mode=mode,
+                    body="PSK_DELIVERY_PIPELINES=server-raw\n")
+                self.assertEqual(rc, 0)
+                self.assertIn("PSK_DELIVERY_PIPELINES=server-raw", body)
+
+    def test_on_without_a_marker_under_upload_routes(self):
+        rc, text, body = self._on_with(
+            features=None, marker=False, mode="upload",
+            body="PSK_DELIVERY_PIPELINES=server-raw\n")
+        self.assertEqual(rc, 0)
+        self.assertIn("PSK_DELIVERY_PIPELINES=server-merge", body)
+
     def test_a_refused_via_returns_1_and_names_the_standard(self):
         rc, o, e = self._run(client="psk-recorder", instance="AC0G/S",
                              on=True, via="direct")
@@ -285,7 +361,7 @@ class TestConfigUploadCommand(unittest.TestCase):
         topo.enabled_components.return_value = ["psk-recorder"]
         real = upload.apply_enable
         with mock.patch("sigmond.topology.load_topology", return_value=topo), \
-             mock.patch("sigmond.sink_state.read_state", return_value=None), \
+             self._lowered((frozenset(), "")), \
              mock.patch.object(upload, "apply_enable",
                                lambda c, i, on, delivery=None, hold_level=None:
                                real(c, i, on, base=str(base), delivery=delivery)):
@@ -305,10 +381,9 @@ class TestConfigUploadCommand(unittest.TestCase):
         f.write_text("PSK_DELIVERY_PIPELINES=server-raw\n")
         topo = mock.Mock()
         topo.enabled_components.return_value = ["wspr-recorder", "psk-recorder"]
-        st = NS(clients={"psk-recorder": NS(effective="fill")})
         real = upload.apply_enable
         with mock.patch("sigmond.topology.load_topology", return_value=topo), \
-             mock.patch("sigmond.sink_state.read_state", return_value=st), \
+             self._lowered((frozenset({"psk-recorder"}), "")), \
              mock.patch.object(upload, "apply_enable",
                                lambda c, i, on, delivery=None, hold_level=None:
                                real(c, i, on, base=str(base), delivery=delivery,
@@ -318,8 +393,8 @@ class TestConfigUploadCommand(unittest.TestCase):
         body = f.read_text()
         self.assertIn("PSK_DELIVERY_PIPELINES=server-raw", body)
         self.assertIn("PSK_USE_HS_UPLOADER=1", body)
-        self.assertIn("psk-recorder: delivery stays server-raw while the sink "
-                      "reads fill; `smd sink upload` moves it to the "
+        self.assertIn("psk-recorder: delivery stays server-raw while its sink "
+                      "reads below upload; `smd sink upload` moves it to the "
                       "wsprdaemon.org route", o + e)
 
     def test_a_topology_failure_warns_and_keeps_rc_0(self):
@@ -328,7 +403,7 @@ class TestConfigUploadCommand(unittest.TestCase):
         real = upload.apply_enable
         with mock.patch("sigmond.topology.load_topology",
                         side_effect=OSError("boom")), \
-             mock.patch("sigmond.sink_state.read_state", return_value=None), \
+             self._lowered((frozenset(), "")), \
              mock.patch.object(upload, "apply_enable",
                                lambda c, i, on, delivery=None, hold_level=None:
                                real(c, i, on, base=str(base), delivery=delivery)):
@@ -336,7 +411,7 @@ class TestConfigUploadCommand(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("cannot read the topology", o + e)
 
-    def test_status_view_names_the_meteor_unset_default_as_direct(self):
+    def test_status_view_names_the_meteor_unset_default_as_deposit(self):
         from unittest import mock
         base = Path(tempfile.mkdtemp())
         f = base / "meteor-scatter/env/KFS-NW.env"
@@ -348,7 +423,7 @@ class TestConfigUploadCommand(unittest.TestCase):
                         else real_path(*a)):
             rc, o, e = self._run(client="meteor-scatter")
         self.assertEqual(rc, 0)
-        self.assertIn("unset (reads direct: posts from this station)", o)
+        self.assertIn("unset (reads deposit: wsprdaemon.org forwards it)", o)
 
 
 # ---- set_env_flag on the safe writer (plan Ruling 17, spec section 8.2) ----
