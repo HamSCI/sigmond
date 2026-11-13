@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond eeaed74+drift on 2026-11-10 — code (lib/sigmond/commands/check.py, lib/sigmond/topology_drift.py)
+> **Verified against:** sigmond 5554c6e on 2026-11-13 — whole page re-read; every message, threshold and check id checked against lib/sigmond/commands/check.py. Earlier: sigmond eeaed74+drift on 2026-11-10 — code (lib/sigmond/commands/check.py, lib/sigmond/topology_drift.py)
 > **Canonical for:** what the topology check in `smd check` means
 
 Check id: `platform.topology`

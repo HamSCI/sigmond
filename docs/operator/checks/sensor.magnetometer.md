@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 783f674 on 2026-10-27 — code (lib/sigmond/commands/check.py)
+> **Verified against:** sigmond 5554c6e on 2026-11-13 — whole page re-read; every message, threshold and check id checked against lib/sigmond/commands/check.py. Earlier: sigmond 783f674 on 2026-10-27 — code (lib/sigmond/commands/check.py)
 > **Canonical for:** what the magnetometer check in `smd check` means
 
 Check id: `sensor.magnetometer`

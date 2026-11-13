@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 913bfed on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 6406025 on 2026-10-10: remote-access words and the addresses the host relays checked against commands/remote.py, the wizard's switch and the appliance console panel; held packages against sink_doors.py
+> **Verified against:** sigmond 5554c6e on 2026-11-13 — whole page re-read; `smd psws` and `smd config psws` against `--help` and psws.py, timers against the unit files, uploader unit names against bin/smd; sample outputs dated 2026-08 not re-run. Earlier: sigmond 913bfed on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 6406025 on 2026-10-10: remote-access words and the addresses the host relays checked against commands/remote.py, the wizard's switch and the appliance console panel; held packages against sink_doors.py
 > **Canonical for:** getting a station's uploads accepted (PSWS, wsprnet, pskreporter, wsprdaemon; airframes.io, optional)
 
 Your station starts hearing signals the moment the install finishes. This page
@@ -162,9 +162,11 @@ If instead `smd sink status` says `site sink: upload` and you still get this lin
 finding — send it to your fleet admin.
 
 The four unit names in the message are internal plumbing and appear nowhere else
-in these pages: `wspr-uploader.service` is a retired name still checked for,
-`wd-upload-hs@*` is the shipping service, and the two `@*` recorder patterns are
-the per-reporter recorder instances. That an operator-facing message names units
+in these pages: `wspr-uploader.service` is the standalone WSPR uploader that a
+station with several receivers runs, `wd-upload-hs@*` is a legacy
+wsprdaemon-client unit that the check still looks for, and the two `@*`
+recorder patterns are the per-reporter recorder instances, which ship their
+spots from inside the recorder. That an operator-facing message names units
 no operator page explains is
 [docs-gap ledger row 27](../contributor/docs-gap-ledger.md).
 
@@ -332,7 +334,7 @@ banner never ask.
 > suffix — `/etc/hs-uploader/keys/id_ed25519` — is the *legacy shared*
 > key from an older scheme, and sigmond's own checks accept either
 > (`lib/sigmond/upload_creds.py` says so in as many words). But **mag-recorder
-> still defaults to the legacy name** (`mag_recorder/config.py:169`), so on a
+> still defaults to the legacy name** (`mag_recorder/config.py:191`), so on a
 > station that has only the new key it prints
 > `⚠ uploader.ssh_key_file does not exist: /etc/hs-uploader/keys/id_ed25519` in
 > `smd status` — true about that filename, misleading about your enrolment.
@@ -573,7 +575,7 @@ yourself; the full diagnosis for each lives in
 
 | Symptom | First move | Then see |
 |---|---|---|
-| **No spots on wsprnet** after 30 minutes | `smd watch uploads` — three answers to tell apart. If it **returns at once** with `✗ uploads-watch: no active uploader on this host`, this station's recorders are switched off and zero spots is expected ([above](#when-it-says-no-active-uploader)). If it sits there printing **nothing at all**, the problem is decoding, not registration. If it prints `wsprnet=posted:0`, check that you are searching the right identity with `smd admin instance list` (its REPORTER ID column, e.g. `AC0G/B4`) or in `/etc/sigmond/site-profile.toml` under `[reporters] reporter_id` | [troubleshooting.md → *No spots on wsprnet*](troubleshooting.md#no-spots-on-wsprnet) |
+| **No spots on wsprnet** after 30 minutes | `smd watch uploads` — three answers to tell apart. If it **returns at once** with `✗ uploads-watch: no active uploader on this host`, this station's recorders are switched off and zero spots is expected ([above](#when-it-says-no-active-uploader)). If it sits there printing **nothing at all**, the problem is decoding, not registration. If it prints `wsprnet=0`, check that you are searching the right identity with `smd admin instance list` (its REPORTER ID column, e.g. `AC0G/B4`) or in `/etc/sigmond/site-profile.toml` under `[reporters] reporter_id` | [troubleshooting.md → *No spots on wsprnet*](troubleshooting.md#no-spots-on-wsprnet) |
 | **Nothing on pskreporter** | Search your callsign **as receiver**, not sender (§3) — that is the answer more often than not | [troubleshooting.md → *Nothing on pskreporter*](troubleshooting.md#nothing-on-pskreporter) |
 | **Uploads pending, and the number keeps growing** | `smd sink status` first (§6); the site sink switch may hold uploads back | [troubleshooting.md → *Uploads pending and growing*](troubleshooting.md#uploads-pending-and-growing) |
 | **PSWS not verified** | `smd psws verify` and read which of the two failures it reports (§5c) | [troubleshooting.md → *PSWS not verified*](troubleshooting.md#psws-not-verified) |

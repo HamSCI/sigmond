@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 783f674 on 2026-10-27 — code (lib/sigmond/commands/check.py)
+> **Verified against:** sigmond 5554c6e on 2026-11-13 — whole page re-read; marks, check ids, page names and the two generic FAIL texts checked against lib/sigmond/commands/check.py. Earlier: sigmond 783f674 on 2026-10-27 — code (lib/sigmond/commands/check.py)
 > **Canonical for:** the explanation pages behind the lines of `smd check`
 
 `smd check` prints one line per thing it looks at. Each line carries a mark:

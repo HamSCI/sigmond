@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** pointer
-> **Verified against:** sigmond 007bf72 on 2026-10-10 — remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; walk-through fixes (live dasi002 + b4) as of 4aec0c2
+> **Verified against:** sigmond 5554c6e on 2026-11-13 — whole page re-read; the relayed ports, the private VM address and the install steps checked against pm-align.py, the wizard and sigmond-appliance INSTALL.md. Earlier: sigmond 007bf72 on 2026-10-10 — remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; walk-through fixes (live dasi002 + b4) as of 4aec0c2
 > **See instead:** [sigmond-appliance/INSTALL.md](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md)
 
 The install walkthrough belongs to the repository that builds the USB image, so

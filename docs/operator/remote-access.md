@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond a8b5f31 + the multi-radiod web channels on 2026-11-08 — the channel table against `rac_write_config` (tests/test_wizard_rac_register.py renders the 2nd/3rd page channels; KFS-SE-NW and KFS-OMNI-SW carry vm-web2 by hand on gw2 pending the rollout). Earlier: sigmond d504c56 in sigmond-appliance v3.71 (d243d81, image sha256 3000f44c…) — the image rig's nested install, and a hardware install on AC0G-B4 on 2026-10-13 and 14: off from the station and through the tunnel, a power cycle while off, on from the console, an identity restore, and an eighteen-minute uplink outage (`tasks/plan-remote-access.md`, "v3.71 hardware proof").
+> **Verified against:** sigmond 5554c6e on 2026-11-13 — messages, ports and the switch checked against commands/remote.py, the wizard, pm-align.py and sigmond-appliance firstboot-v3.sh. Earlier: sigmond a8b5f31 + the multi-radiod web channels on 2026-11-08 — the channel table against `rac_write_config` (tests/test_wizard_rac_register.py renders the 2nd/3rd page channels; KFS-SE-NW and KFS-OMNI-SW carry vm-web2 by hand on gw2 pending the rollout). Earlier: sigmond d504c56 in sigmond-appliance v3.71 (d243d81, image sha256 3000f44c…) — the image rig's nested install, and a hardware install on AC0G-B4 on 2026-10-13 and 14: off from the station and through the tunnel, a power cycle while off, on from the console, an identity restore, and an eighteen-minute uplink outage (`tasks/plan-remote-access.md`, "v3.71 hardware proof").
 > **Canonical for:** remote access (RAC) — what it is, what it exposes, how the operator switches it, how the admin connects
 
 Every Sigmond station registers for remote access when it installs, and its

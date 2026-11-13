@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 913bfed on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 0340629 on 2026-10-10: remote-access words checked against commands/remote.py and the wizard's switch
+> **Verified against:** sigmond 5554c6e on 2026-11-13 — whole page re-read; terms, defaults, timers and sink wording checked against bin/smd, commands/sink.py, the catalog, systemd units and mag-recorder 418bd57. Earlier: sigmond 913bfed on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 0340629 on 2026-10-10: remote-access words checked against commands/remote.py and the wizard's switch
 > **Canonical for:** plain-English definitions of station vocabulary
 
 Alphabetical. If a word in any operator page is not obvious, it should be here;
@@ -87,7 +87,7 @@ is something you act on; it is here so you can read your own output.
 | **unit** | One thing systemd manages, named like `radiod@AC0G-B4.service` or `grape-daily.timer`. A `.service` is a program; a `.timer` is a schedule that starts one. The lines under each client in `smd status` are its units. |
 | **`active` / `inactive` / `failed`** | A unit's state. `active` = running. `inactive` = not running, and nobody asked it to be. `failed` = it tried to run and gave up — the only one of the three that is always worth reporting. |
 | **`enabled` / `disabled` / `linked` / `preset`** | Whether systemd starts a unit at boot. `enabled` yes, `disabled` no; `linked` means the unit file lives outside systemd's own directory and was linked in, which on this station still means "not enabled unless something enabled it". `preset: enabled` is just the packaged default. |
-| **`status=78` / `EX_CONFIG`** | A program exited with code 78, which by long Unix convention (`sysexits.h`) means *"my configuration is wrong or missing"* — not "the hardware broke". It is what `mag-recorder` exits with on a station that has no magnetometer configured. |
+| **`status=78` / `EX_CONFIG`** | A program exited with code 78, which by long Unix convention (`sysexits.h`) means *"my configuration is wrong or missing"* — not "the hardware broke". `mag-recorder` exits 78 only when its configuration cannot run at all. Builds before 2026-09-20 also exited 78 on a station with no magnetometer configured; newer builds record anyway and log a warning. |
 | **chrony** | The clock daemon that keeps the machine's system time disciplined. The timing client feeds it; you never configure it. |
 
 ### Words from `smd status`

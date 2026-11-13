@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 913bfed on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 16f47bc on 2026-10-11: the console panel's bring-up and guest-agent lines checked against sigmond-appliance 68e966a (`firstboot-v3.sh`) and `bin/sigmond-firstrun-bringup`; earlier checks, at 007bf72 on 2026-10-10: remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; sink words checked at 58fb909 against commands/sink.py and commands/config.py
+> **Verified against:** sigmond 5554c6e on 2026-11-13 — whole page re-read; verbs and flags against `smd <verb> --help`, the restart table against etc/catalog.toml, doctor findings against sdr_events.py, console-panel lines against sigmond-appliance, disk numbers against hf-timestd b7f5a56; sample outputs dated 2026-08 not re-run. Earlier: sigmond 913bfed on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 16f47bc on 2026-10-11: the console panel's bring-up and guest-agent lines checked against sigmond-appliance 68e966a (`firstboot-v3.sh`) and `bin/sigmond-firstrun-bringup`; earlier checks, at 007bf72 on 2026-10-10: remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; sink words checked at 58fb909 against commands/sink.py and commands/config.py
 > **Amended 2026-09-02** (not re-walked): the SDR sentinel was retired, so a
 > re-seated RX888 is now brought back with `smd status` + `smd adopt`, not by
 > waiting two minutes.
@@ -125,6 +125,8 @@ they cost nothing):
 | `wspr-recorder` | `["ka9q-python", "ka9q-radio"]` | ⛔ **Bounces the radio for the whole station** |
 | `psk-recorder` | `["ka9q-python", "ka9q-radio"]` | ⛔ **Bounces the radio** |
 | `meteor-scatter` | `["ka9q-python", "ka9q-radio"]` | ⛔ **Bounces the radio** |
+| `hfdl-recorder` | `["ka9q-python", "ka9q-radio", "hamsci-dsp"]` | ⛔ **Bounces the radio** |
+| `codar-sounder` | `["ka9q-python", "ka9q-radio"]` | ⛔ **Bounces the radio** |
 | `hf-timestd` | `["ka9q-python", "ka9q-radio"]` | ⛔ **Bounces the radio** *and* restarts the whole metrology stack |
 | `ka9q-web` | `["ka9q-radio"]` | ⛔ **Bounces the radio**, to restart a web page |
 | `ka9q-radio` | (it *is* the radio; `kind = "server"`, topology alias `radiod`) | ⛔ **Bounces the radio** |
@@ -191,8 +193,8 @@ It follows the uploader until you press Ctrl-C; it changes nothing. There are
 
 | What you see | What it means |
 |---|---|
-| One line per two-minute cycle, e.g. `cycle=21:48 shipped wsprdaemon=199 wsprnet=posted:75/added:74 ft8=312 ft4=0` | *Good.* The station is shipping. |
-| `wsprnet=posted:0` on those lines | The station is shipping but found zero WSPR spots — empty bands, or you are searching the wrong reporter ID. |
+| One line per two-minute cycle, e.g. `cycle=21:48 shipped wsprdaemon=199 wsprnet=posted:75/added:74 ft8=312 ft4=0 tar=12.3kB` | *Good.* The station is shipping. |
+| `wsprnet=0` on those lines | The station is shipping but found zero WSPR spots — empty bands, or you are searching the wrong reporter ID. |
 | **Nothing printed at all** for more than five minutes | Nothing is reaching the uploader; the problem is upstream of uploading. |
 | It **returns immediately** with `✗ uploads-watch: no active uploader on this host (wspr-uploader.service, wspr-recorder@*, psk-recorder@*, wd-upload-hs@* all inactive).` | The spot recorders and uploaders are **not running on this station** — usually because they were deliberately switched off (no antenna, or a station still being built). This is DASI002's answer, and it is correct there. Nothing has failed and there is nothing to Ctrl-C. |
 
@@ -238,7 +240,7 @@ while the site switch reads `upload`.
 
 **What to do**
 
-- `wsprnet=posted:0` with cycles printing → your station is healthy and shipping;
+- `wsprnet=0` with cycles printing → your station is healthy and shipping;
   either the bands are empty or you are searching the wrong reporter ID. Search
   the one `smd admin instance list` printed.
 - Nothing printed at all → the problem is upstream of uploading. Go to
@@ -349,6 +351,8 @@ mechanism and the station usually repairs it without you.
 3. **`radiod` itself stopped** — then nothing works, not just spots.
 4. **The antenna or its coax.**
 5. **The site sink switch holds uploads back** — see [No spots on wsprnet](#no-spots-on-wsprnet).
+6. **A recorder runs, but topology leaves it off.** `smd doctor` then prints a
+   `client-outside-topology` warning. See the note under *What to do* below.
 
 **What to check**
 
@@ -408,6 +412,12 @@ will have manufactured this exact fault. `smd` does order the radio first, but
 it does not wait for it — that warning is `smd update`'s own words, printed live
 on b4 2026-08-23: *"radiod first, then the recorders once it is stable — a
 recorder started against a restarting radiod picks up a bad anchor."*
+
+**`smd doctor` says "client-outside-topology".** A recorder runs on this
+station, but the station's topology list leaves it off. Sigmond then builds no
+upload pipelines for it and holds its sink switch at `fill`, so it keeps its
+data and sends none. The warning prints the fix: run `smd enable <client>`, then
+`smd admin uploader manifest --write`.
 
 **When to stop and ask**
 
@@ -1293,7 +1303,7 @@ smd restart mag-recorder
 ```
 
 If it is one that pulls the radio in — `psk-recorder`, `wspr-recorder`,
-`meteor-scatter`, `hf-timestd`, `ka9q-web`, or `radiod` itself — then the radio
+`meteor-scatter`, `hfdl-recorder`, `codar-sounder`, `hf-timestd`, `ka9q-web`, or `radiod` itself — then the radio
 is bouncing whatever you type, so bounce it once and bring everything back
 together instead — `[VM]`:
 
@@ -1495,7 +1505,7 @@ touching one program and bouncing the whole station.
 |---|---|---|---|
 | **Replug a USB device** | The device is missing from `lsusb`, or a sensor has frozen at a constant value | Seconds of that one device's data | Unplug, wait, plug back in. The RX888 goes **straight into a blue USB-3 port, no hub**. Then restart the client that owns it (`smd restart mag-recorder`); for the RX888, `smd status` then `smd adopt <name>` — nothing starts on its own |
 | **Restart one *cheap* client** | `mag-recorder`, `gpsdo-monitor`, `igmp-querier` or `gmag-webui` is `failed` or stuck | A decode cycle or two of that one program — nothing else moves, **except `gmag-webui`, which drags `mag-recorder` with it** | `[VM]`: `smd restart <name>`. **Never `sudo smd`.** These four declare no radio dependency ([the table](#restarting-one-client-is-often-not-one-client)) |
-| **Restart anything else — which bounces the radio** | A spot recorder, `hf-timestd`, `ka9q-web` or the radio itself needs restarting | **The whole station**: every recorder loses its anchor, and the timing products need about ten minutes to re-settle | ⛔ Not narrow. `psk-recorder`, `wspr-recorder`, `meteor-scatter`, `hf-timestd` and `ka9q-web` all pull `ka9q-radio` in with them. Prefer `smd restart all` — one bounce, everything re-anchored together — over restarting one name and leaving the rest stale |
+| **Restart anything else — which bounces the radio** | A spot recorder, `hf-timestd`, `ka9q-web` or the radio itself needs restarting | **The whole station**: every recorder loses its anchor, and the timing products need about ten minutes to re-settle | ⛔ Not narrow. `psk-recorder`, `wspr-recorder`, `meteor-scatter`, `hfdl-recorder`, `codar-sounder`, `hf-timestd` and `ka9q-web` all pull `ka9q-radio` in with them. Prefer `smd restart all` — one bounce, everything re-anchored together — over restarting one name and leaving the rest stale |
 | **Reboot — or power off** | Nothing above worked, and your fleet admin agrees | About ten minutes of everything | ⛔ **These are not the same thing.** A reboot holds USB power, so a wedged RX888 stays wedged; only a full **power-off** resets it (source: `sigmond-wizard.sh`). If the radio is the problem, power off. Otherwise a reboot is enough |
 | **Reinstall** | Never on your own initiative | Everything, including your PSWS registration unless the keys were saved first | Only with your fleet admin. First run `smd psws save-keys` and put the file on the stick ([INSTALL.md §4](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#4-reflashing-or-replacing-a-station-keep-its-keys)) |
 

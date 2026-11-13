@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 913bfed on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 007bf72 on 2026-10-10: remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; held packages against sink_doors.py
+> **Verified against:** sigmond 5554c6e on 2026-11-13 — whole page re-read; verbs and flags against `smd <verb> --help`, archive section against commands/archive.py and hf-timestd b7f5a56 (archiver and prune timers), update section against bin/smd and update.py; sample outputs dated 2026-08 not re-run. Earlier: sigmond 913bfed on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 007bf72 on 2026-10-10: remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; held packages against sink_doors.py
 > **Canonical for:** day-2 operation — what healthy looks like, the weekly check, updates, power loss
 
 The station is meant to be boring. It runs itself, it restarts itself after a
@@ -201,7 +201,7 @@ line:
 | `✗ timestd-vtec.service: inactive` | **Normal without a dual-frequency GNSS receiver** | [vTEC](glossary.md) is the ionospheric total-electron-content product, and computing it needs an optional dual-frequency GNSS receiver (a u-blox ZED-F9P) that most stations do not have. `timestd-vtec.service` is enabled only where a GNSS receiver is configured, and left disabled elsewhere: on 2026-08-23 b4 read `UnitFileState=enabled  ActiveState=active` against its networked GNSS, while dasi002 read `UnitFileState=disabled  ActiveState=inactive`. Either way, **`inactive` on a station without a dual-frequency GNSS receiver is normal, not a fault** — you would only report it if you know your station has one. |
 | A client-summary line with **no glyph at all** — e.g. `mag-recorder  v0.1.0  (8551d27)  contract=0.8` where `hf-timestd` above it reads `✓  hf-timestd …` | **Not an error — it means "this client reported something", and the something is printed underneath** | The ✓ on those summary lines means *validated clean*: `bin/smd` sets it only when the client returned an empty issue list (`clean_tag = '✓ ' if not issues else ''`), specifically so an operator can tell "checked, clean" from "not checked". No glyph therefore means the client returned one or more issues — and every one of them is printed immediately below that line as its own ⚠ or ✗. So read the lines under a glyph-less client, not the missing glyph itself. |
 | `⚠ station.callsign is unset` on a station whose `site-profile.toml` **does** have a callsign | **Normal — different file** | Same origin as the row above: it is one of **mag-recorder's** config issues (`mag_recorder/contract.py`, `_collect_issues()` — `[station] callsign` in `[VM]` `/etc/mag-recorder/mag-recorder-config.toml`), printed under mag-recorder's glyph-less summary line. It says nothing about your station identity. `/etc/sigmond/site-profile.toml` remains the one place your identity lives ([registration.md §1](registration.md#1-what-the-wizard-already-did)), and `smd admin instance list` is what proves what your recorders actually report under. That the two look like the same key is a genuine trap — tracked as [docs-gap ledger row 24](../contributor/docs-gap-ledger.md). |
-| `⚠ uploader.ssh_key_file does not exist: /etc/hs-uploader/keys/id_ed25519 (shared with hf-timestd Grape uploader; ssh-keygen + register key on PSWS portal first)` | **Normal on a station that has not enrolled in PSWS — but the path it names is the wrong one** | Another of mag-recorder's own checks (`mag_recorder/contract.py`, `_collect_issues()`), printed under its glyph-less summary line. Two things to know. (1) On a station with no PSWS enrolment there is no upload key yet, so a missing key is the expected state — the recorder still records locally, and files built while the site sink switch reads `upload` wait for the key, but files built while it reads `off` stay on the station and never ship. (2) **The file name is stale.** `id_ed25519` is the *legacy shared* hs-uploader key name; today's station key is `id_ed25519_host` in the same directory, which is what `smd psws enroll` creates and what the uploader actually uses ([registration.md §1](registration.md#1-what-the-wizard-already-did)). mag-recorder still defaults to the old name (`mag_recorder/config.py:169`), so it reports the old path missing even on an enrolled station. Live 2026-08-23: dasi002 has only `id_ed25519_host` and prints this ⚠; b4 has both files and does not. ⛔ **Do not run the `ssh-keygen` the message suggests** — key creation is `smd psws enroll`'s job ([registration.md §5b](registration.md#5b-register-the-key)). Tracked as [docs-gap ledger row 30](../contributor/docs-gap-ledger.md). |
+| `⚠ uploader.ssh_key_file does not exist: /etc/hs-uploader/keys/id_ed25519 (shared with hf-timestd Grape uploader; ssh-keygen + register key on PSWS portal first)` | **Normal on a station that has not enrolled in PSWS — but the path it names is the wrong one** | Another of mag-recorder's own checks (`mag_recorder/contract.py`, `_collect_issues()`), printed under its glyph-less summary line. Two things to know. (1) On a station with no PSWS enrolment there is no upload key yet, so a missing key is the expected state — the recorder still records locally, and files built while the site sink switch reads `upload` wait for the key, but files built while it reads `off` stay on the station and never ship. (2) **The file name is stale.** `id_ed25519` is the *legacy shared* hs-uploader key name; today's station key is `id_ed25519_host` in the same directory, which is what `smd psws enroll` creates and what the uploader actually uses ([registration.md §1](registration.md#1-what-the-wizard-already-did)). mag-recorder still defaults to the old name (`mag_recorder/config.py:191`), so it reports the old path missing even on an enrolled station. Live 2026-08-23: dasi002 has only `id_ed25519_host` and prints this ⚠; b4 has both files and does not. ⛔ **Do not run the `ssh-keygen` the message suggests** — key creation is `smd psws enroll`'s job ([registration.md §5b](registration.md#5b-register-the-key)). Tracked as [docs-gap ledger row 30](../contributor/docs-gap-ledger.md). |
 | `sudo: a password is required` (twice, before the banner) | **Normal — ignore** | A read-only command reaching for `sudo` it does not have and carrying on regardless. It is noise on stderr, not a failure, and it appears on b4 but not dasi002. Known and tracked — [docs-gap ledger row 6](../contributor/docs-gap-ledger.md). |
 | `✗ radiod@AC0G-B4-patched.service: inactive` | **Normal** | A *second, deliberately disabled* `radiod` unit. B4 keeps two `radiod` configs in `/etc/radio/` — the live one and a spare "patched" variant. `systemctl is-enabled` reads `enabled` for `radiod@AC0G-B4` and `disabled` for `-patched` (checked live, 2026-08-23). Only one radiod can own the RX888, so the other one being down is the correct state. Most stations have only one and never see this line. |
 | `✓ meteor-scatter@my-rx888.service: active [orphaned]` | **Normal-ish — mention it** | `[orphaned]` means a unit is running that the current config no longer declares. Harmless, but worth naming to your fleet admin so it gets tidied. |
@@ -479,7 +479,7 @@ number has been corrected yet.
 The raw IQ holds everything the station heard, at full 24 kHz bandwidth. When a
 solar flare, an eruption or a travelling disturbance comes along, that record
 lets you go back and look. The station keeps it only briefly, though. A daily
-timer (`timestd-prune.timer`, about 03:25 UTC) runs
+timer (`timestd-prune.timer`, 03:00 UTC plus a random delay of up to 30 minutes) runs
 `hf-timestd/scripts/prune-old-data.sh`, and in practice B4 and ND each held only
 yesterday and today (measured 2026-10-31). The 10-08 and 10-10 M6 flares showed
 up plainly in every product, but by the time anyone looked, their IQ had gone.
@@ -514,25 +514,31 @@ VM (both USB controllers pass through, so the drive shows up there):
 
 ```
 smd archive add            # waits for you to plug the drive in, then asks
-smd archive status         # the drive, how full, how many days fit
+smd archive status         # the drive, its health, days held, days that fit
 smd archive remove         # unmount it before you unplug it
 ```
 
 `add` lists the disks, waits while you plug the drive in, and finds the new
 one.  It refuses a drive on the RX-888's hub, because the RX-888's recovery
 resets that hub's ports, and it warns when the drive shares the RX-888's USB
-controller.  Then it asks you to type the drive's name, formats it ext4 with
-the label `SIGMOND-ARCHIVE` (this **erases the drive**), and mounts it at
-`/var/lib/sigmond/archive`.  The fstab line carries `nofail`, so a station
-with its drive unplugged still boots as fast as one without.
-`/etc/sigmond/archive.toml` records which drive it is.  From a script, name the
-drive and the answer: `smd archive add --device sdb --confirm sdb`.
-`--dry-run` shows what `add` would run and changes nothing.
+controller.  It then reads the drive's health and runs a short self-test of
+about two minutes (`--no-self-test` skips the test).  It refuses a drive whose
+health check failed unless you pass `--accept-unhealthy <name>`.  Then it asks
+you to type the drive's name, formats it ext4 with the label `SIGMOND-ARCHIVE`
+(this **erases the drive**), and mounts it at `/var/lib/sigmond/archive`.  The
+fstab line carries `nofail`, so a station with its drive unplugged still boots
+as fast as one without.  `/etc/sigmond/archive.toml` records which drive it is.
+From a script, name the drive and the answer: `smd archive add --device sdb
+--confirm sdb`.  `--dry-run` shows what `add` would run and changes nothing.
 
-⚠ The archiver that copies the raw buffer onto the drive has not shipped yet
-(hf-timestd, `tasks/plan-external-storage.md` phase 2).  Until it does, the
-drive stands ready and empty, and the raw buffer stays where it is.  Do not
-move or link `/var/lib/timestd/raw_buffer/` yourself
+Once the drive stands mounted, the archiver (`timestd-archive.timer`, every
+ten minutes, at idle priority) copies each closed raw IQ file onto it in half
+precision, checks the copy, and deletes the oldest whole day when the drive
+passes its high-water mark (90 % full unless `archive.toml` says otherwise).
+The recorder never waits for the drive.  `smd archive status` shows the days
+held per channel and when the archiver last ran.  `smd archive eject` unmounts
+the drive for a safe unplug; it mounts again by itself when you plug it back
+in.  Do not move or link `/var/lib/timestd/raw_buffer/` yourself
 (→ [do-not-touch.md](do-not-touch.md)).
 
 ### 4. `smd doctor` — only when something looks off
@@ -626,6 +632,20 @@ older sigmond builds could land in that state without being asked. So if your
 fleet admin says a release is out and `smd update` answers
 `host is current`, **tell them rather than assuming**. `smd version` prints the
 actual commit of every component, and that is the number that settles it.
+
+**Held components.** A station fresh from an image holds each component at
+its blessed pin, the exact combination the nested test has seen. `smd update`
+then names the held components and moves none of them. A line such as
+`nothing to do — 2 component(s) HELD (…); the rest of the host is current`
+does not mean everything runs the newest code. Your fleet admin releases a hold
+with `smd update --unpin`, so leave that flag alone too.
+
+**A component the station lacks.** `smd align` does not install a component
+this station has never had, unless topology enables it. The dry run lists such a
+component as "would skip: not on this station (use --install-missing)". Add
+`--install-missing` only when you want the extra component. `sigmond-rac` never
+installs this way; enable it in topology instead. `smd update` does not install
+new components at all.
 
 To actually perform it: `smd update --apply`. **Do this only when your fleet
 admin tells you the release is blessed.** Leave `smd update --latest` alone
