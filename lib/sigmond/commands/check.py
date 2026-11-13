@@ -56,6 +56,7 @@ STAGES = ('platform', 'sensor', 'decode', 'sink', 'upload')
 CHECK_META = {
     'bring-up':          ('platform.bringup', 'platform', None),
     'storage':           ('platform.storage', 'platform', None),
+    'archive':           ('platform.archive', 'platform', None),
     'magnetometer':      ('sensor.magnetometer', 'sensor', 'mag-recorder'),
     'PSK':               ('decode.psk', 'decode', 'psk-recorder'),
     'WSPR':              ('decode.wspr', 'decode', 'wspr-recorder'),
@@ -923,6 +924,98 @@ def _disk(path: str) -> Tuple[int, int]:
 
 
 # ---------------------------------------------------------------------------
+# The archive drive (docs/superpowers/specs/2026-11-12-archive-drive-design.md)
+# ---------------------------------------------------------------------------
+# The design's WARN is this file's WAIT: the drive needs a look, exit 2.
+
+ARCHIVE_TOML = Path('/etc/sigmond/archive.toml')
+ARCHIVE_HEALTH = Path('/var/lib/sigmond/archive-health.json')
+ARCHIVER_STATUS = Path('/var/lib/timestd/archive-status.json')
+ARCHIVER_STALE_S = 2 * 3600
+
+
+def PRUNE_UNIT_FILES() -> List[Path]:
+    base = Path('/etc/systemd/system')
+    return [base / 'timestd-prune.service', *sorted(base.glob('timestd-prune.service.d/*.conf'))]
+
+
+def _archive_mount_state(uuid: str) -> str:
+    from .. import archive as ar
+    return ar.mount_state(uuid)
+
+
+def _json_file(p: Path) -> dict:
+    try:
+        doc = json.loads(p.read_text())
+        return doc if isinstance(doc, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def archive_line(env: Env) -> Optional[Line]:
+    """Reads files only (the config, sigmond's cached health reading, the
+    archiver's status): never the drive, so a check cannot wake it or block
+    on its automount."""
+    import tomllib
+    from .. import archive_health as H
+    label = 'archive'
+    try:
+        cfg = tomllib.loads(ARCHIVE_TOML.read_text())
+    except (OSError, ValueError):
+        return None
+    fail, warn = [], []
+    mount = str(cfg.get('mount', '/var/lib/sigmond/archive'))
+    state = _archive_mount_state(str(cfg.get('uuid', '')))
+    if state == 'present':
+        warn.append(f'the drive is plugged in but not mounted.  {RUN}sudo mount {mount}')
+    elif state == 'absent':
+        warn.append('the drive is not plugged in (archiving waits for it)')
+    health = _json_file(ARCHIVE_HEALTH)
+    if health.get('latest'):
+        latest = H.reading_from_dict(health['latest'])
+        v, reasons = H.verdict(latest)
+        if v == 'fail':
+            fail.extend(reasons)
+        grown = H.grown(H.reading_from_dict(health.get('baseline') or {}), latest)
+        warn.extend(f'{g} since it was added' for g in grown)
+        if latest.temperature_c is not None and latest.temperature_c > H.WARN_TEMP_C:
+            warn.append(f'temperature {latest.temperature_c} C')
+    st = _json_file(ARCHIVER_STATUS)
+    if state == 'mounted' and st:
+        try:
+            ran = datetime.strptime(st.get('run_utc', ''), '%Y-%m-%dT%H:%M:%SZ').replace(
+                tzinfo=timezone.utc)
+            if (datetime.now(timezone.utc) - ran).total_seconds() > ARCHIVER_STALE_S:
+                warn.append(f'the archiver last ran {st.get("run_utc")}')
+        except ValueError:
+            pass
+        if st.get('state') == 'full':
+            warn.append('the drive is full with nothing left it may delete')
+        elif st.get('state') == 'error':
+            warn.append(f'the archiver hit a drive error: {st.get("last_error")}')
+        if st.get('failures'):
+            warn.append(f'{st["failures"]} file(s) failed verification three times')
+    elif state == 'mounted' and not st:
+        warn.append('the archiver has not run yet (hf-timestd installs timestd-archive.timer)')
+    for f in PRUNE_UNIT_FILES():
+        try:
+            if '--archive-root' in f.read_text():
+                warn.append(f'{f} still moves raw days with --archive-root; '
+                            f'{RUN}smd storage tune-timestd --apply')
+                break
+        except OSError:
+            pass
+    text = lambda items: '; '.join(items).encode('ascii', 'replace').decode()
+    if fail:
+        return Line(FAIL, label, text(fail) + '.  Copy off what you need and replace the drive.')
+    if warn:
+        return Line(WAIT, label, text(warn))
+    held = st.get('channels') or {}
+    days = max((v.get('days', 0) for v in held.values()), default=0)
+    return Line(OK, label, f'drive mounted and healthy; {days} day(s) archived')
+
+
+# ---------------------------------------------------------------------------
 # Uploads
 # ---------------------------------------------------------------------------
 
@@ -1195,6 +1288,7 @@ CHECKS: List[Tuple[str, Callable[[Env], Optional[Line]]]] = [
     ('magnetometer', mag_line),
     ('GRAPE', grape_line),
     ('storage', storage_line),
+    ('archive', archive_line),
     ('topology', topology_line),
     ('uploads', uploads_line),
     ('meteor scatter', meteor_line),

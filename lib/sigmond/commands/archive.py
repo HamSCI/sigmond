@@ -638,30 +638,72 @@ def _config() -> Dict[str, object]:
         return {}
 
 
+ARCHIVER_STATUS = Path("/var/lib/timestd/archive-status.json")
+
+
+def _json(p: Path) -> dict:
+    try:
+        d = json.loads(p.read_text())
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
 def _status() -> int:
+    """Reads the config, the cached health and the archiver's status, and
+    mountinfo: never the mount point while the drive may be away."""
     cfg = _config()
     if not cfg:
         info("no archive drive (`smd archive add` attaches one)")
         return 0
-    _say(f"  drive    {cfg.get('model') or '?'}  serial {cfg.get('serial') or '?'}  "
-          f"UUID {cfg.get('uuid')}  added {cfg.get('added_utc')}")
-    mounted = {m: s for s, m in ar.mounted_sources().items()}
-    if str(ar.MOUNT) not in mounted:
-        warn(f"not mounted at {ar.MOUNT}: the drive is unplugged, or was removed "
-             "(`mount " + str(ar.MOUNT) + "` brings it back)")
-        return 0
-    st = shutil.disk_usage(ar.MOUNT)
-    channels = _channels_in_buffer()
-    ok(f"mounted at {ar.MOUNT} from {mounted[str(ar.MOUNT)]}: "
-       f"{ar.human_bytes(st.used)} used of {ar.human_bytes(st.total)}, "
-       f"{ar.human_bytes(st.free)} free (about {ar.days_fit(st.free, channels):.0f} days "
-       f"at {channels} channels)")
-    days = sorted({p.name for p in ar.MOUNT.glob('*/raw_buffer/*/[0-9]*')
-                   if p.is_dir() and p.name.isdigit()})
-    if days:
-        _say(f"  holds    {len(days)} day(s), {days[0]} to {days[-1]}")
-    else:
-        _say("  holds    nothing yet (the archiver comes with hf-timestd, phase 2)")
+    _say(f"  drive    {cfg.get('model') or '?'}  serial {cfg.get('serial') or '?'}"
+         f"  disk {cfg.get('disk_serial') or '?'}  UUID {cfg.get('uuid')}  added {cfg.get('added_utc')}")
+    state = ar.mount_state(str(cfg.get('uuid', '')))
+    health = _json(HEALTH)
+    if health.get('latest'):
+        latest = H.reading_from_dict(health['latest'])
+        base = H.reading_from_dict(health.get('baseline') or {})
+        v, reasons = H.verdict(latest)
+        when = health.get('latest_utc', '?')
+        line = f"  health   {v} ({when})" + (": " + "; ".join(reasons) if reasons else "")
+        (err if v == 'fail' else warn if v == 'warn' else _say)(line)
+        for g in H.grown(base, latest):
+            warn(f"  {g} since it was added ({health.get('baseline_utc', '?')})")
+        if latest.selftest_status == 'running':
+            _say(f"  self-test running, {latest.selftest_remaining_pct} % left")
+    if state == 'absent':
+        warn("the drive is not plugged in; archiving waits for it.  Plugged in, it mounts on its own")
+    elif state == 'present':
+        warn(f"the drive is plugged in but not mounted.  run: sudo mount {ar.MOUNT}  "
+             "(if that fails, `sudo e2fsck -p` on its partition first)")
+    st = _json(ARCHIVER_STATUS)
+    if state == 'mounted':
+        du = shutil.disk_usage(ar.MOUNT)
+        ok(f"mounted at {ar.MOUNT}: {ar.human_bytes(du.used)} used of {ar.human_bytes(du.total)}, "
+           f"{ar.human_bytes(du.free)} free")
+        rate = st.get('bytes_per_day')
+        if rate:
+            _say(f"  room     about {du.free / rate:.0f} more days at the measured "
+                 f"{rate / 1e9:.1f} GB/day")
+        else:
+            channels = _channels_in_buffer()
+            _say(f"  room     about {ar.days_fit(du.free, channels):.0f} more days "
+                 f"(estimate: 15 GB per channel per day, {channels} channels, before F16)")
+    chans = st.get('channels') or {}
+    if chans:
+        _say("  held     (per channel)")
+        for name, v in sorted(chans.items()):
+            _say(f"    {name:<14} {v.get('days', 0):>4} days  {v.get('oldest')} to {v.get('newest')}"
+                 f"  {ar.human_bytes(int(v.get('bytes', 0)))}  {v.get('dtype', '')}")
+        _say("  F32 back: hf-timestd archive export-f32 --from "
+             f"{ar.MOUNT}/timestd/<station> --to DIR --channel CH --start UTC --end UTC")
+    elif state == 'mounted':
+        _say("  held     nothing yet")
+    if st:
+        _say(f"  archiver last run {st.get('run_utc')}: {st.get('state')}, copied {st.get('copied', 0)}"
+             f", {st.get('behind', 0)} behind, {st.get('kept_f32', 0)} kept F32"
+             + (f", {st['failures']} failed verification" if st.get('failures') else "")
+             + (f"; last error: {st['last_error']}" if st.get('last_error') else ""))
     return 0
 
 

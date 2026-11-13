@@ -372,3 +372,45 @@ def test_unit_name_escapes_like_systemd():
     from pathlib import Path
     assert cmd._unit_name(Path("/var/lib/sigmond/archive")) == "var-lib-sigmond-archive"
     assert cmd._unit_name(Path("/mnt/a-b")) == "mnt-a\\x2db"
+
+
+# ---- 2026-11-13: status from files and mountinfo; days held and days that fit
+
+@pytest.fixture
+def status_files(env, health, tmp_path, monkeypatch):
+    assert cmd.cmd_archive(_args()) == 0
+    import json
+    s = tmp_path / "archive-status.json"
+    s.write_text(json.dumps({
+        "run_utc": "2026-11-13T15:00:00Z", "state": "ok", "behind": 0, "failures": 0,
+        "copied": 12, "kept_f32": 0, "last_error": None, "bytes_per_day": 40e9,
+        "channels": {"WWV_10000": {"oldest": "20261101", "newest": "20261112", "days": 12,
+                                   "bytes": 80e9, "dtype": "complex-f16"},
+                     "WWV_5000": {"oldest": "20261105", "newest": "20261112", "days": 8,
+                                  "bytes": 50e9, "dtype": "complex-f16"}}}))
+    monkeypatch.setattr(cmd, "ARCHIVER_STATUS", s)
+    return s
+
+
+def test_status_never_stats_mount_when_away(env, status_files, monkeypatch, capsys):
+    monkeypatch.setattr(cmd.ar, "mount_state", lambda *a, **k: "absent")
+    monkeypatch.setattr(cmd.shutil, "disk_usage", lambda p: pytest.fail("touched the mount"))
+    assert cmd.cmd_archive(_args(archive_command="status")) == 0
+    assert "not plugged in" in capsys.readouterr().err
+
+
+def test_status_present_not_mounted_shows_fix(env, status_files, monkeypatch, capsys):
+    monkeypatch.setattr(cmd.ar, "mount_state", lambda *a, **k: "present")
+    monkeypatch.setattr(cmd.shutil, "disk_usage", lambda p: pytest.fail("touched the mount"))
+    assert cmd.cmd_archive(_args(archive_command="status")) == 0
+    assert f"sudo mount {ar.MOUNT}" in capsys.readouterr().err
+
+
+def test_status_days_held_per_channel_and_fit(env, status_files, monkeypatch, capsys):
+    monkeypatch.setattr(cmd.ar, "mount_state", lambda *a, **k: "mounted")
+    assert cmd.cmd_archive(_args(archive_command="status")) == 0
+    out = capsys.readouterr().err
+    assert "WWV_10000" in out and "12 days" in out and "20261101 to 20261112" in out
+    # free 2e12 - 1e9 at the measured 40 GB/day -> about 50 days (not the 15 GB/channel guess)
+    assert "about 50 more days at the measured 40.0 GB/day" in out
+    assert "export-f32" in out
