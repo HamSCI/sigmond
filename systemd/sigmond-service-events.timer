@@ -1,0 +1,10 @@
+# /etc/systemd/system/sigmond-service-events.timer
+[Unit]
+Description=Service restarts and memory kills, every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target

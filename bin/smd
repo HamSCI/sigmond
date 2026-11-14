@@ -31381,6 +31381,15 @@ def _build_parser() -> argparse.ArgumentParser:
              'not yet fetched will read as unresolvable and refuse)')
     p_m_restore.add_argument('--base', help='component checkout root (default /opt/git/sigmond)')
 
+    p_svc_events = admin_sub.add_parser(
+        'service-events',
+        help='restarts and memory (OOM) kills per service over 24 h (root; '
+             'sigmond-service-events.timer runs `collect` every 5 min)')
+    svc_events_sub = p_svc_events.add_subparsers(dest='svc_events_command')
+    svc_events_sub.add_parser('collect',
+        help='read the journal and write /run/sigmond/service-events.json')
+    svc_events_sub.add_parser('show', help='print the last collected document')
+
     p_heartbeat = admin_sub.add_parser(
         'heartbeat',
         help='fleet situational-awareness heartbeat — assemble + spool one '
@@ -32635,6 +32644,26 @@ def main() -> int:
         if m_cmd == 'status':
             return cmd_manifest_status(args)
         p_manifest.print_help()
+        return 0
+
+    if args.command == 'service-events':
+        sub = getattr(args, 'svc_events_command', None)
+        from sigmond import service_events as _se
+        if sub == 'collect':
+            if _need_root('admin service-events collect'):
+                return 1
+            doc = _se.collect(time.time())
+            _se.write_status(doc)
+            print(f"service events: {len(doc['units'])} unit(s), "
+                  f"{len(doc['global_oom'])} whole-machine OOM kill(s)"
+                  + (f"; error: {doc['error']}" if doc['error'] else ''))
+            return 1 if doc['error'] else 0
+        if sub == 'show':
+            doc = _se.read_status()
+            import json as _json
+            print(_json.dumps(doc, indent=1) if doc else 'no fresh service-events status')
+            return 0 if doc else 1
+        print('usage: smd admin service-events {collect|show}')
         return 0
 
     if args.command == 'heartbeat':

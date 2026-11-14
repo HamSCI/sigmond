@@ -1026,7 +1026,7 @@ for _h in sigmond-mdns sigmond-time-sync sigmond-link; do
     done
 done
 $SUDO systemctl daemon-reload
-for _t in sigmond-mdns.timer sigmond-time-sync.timer sigmond-link.timer; do
+for _t in sigmond-mdns.timer sigmond-time-sync.timer sigmond-link.timer sigmond-service-events.timer; do
     $SUDO systemctl enable --now "$_t" 2>/dev/null && ok "$_t enabled" || warn "could not enable $_t"
 done
 # Link schedule (South Pole satellite passes, tasks/plan-constrained-link-delivery.md):

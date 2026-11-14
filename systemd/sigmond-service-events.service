@@ -1,0 +1,17 @@
+# /etc/systemd/system/sigmond-service-events.service
+[Unit]
+Description=Service restarts and memory (OOM) kills over 24 h -> /run/sigmond/service-events.json
+Documentation=https://github.com/HamSCI/sigmond/blob/main/docs/superpowers/plans/2026-11-14-restart-oom-reporting.md
+# Root because hamsci cannot read PID 1 or kernel journal lines; smd check,
+# smd status and the heartbeat read the file this writes.
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/local/bin/smd admin service-events collect
+Nice=10
+IOSchedulingClass=idle
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sigmond-service-events
