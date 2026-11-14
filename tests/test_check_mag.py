@@ -134,10 +134,13 @@ class MagTests(unittest.TestCase):
         self.assertEqual(line.mark, FAIL)
         self.assertTrue(line.text.startswith('no magnetometer adapter at'))
 
-    def test_a_disabled_service_without_its_adapter_reads_as_stopped(self):
+    def test_a_disabled_service_without_its_adapter_reads_as_dormant(self):
+        # Was "reads as stopped" (FAIL).  Bring-up now installs mag-recorder
+        # DORMANT when no sensor is on the bus; that is ok, not a fault.
         self.device.unlink()
         line = self.line(service=lambda p: svc(state='inactive', age_s=None, enabled=False))
-        self.assertEqual(line.text, 'mag-recorder is inactive.  Fix: smd start mag-recorder')
+        self.assertEqual(line.text, 'no magnetometer; dormant')
+        self.assertEqual(line.mark, OK)
 
     def test_dasi011_axes_frozen_while_rt_jumps_among_junk_values(self):
         # Measured 2026-10-14 at DASI-011: x, y and z each held one value for

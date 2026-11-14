@@ -11711,6 +11711,38 @@ def _bringup_plan_receivers(receivers, *, profile_clients: frozenset,
     return remote, tuple(local), local_only, injector
 
 
+def _bringup_dormant(prof) -> frozenset:
+    """The hardware-gated components of `prof` whose device is absent.
+
+    The sensor decides, for every station, DASI or not (N8UR, 2026-11-12/14):
+    no magnetometer => mag-recorder and gmag-webui install DORMANT -- installed,
+    enabled=false in topology, never started (bringup.build_plan).  A missing
+    GPSDO keeps its older treatment: gpsdo-monitor stays enabled and `smd start`
+    skips it.  Neither blocks the bring-up.
+    """
+    dormant: set = set()
+    mag_absent = None
+    for comp in ('mag-recorder', 'gmag-webui'):
+        if comp in prof.clients:
+            if mag_absent is None:
+                mag_absent = not _detect_magnetometer()
+            if mag_absent:
+                dormant.add(comp)
+    if 'mag-recorder' in dormant:
+        _warn('no magnetometer on the bus — mag-recorder installs DORMANT '
+              '(installed, not enabled); `smd enable mag-recorder` once one is '
+              'attached.  Magnetometer uploads stay dark until then.')
+    if 'gmag-webui' in dormant:
+        _info('gmag-webui installs DORMANT too: the dashboard has nothing to '
+              'show without the sensor.')
+    if 'gpsdo-monitor' in prof.local_radiod_infra and not _detect_gpsdo():
+        _warn('no GPSDO (Leo Bodnar or MVR) on the bus — gpsdo-monitor installs DORMANT, '
+              'and the RX888 runs UNDISCIPLINED: WSPR / PSK / GRAPE (hf-timestd) '
+              'frequency accuracy is degraded until a GPSDO is attached.')
+        dormant.add('gpsdo-monitor')
+    return frozenset(dormant)
+
+
 def cmd_bringup(args) -> int:
     """Guided, contract-ordered station bring-up (install-orchestration Phase B).
 
@@ -11813,20 +11845,7 @@ def cmd_bringup(args) -> int:
     # just gpsdo-monitor.  Nothing is removed from the plan (`skip` stays empty);
     # dormancy is enforced at start.
     skip: set = set()
-    dormant: set = set()
-    if 'mag-recorder' in prof.clients and not _detect_magnetometer():
-        _warn('no magnetometer (RM3100 / Pololu USB-I2C) on the bus — '
-              'mag-recorder installs DORMANT; magnetometer uploads stay dark '
-              'until one is attached.')
-        dormant.add('mag-recorder')
-    if 'gmag-webui' in prof.clients and not _detect_magnetometer():
-        # The dashboard has nothing to show without the sensor; same gate.
-        dormant.add('gmag-webui')
-    if 'gpsdo-monitor' in prof.local_radiod_infra and not _detect_gpsdo():
-        _warn('no GPSDO (Leo Bodnar or MVR) on the bus — gpsdo-monitor installs DORMANT, '
-              'and the RX888 runs UNDISCIPLINED: WSPR / PSK / GRAPE (hf-timestd) '
-              'frequency accuracy is degraded until a GPSDO is attached.')
-        dormant.add('gpsdo-monitor')
+    dormant: set = set(_bringup_dormant(prof))
 
     # Components with NO config contract get no config interview and no
     # `configured:` checkpoint.  Neither can succeed: there is nothing to

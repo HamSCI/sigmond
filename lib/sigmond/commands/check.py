@@ -782,6 +782,10 @@ def mag_line(env: Env, mag_dir: Path = MAG_DIR, device: str = MAG_DEVICE) -> Lin
     if not env.installed('mag-recorder'):
         return Line(ABSENT, label, 'not on this station')
     svc = env.service('mag-recorder.service')
+    if not svc.enabled and not env.exists(device):
+        # Bring-up installs it DORMANT (not enabled) when no sensor is on the
+        # bus; with no unit enabled and no adapter there is nothing to run.
+        return Line(OK, label, 'no magnetometer; dormant')
     if svc.enabled and not env.exists(device):
         if no_magnetometer(env, mag_dir, device):
             return Line(ABSENT, label, 'no magnetometer on this station')

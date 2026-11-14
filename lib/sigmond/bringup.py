@@ -75,6 +75,12 @@ _TIMING_AUTHORITY = 'hf-timestd'
 _INDEPENDENT = frozenset({'mag-recorder', 'station-web', 'hamsci-physics',
                           'gmag-webui'})
 
+# Components that exist only for a sensor.  With the sensor absent (named in
+# `dormant`) they install DORMANT: installed, enabled=false in topology, never
+# started -- the sensor decides, whatever the profile says.  gpsdo-monitor is
+# not here: it keeps its older treatment (enabled, skipped by `smd start`).
+_SENSOR_ONLY = frozenset({'mag-recorder', 'gmag-webui'})
+
 # Clients that take a per-reporter instance (`<client>@<reporter-id>`).  When a
 # reporter id is supplied, bring-up creates + enables the instance instead of
 # starting a base-config unit.  wspr-recorder, psk-recorder, and
@@ -326,6 +332,17 @@ def build_plan(profile, *, local_radiod: bool,
         # nothing "declared" and the Stage-4 `smd start` steps have nothing to
         # start (radiod is left disabled/inactive).  `smd enable` is idempotent,
         # so re-running bring-up is a no-op here.
+        if comp in _SENSOR_ONLY and comp in dormant:
+            # No sensor on the bus.  Build it, leave it OUT of topology (an
+            # image may ship enabled=true, so say so explicitly), start
+            # nothing.  `smd enable <comp>` lights it once the sensor is there.
+            steps.append(Step(stage, f'install {comp}',
+                              'install',
+                              argv=[smd, 'install', '--components', comp, '--yes',
+                                    '--no-enable', '--no-pull']))
+            steps.append(Step(stage, f'disable {comp} (DORMANT — no sensor)',
+                              'tune', argv=[smd, 'disable', comp]))
+            return
         if not enable:
             # Deferred radio half (no SDR): build it, leave it disabled, so no
             # catch-all start can launch it before it is configured.
@@ -639,6 +656,8 @@ def build_plan(profile, *, local_radiod: bool,
             # ⚠ Stage 4 still runs `smd start` over everything enabled, so a
             # client that fails here is retried there -- this is an EARLY start,
             # not the only one.
+            if client in _SENSOR_ONLY and client in dormant:
+                continue        # dormant: nothing to start until the sensor is there
             steps.append(Step(STAGE3B, f'start {client} (independent — no radiod)',
                               'start',
                               argv=[smd, 'start', '--components', client]))
