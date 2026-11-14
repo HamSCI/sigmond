@@ -86,10 +86,13 @@ def _profile_blurb(prof) -> str:
 # The three tri-states bring-up prints under "required external devices".
 # Word-for-word from bin/smd's _bringup_hardware_gate so the wizard and the
 # CLI transcript read identically.
+# "advisory": a row that carries advice and never blocks bring-up (a GPSDO
+# with a fix but no position); bin/smd prints it with "!" and "advisory".
 _PRESENCE_WORD = {"yes": "present", "no": "MISSING", "unknown": "unconfirmed",
-                  "na": "n/a"}
+                  "na": "n/a", "advisory": "advisory"}
 _PRESENCE_MARK = {"yes": "[green]\u2713[/]", "no": "[red]\u2717[/]",
-                  "unknown": "[yellow]?[/]", "na": "[dim]\u2014[/]"}
+                  "unknown": "[yellow]?[/]", "na": "[dim]\u2014[/]",
+                  "advisory": "[yellow]![/]"}
 
 # The label sigmond.hardware.gate_checks gives the SDR row.  A missing SDR on
 # a profile with local_radiod_infra is NOT a hard stop: bin/smd's cmd_bringup
@@ -115,7 +118,8 @@ def _gate_checks(prof, local: bool) -> list:
     that would hard-stop ``smd bringup --require-hardware``.
     """
     from ...hardware import gate_checks
-    return [(c.presence.value, c.label, c.hint)
+    return [("advisory" if getattr(c, "advisory", False) else c.presence.value,
+             c.label, c.hint)
             for c in gate_checks(prof, local)]
 
 

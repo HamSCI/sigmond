@@ -408,6 +408,39 @@ class GreenfieldAdvisoryFramingTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("--skip-hardware-check", argv)
 
 
+class AdvisoryRowTests(unittest.TestCase):
+    """An advisory gate row (a GPSDO with a fix but no position) reads
+    "advisory", as bin/smd prints it: it never blocks bring-up, so it must
+    not look like an unconfirmed device."""
+
+    def test_gate_checks_maps_an_advisory_row(self):
+        from sigmond import hardware
+        from sigmond.tui.screens import greenfield as gf
+        rows = [hardware.GateCheck('GPSDO fix [no position]', True, 'locked'),
+                hardware.GateCheck('GPSDO position', None, 'enable passthrough',
+                                   advisory=True)]
+        with mock.patch.object(hardware, "gate_checks", lambda p, l: rows):
+            got = gf._gate_checks(None, False)
+        self.assertEqual(got[1], ("advisory", "GPSDO position", "enable passthrough"))
+        self.assertEqual(got[0][0], "yes")
+        self.assertEqual(gf._PRESENCE_WORD["advisory"], "advisory")
+
+
+@unittest.skipUnless(_HAS_TEXTUAL, "textual not installed")
+class GreenfieldAdvisoryRenderTests(unittest.IsolatedAsyncioTestCase):
+
+    async def test_advisory_row_renders_as_advisory_with_its_hint(self):
+        rows = [("yes", "GPSDO fix [no position]", "locked"),
+                ("advisory", "GPSDO position", "CANNED PASSTHROUGH ADVICE")]
+        with _stack(_patched(gate_rows=rows)):
+            app = _Harness.app()
+            async with app.run_test(size=(120, 80)) as pilot:
+                text = await _render(pilot, "#gf-equip")
+        self.assertIn("GPSDO position  —  advisory", text)
+        self.assertIn("CANNED PASSTHROUGH ADVICE", text)
+        self.assertNotIn("unconfirmed", text.split("TS-1")[0])
+
+
 @unittest.skipUnless(_HAS_TEXTUAL, "textual not installed")
 class SdrRowLabelPinTests(unittest.TestCase):
     def test_hard_stop_annotation_is_keyed_to_the_real_gate_label(self):

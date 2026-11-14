@@ -11084,7 +11084,8 @@ def _bringup_wait_wisdom(wisdom_file, timeout_s: int = 3600, poll_s: int = 15) -
     Returns True once present, False on timeout.  Re-launches the planner
     service if it died before producing the file."""
     import time
-    if _wisdom_current(wisdom_file):
+    wverdict = _wisdom_verdict(wisdom_file)
+    if wverdict == 'current':
         return True
 
     # ⛔ IDENTIFY THE CPU BEFORE WAITING, AND SAY WHAT YOU FOUND.
@@ -11106,6 +11107,15 @@ def _bringup_wait_wisdom(wisdom_file, timeout_s: int = 3600, poll_s: int = 15) -
             _ok(f'FFT wisdom: seeded from bundle {verdict["bundle"].name} — '
                 f'no planning pass needed')
             return True
+    elif wverdict == 'top-up':
+        # Wisdom made here (or adopted from the image) that lacks a few small
+        # sizes radiod logged in fft.log.  The planner measures only those --
+        # minutes -- and radiod keeps running on them meanwhile.  The HOURS
+        # warning below would be false here (wisdom re-review, 2026-11-14).
+        n = len(_wisdom_topup_list())
+        _info(f'FFT wisdom: the planner is measuring {n} missing small '
+              f'transform{"" if n == 1 else "s"} (minutes); the station '
+              f'resumes after.')
     else:
         _warn(f'FFT wisdom: NO bundled wisdom for this CPU '
               f'(wisdomf-{verdict["slug"]} is absent).')
@@ -11116,7 +11126,9 @@ def _bringup_wait_wisdom(wisdom_file, timeout_s: int = 3600, poll_s: int = 15) -
         _info(f'  When it completes, capture it so the next host of this '
               f'model skips the wait:  smd admin wisdom harvest')
 
-    _info(f'waiting for FFT wisdom ({wisdom_file}) — this can take ~30 min...')
+    _info(f'waiting for FFT wisdom ({wisdom_file})'
+          + (' — a top-up, minutes...' if wverdict == 'top-up'
+             else ' — this can take ~30 min...'))
     # Launch the planner once, and relaunch it once after a failure that was
     # not a refusal.  Every launch runs suspend and resume, so relaunching on
     # each poll turned a refusing planner (xhci IRQ on radiod's cores, no
@@ -20466,6 +20478,12 @@ def _wisdom_verdict(wisdom_file=None) -> str:
     return _w.wisdom_verdict(
         wf, _w.WISDOM_SIDECAR, _w.FFT_MISS_LOG, _w.CPUINFO,
         placement=_wisdom_placement())
+
+
+def _wisdom_topup_list() -> list:
+    """The small fft.log sizes this host's wisdom lacks: what a top-up plans."""
+    from sigmond import wisdom as _w
+    return _w.topup_misses(_w.WISDOM_SIDECAR, _w.FFT_MISS_LOG)
 
 
 def _wisdom_current(wisdom_file=None) -> bool:
