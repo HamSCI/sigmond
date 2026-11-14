@@ -95,6 +95,10 @@ def _source_routes(fb=FB, wizard='VMID="${SIGMOND_VMID:-120}"\n'):
         r["sigmond/" + "d" * 40 + "/scripts/proxmox/" + n] = f"#{n}\n"
     r["sigmond-appliance/" + "a" * 40 + "/sigmond-vm6proxy"] = VM6_BODY
     r["sigmond-appliance/" + "a" * 40 + "/sigmond-vm4relay"] = VM4_BODY
+    for rel in ("bin/sigmond-link", "systemd/sigmond-link.service", "systemd/sigmond-link.timer",
+                "systemd/sigmond-link-rac.service", "systemd/sigmond-link-rac.timer"):
+        k = "sigmond/" + "d" * 40 + "/" + rel
+        r.setdefault(k, urllib.error.HTTPError(k, 404, "Not Found", None, None))
     return r
 
 
@@ -3174,3 +3178,62 @@ def test_a_changed_pm_storage_timer_keeps_its_state():
         "/etc/systemd/system/pm-storage.timer", b"", 0o644, "t"), "changed")]
     assert pm_align.enable_new_relays(ch, run=_fake_run(calls)) == []
     assert ["systemctl", "daemon-reload"] in calls
+
+
+# ---- satellite host guard (plan 2026-11-14, Task 3): pm-align carries sigmond-link
+
+def _link_routes():
+    r = _source_routes()
+    for rel, _path, _mode in pm_align.LINK_FILES:
+        r["sigmond/" + "d" * 40 + "/" + rel] = f"#{rel}\n"
+    return r
+
+
+def test_fetch_sources_carries_link_files():
+    op = _urlopen(_link_routes())
+    src = pm_align.fetch_sources(pm_align.fetch_release(urlopen=op), vmid=100, urlopen=op)
+    assert src.link["bin/sigmond-link"] == b"#bin/sigmond-link\n"
+
+
+def test_release_without_link_files_is_fine():
+    r = _source_routes()
+    for rel, _path, _mode in pm_align.LINK_FILES:
+        k = "sigmond/" + "d" * 40 + "/" + rel
+        r[k] = urllib.error.HTTPError(k, 404, "Not Found", None, None)
+    op = _urlopen(r)
+    src = pm_align.fetch_sources(pm_align.fetch_release(urlopen=op), vmid=100, urlopen=op)
+    assert src.link == {}
+
+
+def _link_src():
+    return pm_align.Sources(FB_FULL, pm_align.render_wizard(WIZ, 100), {}, None, None,
+                            {rel: f"#{rel}\n".encode() for rel, _p, _m in pm_align.LINK_FILES})
+
+
+def test_pm_align_installs_link_files():
+    files = {f.path: f for f in pm_align.desired_files(_link_src(), 100)}
+    assert files["/usr/local/sbin/sigmond-link"].mode == 0o755
+    assert "/etc/systemd/system/sigmond-link-rac.timer" in files
+
+
+def test_pm_align_writes_follow_vm_with_its_vmid():
+    files = {f.path: f for f in pm_align.desired_files(_link_src(), 101)}
+    toml = files["/etc/sigmond/link.toml"]
+    assert b"follow_vm = 101" in toml.content and toml.create_only
+
+
+def test_existing_link_toml_untouched(tmp_path):
+    p = tmp_path / "etc/sigmond/link.toml"
+    p.parent.mkdir(parents=True)
+    p.write_text("[link_schedule]\nenabled = true\n")
+    desired = [f for f in pm_align.desired_files(_link_src(), 100) if f.path == "/etc/sigmond/link.toml"]
+    (change,) = pm_align.plan_files(desired, tmp_path)
+    assert change.state == "current"
+
+
+def test_new_link_timers_are_enabled():
+    calls = []
+    changes = [pm_align.Change(pm_align.HostFile(f"/etc/systemd/system/{n}", b"x", 0o644, "s"), "missing")
+               for n in ("sigmond-link.timer", "sigmond-link-rac.timer", "sigmond-link.service")]
+    enabled = pm_align.enable_new_relays(changes, run=_fake_run(calls))
+    assert enabled == ["sigmond-link.timer", "sigmond-link-rac.timer"]

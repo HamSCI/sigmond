@@ -54,6 +54,15 @@ PROXMOX_FILES = ("pm-heartbeat.py", "pm-heartbeat.service", "pm-heartbeat.timer"
 OPTIONAL_PROXMOX_FILES = ("pm-align.py", "pm-storage.py", "pm-storage.service",
                           "pm-storage.timer")
 RECORD = "/etc/sigmond-appliance/host-aligned.json"
+# The satellite guard's host side (plan 2026-11-14-satellite-host-guard): sigmond-link
+# and its units from sigmond at wizard_commit.  Optional: a 404 leaves them absent.
+LINK_FILES = (("bin/sigmond-link", "/usr/local/sbin/sigmond-link", 0o755),
+              ("systemd/sigmond-link.service", "/etc/systemd/system/sigmond-link.service", 0o644),
+              ("systemd/sigmond-link.timer", "/etc/systemd/system/sigmond-link.timer", 0o644),
+              ("systemd/sigmond-link-rac.service", "/etc/systemd/system/sigmond-link-rac.service", 0o644),
+              ("systemd/sigmond-link-rac.timer", "/etc/systemd/system/sigmond-link-rac.timer", 0o644))
+LINK_TOML = "/etc/sigmond/link.toml"
+LINK_TIMERS = ("sigmond-link.timer", "sigmond-link-rac.timer")
 PM_STORAGE_FILES = (("pm-storage.py", "/usr/local/sbin/pm-storage.py", 0o755),
                     ("pm-storage.service", "/etc/systemd/system/pm-storage.service", 0o644),
                     ("pm-storage.timer", "/etc/systemd/system/pm-storage.timer", 0o644))
@@ -117,6 +126,7 @@ class Sources:
     proxmox: dict = field(default_factory=dict)   # name -> bytes; absent names absent
     vm6proxy: Optional[bytes] = None              # None: the appliance commit has no relay
     vm4relay: Optional[bytes] = None              # None: the appliance commit has no IPv4 relay
+    link: dict = field(default_factory=dict)      # LINK_FILES repo path -> bytes; absent names absent
 
 
 def _get(url: str, urlopen: Callable) -> bytes:
@@ -210,8 +220,17 @@ def fetch_sources(rel: Release, *, vmid: int, urlopen: Callable = urllib.request
             if name in OPTIONAL_PROXMOX_FILES and getattr(exc, "status", None) == 404:
                 continue
             raise
+    link = {}
+    for repo_path, _dest, _mode in LINK_FILES:
+        try:
+            link[repo_path] = _get(f"{RAW}/sigmond/{rel.wizard_commit}/{repo_path}", urlopen)
+        except PmAlignError as exc:
+            if getattr(exc, "status", None) == 404:
+                continue
+            raise
     return Sources(firstboot, wizard, proxmox, _fetch_vm6proxy(rel, urlopen),
-                   _fetch_appliance_file(rel, "sigmond-vm4relay", rel.vm4relay_sha256, urlopen))
+                   _fetch_appliance_file(rel, "sigmond-vm4relay", rel.vm4relay_sha256, urlopen),
+                   link)
 
 
 def _fetch_vm6proxy(rel: Release, urlopen: Callable) -> Optional[bytes]:
@@ -276,6 +295,7 @@ class HostFile:
     content: bytes
     mode: int
     source: str
+    create_only: bool = False     # written only when absent (a host's own settings stay)
 
 
 @dataclass
@@ -444,7 +464,24 @@ def desired_files(src: Sources, vmid: int, notes: Optional[list] = None) -> list
         elif notes is not None:
             notes.append(f"this release's sigmond-vm4relay has no {VM4RELAY_FILTER} line; "
                          f"pm-align keeps this host's copy and never runs that one")
+    # The satellite guard's host side: inert until the VM's own [link_schedule]
+    # turns it on (follow_vm).  link.toml is written only where none exists,
+    # so a hand-made one (AI6VN-1-PM, AI6VN-2-PM) stays as it is.
+    for repo_path, dest, mode in LINK_FILES:
+        if repo_path in src.link:
+            out.append(HostFile(dest, src.link[repo_path], mode, f"sigmond/{repo_path}"))
+    if "bin/sigmond-link" in src.link:
+        out.append(HostFile(LINK_TOML, link_toml_text(vmid), 0o644, "pm-align", create_only=True))
     return out
+
+
+def link_toml_text(vmid: int) -> bytes:
+    return (f"# sigmond-link on this Proxmox host (written by pm-align).  It follows VM {int(vmid)}'s\n"
+            "# [link_schedule] through the guest agent; only the host-only keys below stay the host's.\n"
+            f"follow_vm = {int(vmid)}\n"
+            "[link_schedule]\n"
+            "# Host jobs that only reach the internet; skipped during a gap.\n"
+            'gated_units = ["apt-daily.service", "apt-daily-upgrade.service"]\n').encode()
 
 
 # -- the IPv6 relay (v3.72 #15) ----------------------------------------------
@@ -836,7 +873,9 @@ def plan_files(desired: list, root: Path) -> list:
     for f in desired:
         p = _under(root, f.path)
         try:
-            state = "current" if p.read_bytes() == f.content else "changed"
+            state = "current" if f.create_only or p.read_bytes() == f.content else "changed"
+            if f.create_only:
+                p.stat()
         except FileNotFoundError:
             state = "missing"
         out.append(Change(f, state))
@@ -902,7 +941,7 @@ def enable_new_relays(changes: list, *, run) -> list:
     enabled = []
     for c in units:
         name = Path(c.file.path).name
-        if c.state == "missing" and (name == "pm-storage.timer" or (
+        if c.state == "missing" and (name == "pm-storage.timer" or name in LINK_TIMERS or (
                 name.startswith("sigmond-vm-") and name.endswith("-relay.socket"))):
             r = run(["systemctl", "enable", "--now", name], capture_output=True, text=True, timeout=60)
             if r.returncode == 0:
