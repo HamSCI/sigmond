@@ -97,3 +97,12 @@ def test_text_is_ascii(files):
 def test_registered():
     assert ("archive", C.archive_line) in C.CHECKS
     assert C.CHECK_META["archive"][0] == "platform.archive"
+
+
+def test_full_names_the_reason(files):
+    st = json.loads(files.status.read_text())
+    st["state"] = "full"
+    st["last_error"] = "cannot delete 3 day folder(s) on the drive (permission denied), e.g. x"
+    files.status.write_text(json.dumps(st))
+    ln = C.archive_line(None)
+    assert ln.mark == C.WAIT and "permission denied" in ln.text

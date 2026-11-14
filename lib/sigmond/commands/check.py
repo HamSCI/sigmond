@@ -1021,7 +1021,8 @@ def archive_line(env: Env) -> Optional[Line]:
         except ValueError:
             pass
         if st.get('state') == 'full':
-            warn.append('the drive is full with nothing left it may delete')
+            warn.append('the drive is full with nothing left it may delete'
+                        + (f' ({st["last_error"]})' if st.get('last_error') else ''))
         elif st.get('state') == 'error':
             warn.append(f'the archiver hit a drive error: {st.get("last_error")}')
         if st.get('failures'):
