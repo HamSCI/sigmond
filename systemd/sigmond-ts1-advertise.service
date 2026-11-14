@@ -1,0 +1,10 @@
+[Unit]
+Description=Advertise this host's TS-1 (if its USB is here) on the LAN as _ts1._tcp
+Documentation=https://github.com/HamSCI/sigmond
+After=avahi-daemon.service
+
+[Service]
+Type=oneshot
+# Runs `ts1 probe` (read-only: CR, ?, STAT) and writes or removes
+# /etc/avahi/services/sigmond-ts1.service.  A host with no TS-1 exits at once.
+ExecStart=/usr/local/sbin/sigmond-ts1-advertise

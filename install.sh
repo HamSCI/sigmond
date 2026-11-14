@@ -1017,8 +1017,10 @@ ok "ts1 console helper → /usr/local/bin/ts1"
 # mDNS guard + time-sync: ported from wsprdaemon after N8GA (avahi stuck in
 # REGISTERING, radiod's .local names gone, stations silent for days) and
 # N8UR (timesyncd on a dead DHCP server, clock 7 s slow), both 2026-09-06.
+# sigmond-ts1-advertise: the host holding a TS-1's USB advertises it on the LAN
+# (_ts1._tcp) so splitter-fed stations can arm T6 (AC0G site, 2026-11-14).
 info "Installing mDNS guard, time-sync and link schedule → /usr/local/sbin/"
-for _h in sigmond-mdns sigmond-time-sync sigmond-link; do
+for _h in sigmond-mdns sigmond-time-sync sigmond-link sigmond-ts1-advertise; do
     $SUDO chmod a+x "$REPO_DIR/bin/$_h"
     $SUDO ln -sf "$REPO_DIR/bin/$_h" "/usr/local/sbin/$_h"
     for _u in "$_h.service" "$_h.timer"; do
@@ -1026,7 +1028,7 @@ for _h in sigmond-mdns sigmond-time-sync sigmond-link; do
     done
 done
 $SUDO systemctl daemon-reload
-for _t in sigmond-mdns.timer sigmond-time-sync.timer sigmond-link.timer sigmond-service-events.timer; do
+for _t in sigmond-mdns.timer sigmond-time-sync.timer sigmond-link.timer sigmond-service-events.timer sigmond-ts1-advertise.timer; do
     $SUDO systemctl enable --now "$_t" 2>/dev/null && ok "$_t enabled" || warn "could not enable $_t"
 done
 # Link schedule (South Pole satellite passes, tasks/plan-constrained-link-delivery.md):

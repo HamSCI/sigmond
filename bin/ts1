@@ -4,6 +4,11 @@
 #   ts1            open an interactive console on the TS-1 (GNU screen)
 #   ts1 port       print the TS-1's serial device and exit
 #   ts1 probe      read-only status via hf-timestd's ts1-probe.sh (STAT only)
+#   ts1 lan        list the TS-1s other hosts advertise on the LAN (_ts1._tcp,
+#                  sigmond-ts1-advertise); works with no TS-1 on this bus
+#   sudo ts1 trust HOST BOARD_ID TX_HZ   declare the TS-1 this station's RX888
+#                  hears through a splitter (TX_HZ from `ts1 probe` on HOST);
+#                  sigmond-site-timing then arms T6 from it.  ts1 untrust
 #
 # The TS-1's USB interface is an Adafruit Trinket M0 (239a:801e); the
 # firmware banner ("TimeSync vN.N, Board ID #...") is what makes it a TS-1.
@@ -22,6 +27,15 @@ PROBE=/opt/git/sigmond/hf-timestd/scripts/ts1-probe.sh
 
 die() { echo "ts1: $*" >&2; exit "${RC:-1}"; }
 
+# A splitter-fed station has no TS-1 on its own bus, so `lan` comes before
+# the port search.
+case "${1:-}" in
+    lan) exec "${TS1_ADVERTISE:-/usr/local/sbin/sigmond-ts1-advertise}" --browse ;;
+    trust) shift; exec "${TS1_ADVERTISE:-/usr/local/sbin/sigmond-ts1-advertise}" --trust "$@" ;;
+    untrust) exec "${TS1_ADVERTISE:-/usr/local/sbin/sigmond-ts1-advertise}" --untrust ;;
+    -h|--help) sed -n '2,/^[^#]/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
+esac
+
 port=""
 for p in $GLOB; do
     [ -e "$p" ] && port=$(readlink -f "$p") && break
@@ -34,9 +48,8 @@ done
 
 case "${1:-console}" in
     port)  echo "$port"; exit 0 ;;
-    -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     probe|console) ;;
-    *) RC=1 die "unknown subcommand '$1' (try: ts1 | ts1 port | ts1 probe)" ;;
+    *) RC=1 die "unknown subcommand '$1' (try: ts1 | ts1 port | ts1 probe | ts1 lan | ts1 trust HOST BOARD_ID TX_HZ)" ;;
 esac
 
 # probe and console both open the port.  Re-run as root when it is not ours:

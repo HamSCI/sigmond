@@ -1,0 +1,506 @@
+#!/usr/bin/env python3
+"""sigmond-ts1-advertise — share one TS-1's state with every station on the LAN.
+
+One TS-1 can feed several RX888s through a splitter, but its USB console
+(Adafruit Trinket M0, 239a:801e) plugs into one machine only.  At AC0G's site
+(2026-11-14) the USB sits on AC0G-B4, so SIGMA's bring-up found no TS-1 and
+left T6 off, although its RX888 hears the same pilot.  T6 capability belongs
+to the RF path, not to the USB cable (hf-timestd docs/STATION-TIMING-SETUP.md
+section 4).
+
+So the host that holds the USB publishes what `ts1 probe` reports, and the
+others browse it:
+
+  sigmond-ts1-advertise            probe, then publish / keep / withdraw
+                                   (the timer's mode; run as root)
+  sigmond-ts1-advertise --browse   print every TS-1 on the LAN as JSON
+  sigmond-ts1-advertise --withdraw remove this host's advertisement
+  sigmond-ts1-advertise --trust HOST BOARD_ID TX_HZ
+                                   declare the TS-1 this station's RX888 hears
+  sigmond-ts1-advertise --untrust  forget it
+  sigmond-ts1-advertise --trusted  print the record as JSON ({} when none)
+
+Trust: the operator's declaration is the authority; the advertisement is only
+a cross-check.  An advertisement is unauthenticated LAN input (host and board
+id are self-asserted), it may never reach a station behind a NAT, and
+hardware appearing is never an instruction (Rob, 2026-09-01).  So the
+operator declares the TS-1 once, with the TX frequency `ts1 probe` reports on
+the host that holds its USB:
+    sudo ts1 trust AC0G-B4 9f1e37b5 84225000
+That records host, board id, TX, this station's ADC rate (radiod's [rx888]
+samprate) and the folded frequency_hz in /etc/sigmond/ts1-trust.toml, and it
+works with no advertisement visible.  Advertisements that ARE visible can only
+object: two claiming this host or board, a timestamp in the future or stale,
+a mismatched host/board pair or another TX -- each refuses and shows every
+claimant.  sigmond-site-timing arms T6 from the record alone.
+
+Transport: DNS-SD service `_ts1._tcp`, written as an avahi static service
+file (/etc/avahi/services/sigmond-ts1.service).  avahi-daemon runs on every
+radiod host already (radiod publishes its .local names through it), re-reads
+the directory by itself, and re-announces after its own restart -- which an
+avahi-publish child would not survive (see sigmond-mdns).  sigmond's core is
+stdlib-only, so python-zeroconf (gpsdo-monitor's choice for `_gpsdo._tcp`) is
+not available here, and a static file needs no resident process of ours.
+The port (9, discard) carries nothing: nothing listens, the TXT record holds
+the whole payload.
+
+Payload, TXT schema 1 (every value printable ASCII, no `"` `\\` `;`):
+  schema=1  host=<publishing host>  present=yes  gps_lock=yes|no
+  tx_hz=<TS1_TX_HZ>  mode=<TS1_MODE>  sats=<N>  ref_source=external|internal
+  firmware=<banner>  board_id=<Board ID>  ts=<unix seconds of the probe>
+Keys other than schema/host/present/gps_lock/ts appear only when the console
+reported them.  Consumers judge freshness from `ts`.
+
+Never writes to the TS-1 beyond what `ts1 probe` does (CR, `?`, STAT).  A busy
+port (someone has the console open) keeps the last advertisement unchanged;
+an absent or unreadable TS-1 withdraws it.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+from xml.sax.saxutils import escape
+
+SCHEMA = "1"
+SERVICE_TYPE = "_ts1._tcp"
+SERVICE_PORT = 9
+SERVICE_FILE = "/etc/avahi/services/sigmond-ts1.service"
+PROBE_CMD = "/usr/local/bin/ts1"
+BROWSE_CMD = "avahi-browse"
+TRUST_FILE = "/etc/sigmond/ts1-trust.toml"
+
+# The only shapes a trusted host or board id may take; sigmond-site-timing
+# applies the same two patterns to every advertisement before it uses one.
+HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,62}$")
+BOARD_RE = re.compile(r"^[0-9A-Za-z]{1,32}$")
+
+# probe key -> TXT key, in publication order
+_FIELDS = (("TS1_MODE", "mode"), ("TS1_TX_HZ", "tx_hz"), ("TS1_SATS", "sats"),
+           ("TS1_REF_SOURCE", "ref_source"), ("TS1_FIRMWARE", "firmware"))
+
+
+def _log(msg: str) -> None:
+    print(f"sigmond-ts1-advertise: {msg}", flush=True)
+
+
+# ─── pure helpers (tested) ─────────────────────────────────────────────────────
+
+def parse_probe(text: str) -> Dict[str, str]:
+    """`ts1 probe`'s KEY=VALUE lines; anything else is ignored."""
+    kv: Dict[str, str] = {}
+    for line in (text or "").splitlines():
+        m = re.match(r"^(TS1_[A-Z0-9_]+)=(.*)$", line.strip())
+        if m:
+            kv[m.group(1)] = m.group(2).strip()
+    return kv
+
+
+def _clean(v: str, limit: int = 120) -> str:
+    """Printable ASCII without the characters avahi-browse or our parser
+    would have to escape; runs of spaces collapsed."""
+    s = "".join(c for c in str(v) if 32 <= ord(c) < 127 and c not in '"\\;')
+    return re.sub(r"\s+", " ", s).strip()[:limit]
+
+
+def decide_action(kv: Dict[str, str]) -> Tuple[str, str]:
+    """('publish' | 'keep' | 'withdraw', reason)."""
+    if kv.get("TS1_PRESENT") != "yes":
+        return "withdraw", "no TS-1 on this host's USB bus"
+    err = kv.get("TS1_ERROR", "")
+    if err.startswith("port busy"):
+        return "keep", f"TS-1 console busy ({err}) - last advertisement kept"
+    if err:
+        return "withdraw", f"TS-1 unreadable: {err}"
+    return "publish", "TS-1 probed"
+
+
+def payload_from_probe(kv: Dict[str, str], *, host: str, now: int) -> Dict[str, str]:
+    p = {"schema": SCHEMA, "host": _clean(host, 63), "present": "yes"}
+    for src, key in _FIELDS:
+        if kv.get(src):
+            p[key] = _clean(kv[src])
+    p["gps_lock"] = "yes" if kv.get("TS1_GPS_LOCK") == "yes" else "no"
+    m = re.search(r"Board ID *# *([0-9A-Za-z]+)", p.get("firmware", ""))
+    if m:
+        p["board_id"] = m.group(1)
+    p["ts"] = str(int(now))
+    order = ["schema", "host", "present", "mode", "gps_lock", "tx_hz", "sats",
+             "ref_source", "firmware", "board_id", "ts"]
+    return {k: p[k] for k in order if k in p}
+
+
+def service_name(p: Dict[str, str]) -> str:
+    bid = p.get("board_id")
+    return (f"TS-1 {bid} on {p.get('host', '?')}" if bid else f"TS-1 on {p.get('host', '?')}")[:63]
+
+
+def service_xml(p: Dict[str, str]) -> str:
+    txt = "\n".join(f"    <txt-record>{escape(f'{k}={v}')}</txt-record>" for k, v in p.items())
+    return f"""<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<!-- Written by sigmond-ts1-advertise; rewritten every probe, removed when the TS-1 goes. -->
+<service-group>
+  <name>{escape(service_name(p))}</name>
+  <service>
+    <type>{SERVICE_TYPE}</type>
+    <port>{SERVICE_PORT}</port>
+{txt}
+  </service>
+</service-group>
+"""
+
+
+def _unescape(s: str) -> str:
+    """avahi's escapes: backslash + three decimal digits, or backslash + char."""
+    return re.sub(r"\\(\d{3}|.)",
+                  lambda m: chr(int(m.group(1))) if m.group(1).isdigit() else m.group(1), s)
+
+
+def parse_txt(field: str) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for m in re.finditer(r'"((?:[^"\\]|\\.)*)"', field or ""):
+        s = _unescape(m.group(1))
+        if "=" in s:
+            k, v = s.split("=", 1)
+            out[k] = v
+    return out
+
+
+def parse_browse(text: str) -> List[Dict]:
+    """`avahi-browse -rtp _ts1._tcp` -> one record per distinct advertisement.
+
+    The same service seen on several interfaces or on IPv4 and IPv6 is one
+    record with every address it answered from (``addresses``; ``address``
+    is the first IPv4 one).  Nothing else is merged: two records that share a
+    board id or a host but differ in anything stay two records, because a
+    trust decision must see a conflict, never a winner picked for it (a
+    spoofed advertisement could otherwise poison first-use trust).  Records
+    of another schema are dropped, never guessed at."""
+    groups: Dict[Tuple, Dict] = {}
+    for line in (text or "").splitlines():
+        if not line.startswith("="):
+            continue
+        parts = line.split(";", 9)
+        if len(parts) < 10 or parts[4] != SERVICE_TYPE:
+            continue
+        txt = parse_txt(parts[9])
+        if txt.get("schema") != SCHEMA:
+            continue
+        name = _unescape(parts[3])
+        key = (name,) + tuple(sorted(txt.items()))
+        rec = groups.setdefault(key, dict(txt, service_name=name, addresses=[]))
+        if parts[7] not in rec["addresses"]:
+            rec["addresses"].append(parts[7])
+    out = []
+    for rec in groups.values():
+        v4 = [a for a in rec["addresses"] if ":" not in a]
+        rec["address"] = (v4 or rec["addresses"] or [""])[0]
+        out.append(rec)
+    return sorted(out, key=lambda r: (r.get("board_id", ""), r.get("host", ""), r["service_name"]))
+
+
+def claims(recs: List[Dict], host: str, board: str) -> List[Dict]:
+    """The advertisements that claim this host or this board id."""
+    return [r for r in recs if r.get("host") == host or r.get("board_id") == board]
+
+
+def describe(r: Dict) -> str:
+    """One advertisement for a person, every value defanged."""
+    def d(v):
+        return re.sub(r"[^A-Za-z0-9.:_ -]", "?", str(v))[:40]
+    return (f"[from {d(','.join(r.get('addresses', [])) or '?')} host {d(r.get('host'))} "
+            f"board {d(r.get('board_id'))} tx_hz {d(r.get('tx_hz'))} ts {d(r.get('ts'))}]")
+
+
+#: How far an advertisement's own timestamp may sit from this host's clock.
+ADVERT_FUTURE_S = 60
+ADVERT_STALE_S = 1800
+
+
+def valid_host(v: str) -> bool:
+    return bool(HOST_RE.match(v or "")) and "\n" not in v
+
+
+def valid_board_id(v: str) -> bool:
+    return bool(BOARD_RE.match(v or "")) and "\n" not in v
+
+
+def _int_in(v, lo: int, hi: int) -> Optional[int]:
+    if isinstance(v, bool):
+        return None
+    try:
+        n = int(str(v).strip())
+    except ValueError:
+        return None
+    return n if lo <= n <= hi else None
+
+
+def nyquist_alias_hz(tx: int, adc: int) -> int:
+    """hf-timestd core/ts1_channel.nyquist_alias_hz: fold into [0, adc/2]."""
+    r = tx % adc
+    return r if r * 2 <= adc else adc - r
+
+
+#: Half the T6 channel (low/high_edge_hz in the hf-timestd template).  An
+#: alias closer than this to DC or Nyquist leaves the channel no room.
+T6_EDGE_HZ = 25_000
+TRUST_KEYS = {"host", "board_id", "tx_hz", "adc_hz", "frequency_hz"}
+
+
+def trust_toml(rec: Dict) -> str:
+    if valid_trust(rec) != rec:
+        raise ValueError("invalid trust record")
+    lines = ["# Written by `ts1 trust` (sigmond-ts1-advertise --trust): the TS-1 this",
+             "# station accepts from the LAN, and what the operator accepted.",
+             "# sigmond-site-timing arms T6 only with frequency_hz below, and only while an",
+             "# advertisement with this host, board id and tx_hz confirms the TS-1 is locked.",
+             "[trusted]",
+             f'host = "{rec["host"]}"',
+             f'board_id = "{rec["board_id"]}"',
+             f'tx_hz = {rec["tx_hz"]}',
+             f'adc_hz = {rec["adc_hz"]}',
+             f'frequency_hz = {rec["frequency_hz"]}']
+    if "address" in rec:
+        lines.append(f'address = "{rec["address"]}"')
+    return "\n".join(lines) + "\n"
+
+
+def valid_trust(t) -> Dict:
+    """`t` itself when it is a well-formed record, else {}."""
+    import ipaddress
+    if not isinstance(t, dict) or not (TRUST_KEYS <= set(t) <= TRUST_KEYS | {"address"}):
+        return {}
+    if not (valid_host(t["host"]) and valid_board_id(t["board_id"])):
+        return {}
+    tx = _int_in(t["tx_hz"], 1_000_000, 200_000_000)
+    adc = _int_in(t["adc_hz"], 1_000_000, 1_000_000_000)
+    if tx is None or adc is None or type(t["tx_hz"]) is not int or type(t["adc_hz"]) is not int:
+        return {}
+    if t["frequency_hz"] != nyquist_alias_hz(tx, adc) or type(t["frequency_hz"]) is not int:
+        return {}
+    if "address" in t:
+        try:
+            ipaddress.ip_address(t["address"])
+        except (ValueError, TypeError):
+            return {}
+    return t
+
+
+def read_trust(path: Path) -> Dict:
+    """The record, or {} when absent or malformed."""
+    import tomllib
+    try:
+        t = tomllib.loads(path.read_text()).get("trusted", {})
+    except (OSError, ValueError):
+        return {}
+    return valid_trust(t)
+
+
+def local_adc_hz(conf_glob: str) -> Tuple[Optional[int], str]:
+    """(this station's RX888 ADC rate, why not) from radiod's own config."""
+    import glob as _glob
+    lib = os.environ.get("SIGMOND_LIB") or str(Path(__file__).resolve().parent.parent / "lib")
+    sys.path.insert(0, lib)
+    try:
+        from sigmond import sdr_map
+    except ImportError as exc:
+        return None, f"cannot import sigmond.sdr_map from {lib}: {exc}"
+    rates = {}
+    for p in sorted(_glob.glob(conf_glob)):
+        t = Path(p).read_text()
+        hw = sdr_map._unquote(sdr_map._section_value(t, "hardware", "global")).lower() or "rx888"
+        if hw != "rx888":
+            return None, f"{p}: front end {hw}, not an RX888"
+        if not sdr_map._section_value(t, "samprate", hw):
+            return None, f"{p}: no samprate line in [{hw}]"
+        rate = _int_in(sdr_map.conf_adc_samprate_hz(t) or 0, 1_000_000, 1_000_000_000)
+        if rate is None:
+            return None, f"{p}: unreadable samprate"
+        rates[p] = rate
+    if not rates:
+        return None, f"no radiod config here ({conf_glob})"
+    if len(set(rates.values())) > 1:
+        return None, "radiod configs disagree on the ADC rate: " + ", ".join(f"{k} {v}" for k, v in rates.items())
+    return next(iter(rates.values())), ""
+
+
+def build_trust(host: str, board: str, tx_raw: str, adc: Optional[int],
+                recs: Optional[List[Dict]], now: float) -> Tuple[Dict, List[str]]:
+    """(record, notes) or ({}, reasons) for `ts1 trust HOST BOARD TX_HZ`.
+
+    The operator's declaration is the authority; it needs no advertisement.
+    When advertisements are visible they can only object: more than one
+    claiming this host or board, one dated in the future or stale, one that
+    names this board with another host (or the reverse), or one whose TX
+    differs from TX_HZ -- each refuses, showing every claimant."""
+    import ipaddress
+    if not re.fullmatch(r"[0-9]{7,9}", tx_raw or "") or _int_in(tx_raw, 1_000_000, 200_000_000) is None:
+        return {}, [f"TX_HZ must be an integer 1000000..200000000 (read it with `ts1 probe` "
+                    f"on the host that has the TS-1's USB)"]
+    tx = int(tx_raw)
+    if adc is None:
+        return {}, ["this station's ADC rate is unknown"]
+    alias = nyquist_alias_hz(tx, adc)
+    if not T6_EDGE_HZ < alias < adc // 2 - T6_EDGE_HZ:
+        return {}, [f"TX {tx} Hz aliases to {alias} Hz at {adc} sps, too close to DC or Nyquist"]
+    rec = {"host": host, "board_id": board, "tx_hz": tx, "adc_hz": adc, "frequency_hz": alias}
+    if recs is None:
+        return rec, ["LAN not browsed (avahi-browse unavailable) - not cross-checked"]
+    mine = claims(recs, host, board)
+    if not mine:
+        return rec, ["no advertisement for this host or board visible - not cross-checked"]
+    shown = "; ".join(describe(r) for r in mine)
+    if len(mine) > 1:
+        return {}, [f"{len(mine)} advertisements claim host {host} or board {board}: {shown}"]
+    r = mine[0]
+    v4 = [x for x in r.get("addresses", []) if ":" not in x]
+    if len(v4) > 1:
+        return {}, [f"one advertisement answers from several IPv4 addresses: {shown}"]
+    ts = _int_in(r.get("ts", ""), 0, 2 ** 40)
+    if ts is None or ts - now > ADVERT_FUTURE_S or now - ts > ADVERT_STALE_S:
+        return {}, [f"the advertisement's timestamp is missing, in the future or stale: {shown}"]
+    if r.get("host") != host or r.get("board_id") != board:
+        return {}, [f"the advertisement pairs host and board differently: {shown}"]
+    if r.get("tx_hz") != str(tx):
+        return {}, [f"the advertisement reports another TX than {tx}: {shown}"]
+    try:
+        rec["address"] = str(ipaddress.ip_address(r.get("address", "")))
+    except ValueError:
+        pass
+    notes = [f"cross-checked against the advertisement {shown}"]
+    if r.get("gps_lock") != "yes":
+        notes.append("note: it reports no GPS lock now; site-timing will not arm until it does")
+    return rec, notes
+
+
+def _write_atomic(path: Path, text: str) -> bool:
+    try:
+        if path.read_text() == text:
+            return False
+    except OSError:
+        pass
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".sigmond-ts1.")
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+    return True
+
+
+def publish_cycle(service_file: Path, probe_cmd: str, host: str) -> int:
+    try:
+        r = subprocess.run([probe_cmd, "probe"], capture_output=True, text=True, timeout=60)
+        out = r.stdout
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        out = ""
+        _log(f"could not run '{probe_cmd} probe': {exc}")
+    kv = parse_probe(out)
+    action, reason = decide_action(kv)
+    if action == "keep":
+        _log(f"kept: {reason}")
+        return 0
+    if action == "withdraw":
+        if service_file.exists():
+            service_file.unlink()
+            _log(f"withdrawn: {reason}")
+        return 0
+    if not service_file.parent.is_dir():
+        _log(f"not published: {service_file.parent} absent (is avahi-daemon installed?)")
+        return 0
+    p = payload_from_probe(kv, host=host, now=int(time.time()))
+    _write_atomic(service_file, service_xml(p))
+    _log(f"published {SERVICE_TYPE}: TX {p.get('tx_hz', '?')} Hz, GPS lock {p['gps_lock']}, "
+         f"mode {p.get('mode', '?')}, board {p.get('board_id', '?')} ({reason})")
+    return 0
+
+
+def browse_records(browse_cmd: str) -> Optional[List[Dict[str, str]]]:
+    try:
+        r = subprocess.run(["timeout", "15", browse_cmd, "-r", "-t", "-p", "-k", SERVICE_TYPE],
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"sigmond-ts1-advertise: avahi-browse failed: {exc}", file=sys.stderr)
+        return None
+    if r.returncode in (126, 127):
+        print(f"sigmond-ts1-advertise: avahi-browse not runnable ({browse_cmd}): "
+              f"{r.stderr.strip()}", file=sys.stderr)
+        return None
+    return parse_browse(r.stdout)
+
+
+def browse(browse_cmd: str) -> int:
+    recs = browse_records(browse_cmd)
+    if recs is None:
+        return 2
+    print(json.dumps(recs, indent=1))
+    return 0
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    g = ap.add_mutually_exclusive_group()
+    g.add_argument("--browse", action="store_true", help="list TS-1s advertised on the LAN as JSON")
+    g.add_argument("--withdraw", action="store_true", help="remove this host's advertisement")
+    g.add_argument("--trust", nargs=3, metavar=("HOST", "BOARD_ID", "TX_HZ"),
+                   help="declare the TS-1 this station's RX888 hears (TX_HZ from `ts1 probe`)")
+    g.add_argument("--untrust", action="store_true", help="forget the accepted TS-1")
+    g.add_argument("--trusted", action="store_true", help="print the accepted TS-1 as JSON")
+    a = ap.parse_args(argv)
+    trust_file = Path(os.environ.get("TS1_TRUST_FILE", TRUST_FILE))
+    if a.trusted:
+        print(json.dumps(read_trust(trust_file)))
+        return 0
+    if a.untrust:
+        if trust_file.exists():
+            trust_file.unlink()
+            _log(f"trust withdrawn ({trust_file} removed); site-timing will only offer")
+        return 0
+    if a.trust:
+        host, board, tx_raw = a.trust
+        if not valid_host(host) or not valid_board_id(board):
+            print("sigmond-ts1-advertise: refused: HOST must match "
+                  f"{HOST_RE.pattern} and BOARD_ID {BOARD_RE.pattern}", file=sys.stderr)
+            return 2
+        adc, why = local_adc_hz(os.environ.get("RADIOD_CONF_GLOB", "/etc/radio/radiod@*.conf"))
+        recs = browse_records(os.environ.get("TS1_ADVERTISE_BROWSE_CMD", BROWSE_CMD))
+        rec, notes = build_trust(host, board, tx_raw, adc, recs, time.time())
+        if not rec:
+            print("sigmond-ts1-advertise: not trusted: " + " ".join(notes)
+                  + (f" ({why})" if why else ""), file=sys.stderr)
+            return 2 if "TX_HZ must be" in notes[0] else 1
+        if not trust_file.parent.is_dir():
+            print(f"sigmond-ts1-advertise: {trust_file.parent} absent", file=sys.stderr)
+            return 1
+        try:
+            _write_atomic(trust_file, trust_toml(rec))
+        except OSError as exc:
+            print(f"sigmond-ts1-advertise: cannot write {trust_file}: {exc} (run with sudo)",
+                  file=sys.stderr)
+            return 1
+        _log(f"trusted TS-1 board {board} on {host}: TX {rec['tx_hz']} Hz, this station at "
+             f"{rec['adc_hz']} sps -> T6 frequency_hz {rec['frequency_hz']}; " + "; ".join(notes)
+             + ".  Rerun `sudo /usr/local/sbin/sigmond-site-timing` to arm.")
+        return 0
+    service_file = Path(os.environ.get("TS1_ADVERTISE_SERVICE_FILE", SERVICE_FILE))
+    if a.browse:
+        return browse(os.environ.get("TS1_ADVERTISE_BROWSE_CMD", BROWSE_CMD))
+    if a.withdraw:
+        if service_file.exists():
+            service_file.unlink()
+            _log("withdrawn on request")
+        return 0
+    host = os.environ.get("TS1_ADVERTISE_HOST") or socket.gethostname()
+    return publish_cycle(service_file, os.environ.get("TS1_ADVERTISE_PROBE_CMD", PROBE_CMD), host)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

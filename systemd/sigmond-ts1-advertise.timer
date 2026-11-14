@@ -1,0 +1,10 @@
+[Unit]
+Description=Probe the local TS-1 every 5 minutes and refresh its LAN advertisement
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
