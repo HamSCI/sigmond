@@ -6718,7 +6718,9 @@ _PRELOAD_MODULES = {
                'sigmond.component_state',
                # site_profile's locally_managed name check
                'sigmond.installer', 'sigmond.lan_order'),
-    'align': ('sigmond.align', 'sigmond.service_events', 'sigmond.align_apply', 'sigmond.align_live',
+    'align': ('sigmond.align', 'sigmond.service_events',
+              # the l3-cat step's _l3_cat_wanted (get_cache_islands)
+              'sigmond.cpu', 'sigmond.align_apply', 'sigmond.align_live',
               'sigmond.build_preflight',
               'sigmond.provenance', 'sigmond.catalog', 'sigmond.component_state', 'sigmond.discover',
               'sigmond.commands.uploader', 'sigmond.inprocess_senders',
