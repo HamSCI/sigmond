@@ -6717,7 +6717,9 @@ _PRELOAD_MODULES = {
                'sigmond.component_state',
                # site_profile's locally_managed name check
                'sigmond.installer', 'sigmond.lan_order'),
-    'align': ('sigmond.align', 'sigmond.service_events', 'sigmond.align_apply', 'sigmond.align_live',
+    'align': ('sigmond.align', 'sigmond.service_events',
+              # _align_units_started_at's systemd 249 fallback
+              'sigmond.systemd_ts', 'sigmond.align_apply', 'sigmond.align_live',
               'sigmond.build_preflight',
               'sigmond.provenance', 'sigmond.catalog', 'sigmond.component_state', 'sigmond.discover',
               'sigmond.commands.uploader', 'sigmond.inprocess_senders',
@@ -7637,11 +7639,17 @@ def _align_units_started_at(units, run=subprocess.run, monotonic=False) -> Optio
         # M2: through _align_run — a hung or missing systemctl ignores
         # that unit (rc -1), never raises out of the staleness read.
         r = _align_run(argv, run=run, timeout=15, action=f'systemctl show {unit}')
+        stdout = r.stdout
+        from sigmond import systemd_ts as _sts
+        if _sts.unix_unsupported(r):            # systemd < 251 (Ubuntu 22.04: 249)
+            r = _align_run(_sts.with_utc(argv), run=run, timeout=15,
+                           action=f'systemctl show {unit}')
+            stdout = _sts.utc_to_unix_output(r.stdout)
         if r.returncode != 0:
             continue
         state = None
         ts = None
-        for line in (r.stdout or '').splitlines():
+        for line in (stdout or '').splitlines():
             if line.startswith('ActiveState='):
                 state = line.split('=', 1)[1].strip()
             elif line.startswith(f'{field}='):

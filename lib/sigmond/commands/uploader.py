@@ -136,18 +136,25 @@ def _service_active() -> bool:
 def _service_started_at() -> "float | None":
     """When the daemon's current run began, in Unix seconds, or None when
     systemd does not say.  ``--timestamp=unix`` prints ``@<seconds>``."""
+    from sigmond import systemd_ts
+    argv = ["systemctl", "show", "-p", "ActiveEnterTimestamp",
+            systemd_ts.UNIX, "--value", SERVICE]
     try:
         r = subprocess.run(
-            ["systemctl", "show", "-p", "ActiveEnterTimestamp",
-             "--timestamp=unix", "--value", SERVICE],
-            capture_output=True, text=True, errors="replace",
+            argv, capture_output=True, text=True, errors="replace",
             stdin=subprocess.DEVNULL, timeout=15, check=False)
+        out = r.stdout
+        if systemd_ts.unix_unsupported(r):      # systemd < 251 (Ubuntu 22.04: 249)
+            r = subprocess.run(
+                systemd_ts.with_utc(argv), capture_output=True, text=True,
+                errors="replace", stdin=subprocess.DEVNULL, timeout=15, check=False)
+            out = systemd_ts.utc_to_unix_output(r.stdout)
     except (OSError, subprocess.SubprocessError):
         return None
     if r.returncode != 0:
         return None
     try:
-        return float((r.stdout or "").strip().lstrip("@"))
+        return float((out or "").strip().lstrip("@"))
     except ValueError:
         return None
 
