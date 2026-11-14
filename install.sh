@@ -644,6 +644,21 @@ if ! "$PYTHON3" -c 'import ensurepip' &>/dev/null; then
 fi
 ok "Python: $($PYTHON3 --version)"
 
+# The bin/ helpers symlinked into /usr/local/sbin (sigmond-link,
+# sigmond-sdr-recover, sigmond-time-sync) run under the SYSTEM python3, not
+# $PYTHON3 — 3.10 on Ubuntu 22.04, which has no tomllib.  They fall back to
+# tomli; install it there.
+if command -v python3 &>/dev/null \
+        && ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,11) else 1)' 2>/dev/null \
+        && ! python3 -c 'import tomli' &>/dev/null; then
+    info "system python3 is $(python3 -V 2>&1 | cut -d' ' -f2): installing tomli for the sbin helpers…"
+    case "$_PKG_MGR" in
+        apt) _pkg_install python3-tomli ;;
+        dnf|yum) _pkg_install python3-tomli ;;
+        *)   warn "install python3-tomli (or use Python 3.11+): sigmond-link/sdr-recover/time-sync need it" ;;
+    esac
+fi
+
 # ─── FHS system directories ───────────────────────────────────────────────────
 # /var/lib/sigmond holds the SQLite local sink (sink.db) plus the environment
 # cache, lifecycle locks, and net-diag JSON.  Producers run as non-root users
@@ -1080,7 +1095,7 @@ fi
 # saying so, rather than a silently partial recovery.
 _TOPOLOGY=/etc/sigmond/topology.toml
 if [[ -f "$_TOPOLOGY" ]]; then
-    _RADIOD_UNIT=$(python3 - "$_TOPOLOGY" <<'PYEOF' || true
+    _RADIOD_UNIT=$("$PYTHON3" - "$_TOPOLOGY" <<'PYEOF' || true
 import sys, tomllib
 try:
     with open(sys.argv[1], "rb") as fh:
@@ -1099,7 +1114,7 @@ PYEOF
                 "$REPO_DIR/systemd/sigmond-radiod-consumer.conf.in" \
                 | $SUDO tee "/etc/systemd/system/${_consumer}.d/20-sigmond-radiod.conf" >/dev/null
             ok "consumer drop-in: $_consumer"
-        done < <(python3 - "$_TOPOLOGY" <<'PYEOF' || true
+        done < <("$PYTHON3" - "$_TOPOLOGY" <<'PYEOF' || true
 import fnmatch, subprocess, sys, tomllib
 try:
     with open(sys.argv[1], "rb") as fh:
