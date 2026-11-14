@@ -45,6 +45,7 @@ Do these in order. Only steps 1 and 2 need you physically at the machine.
 | 3. Register your station's uploads | [registration.md](registration.md) | 30 min + portal waits |
 | 4. Learn what "healthy" looks like | [day-2.md](day-2.md) | 15 min |
 | 5. Know who can reach your station, and how to switch that off | [remote-access.md](remote-access.md) | 10 min |
+| A site whose internet comes and goes (satellite) | [satellite-link.md](satellite-link.md) | 10 min |
 | When it breaks | [troubleshooting.md](troubleshooting.md) | — |
 | Before you touch anything | [do-not-touch.md](do-not-touch.md) | — |
 | Words used in these pages | [glossary.md](glossary.md) | — |
