@@ -17,7 +17,8 @@ sleeping drive or wait on one that is unplugged:
 - `/var/lib/sigmond/archive-health.json`: its SMART health, read hourly;
 - `/var/lib/timestd/archive-status.json`: the archiver's last run.
 
-A station with no archive drive shows no archive line.
+A station with no archive drive shows no archive line, unless a drive that
+`smd archive add` prepared earlier is plugged in (see the first message below).
 
 ## What healthy looks like
 
@@ -26,6 +27,12 @@ ok    archive  drive mounted and healthy; 12 day(s) archived
 ```
 
 ## What each message means
+
+**wait: `an archive drive (/dev/sdb1) is plugged in but not set up on this machine.  run: smd archive add --device sdb re-attaches it and keeps its data`**
+Seen after a reinstall: the new system has no `/etc/sigmond/archive.toml`, but the
+drive still carries its data. `add` sees the drive's label, erases nothing, and
+brings back its settings and health baseline from the copy it keeps on the drive
+(`.sigmond/`). To erase it and start over instead, add `--format`.
 
 **wait: `the drive is plugged in but not mounted.  run: sudo mount /var/lib/sigmond/archive`**
 Usually after it was pulled out while in use. If the mount fails, run

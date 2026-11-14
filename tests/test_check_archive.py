@@ -106,3 +106,16 @@ def test_full_names_the_reason(files):
     files.status.write_text(json.dumps(st))
     ln = C.archive_line(None)
     assert ln.mark == C.WAIT and "permission denied" in ln.text
+
+
+def test_unattached_labelled_drive_waits(tmp_path, monkeypatch):
+    monkeypatch.setattr(C, "ARCHIVE_TOML", tmp_path / "none.toml")
+    monkeypatch.setattr(C, "_archive_label_device", lambda: "/dev/sdb1")
+    ln = C.archive_line(None)
+    assert ln.mark == C.WAIT and "smd archive add --device sdb" in ln.text and "keeps its data" in ln.text
+
+
+def test_no_drive_no_line(tmp_path, monkeypatch):
+    monkeypatch.setattr(C, "ARCHIVE_TOML", tmp_path / "none.toml")
+    monkeypatch.setattr(C, "_archive_label_device", lambda: None)
+    assert C.archive_line(None) is None

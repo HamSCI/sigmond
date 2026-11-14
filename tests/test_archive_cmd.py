@@ -479,3 +479,51 @@ def test_unit_active_counts_activating(monkeypatch):
                             lambda argv, _s=state, **kw: sp.CompletedProcess(
                                 argv, 0 if _s == "active" else 3, _s + "\n", ""))
         assert cmd._unit_active("x.service") is want, state
+
+
+# ---- re-attach after a reinstall (Rob 2026-11-14: AI6VN-1 lost its archive config)
+
+@pytest.fixture
+def labelled(env, health, monkeypatch):
+    monkeypatch.setattr(cmd, "_partition_label", lambda part: ar.LABEL)
+    return env
+
+
+def test_labelled_drive_reattaches_without_format(labelled):
+    assert cmd.cmd_archive(_args()) == 0
+    tools = [a[0] for a in labelled.ran]
+    assert "wipefs" not in tools and "mkfs.ext4" not in tools
+    assert "UUID=abcd-1234" in ar.FSTAB.read_text()
+    import tomllib
+    assert tomllib.loads(ar.CONFIG.read_text())["uuid"] == "abcd-1234"
+
+
+def test_reattach_restores_settings_and_baseline_from_drive(labelled):
+    meta = ar.MOUNT / ".sigmond"
+    meta.mkdir(parents=True)
+    (meta / "archive.toml").write_text(
+        'uuid = "abcd-1234"\nmount = "/old"\nhigh_water_pct = 80\nevict_first = ["/x/wav"]\n'
+        'archive_dtype = "f16"\nserial = "S6XN"\n')
+    import json
+    (meta / "archive-health.json").write_text(json.dumps(
+        {"baseline": {"disk_serial": "OLD", "reallocated": 0}, "baseline_utc": "2026-11-12T21:47:00Z",
+         "latest": {"disk_serial": "OLD"}, "latest_utc": "2026-11-13T00:00:00Z"}))
+    assert cmd.cmd_archive(_args()) == 0
+    import tomllib
+    cfg = tomllib.loads(ar.CONFIG.read_text())
+    assert cfg["high_water_pct"] == 80 and cfg["evict_first"] == ["/x/wav"]
+    assert cfg["mount"] == str(ar.MOUNT)
+    doc = json.loads(cmd.HEALTH.read_text())
+    assert doc["baseline_utc"] == "2026-11-12T21:47:00Z"
+
+
+def test_format_flag_erases_a_labelled_drive(labelled):
+    assert cmd.cmd_archive(_args(format=True)) == 0
+    assert "mkfs.ext4" in [a[0] for a in labelled.ran]
+
+
+def test_add_keeps_a_copy_of_the_settings_on_the_drive(env, health):
+    assert cmd.cmd_archive(_args()) == 0
+    import tomllib
+    assert tomllib.loads((ar.MOUNT / ".sigmond" / "archive.toml").read_text())["uuid"] == "abcd-1234"
+    assert (ar.MOUNT / ".sigmond" / "archive-health.json").exists()

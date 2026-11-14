@@ -32185,7 +32185,8 @@ def _build_parser() -> argparse.ArgumentParser:
     archive_sub.add_parser('status', help='the drive, how full, how many days fit')
     a_add = archive_sub.add_parser('add',
         help='attach a USB drive: refuses the RX-888\'s hub, formats it ext4 '
-             '(ERASES it), mounts it at /var/lib/sigmond/archive')
+             '(ERASES it), mounts it at /var/lib/sigmond/archive; a drive that is '
+             'already a sigmond archive drive is re-attached, data kept')
     a_add.add_argument('--device', metavar='sdX',
         help='the drive, instead of plugging it in while add waits')
     a_add.add_argument('--confirm', metavar='sdX',
@@ -32199,6 +32200,9 @@ def _build_parser() -> argparse.ArgumentParser:
     a_add.add_argument('--switch-uas', action='store_true',
         help="when the drive's USB bridge blocks SMART under UAS, switch it to "
              "usb-storage without asking")
+    a_add.add_argument('--format', action='store_true',
+        help='erase and reformat a drive that is already a sigmond archive drive '
+             '(without it, add re-attaches such a drive and keeps its data)')
     a_add.add_argument('--upgrade', action='store_true',
         help='bring an already-added drive up to date (automount, archiver keys, '
              'health baseline) without formatting it')

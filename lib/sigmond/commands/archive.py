@@ -10,6 +10,7 @@ until it ships, the drive stands ready and empty.  `keep` waits for it too.
 """
 from __future__ import annotations
 
+import dataclasses
 import datetime as _dt
 import os
 import pwd
@@ -422,6 +423,91 @@ def _upgrade(args) -> int:
     return 0
 
 
+DRIVE_META = ".sigmond"     # on the drive: copies of archive.toml and the health doc
+KEPT_KEYS = ("added_utc", "mode", "high_water_pct", "kept_ceiling_pct", "archive_dtype",
+             "evict_first")
+
+
+def _partition_label(part: str) -> str:
+    """ar.LABEL when udev's by-label link points at ``part``, else "" (read
+    from /dev/disk/by-label: no command run, nothing on the drive touched)."""
+    link = Path("/dev/disk/by-label") / ar.LABEL
+    try:
+        if link.exists() and os.path.realpath(link) == os.path.realpath(part):
+            return ar.LABEL
+    except OSError:
+        pass
+    return ""
+
+
+def _toml_value(v) -> str:
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return repr(v)
+    if isinstance(v, list):
+        return "[" + ", ".join(_toml_value(x) for x in v) + "]"
+    return json.dumps(str(v))
+
+
+def _with_kept_settings(text: str, saved: dict) -> str:
+    """archive.toml as add writes it, with the operator's own settings from
+    the drive's copy (the identity keys stay as found now)."""
+    import re
+    for key in KEPT_KEYS:
+        if key in saved:
+            text = re.sub(rf"(?m)^{key} = .*$", lambda m: f"{key} = {_toml_value(saved[key])}",
+                          text, count=1)
+    return text
+
+
+def _restore_from_drive(uuid: str, disk, reading) -> bool:
+    """Bring back archive.toml's settings and the health baseline from the
+    drive's own copy.  True when a health doc came back (no new baseline)."""
+    import tomllib
+    meta = ar.MOUNT / DRIVE_META
+    try:
+        saved = tomllib.loads((meta / "archive.toml").read_text())
+    except (OSError, ValueError):
+        saved = {}
+    if saved:
+        ar.CONFIG.write_text(_with_kept_settings(ar.CONFIG.read_text(), saved))
+        ok(f"{ar.CONFIG}: settings restored from the drive's copy")
+    try:
+        doc = json.loads((meta / "archive-health.json").read_text())
+    except (OSError, ValueError):
+        return False
+    if not isinstance(doc, dict) or not doc.get("baseline"):
+        return False
+    if reading is not None:
+        doc["latest"] = dataclasses.asdict(reading)
+        doc["latest_utc"] = _now()
+    HEALTH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = HEALTH.with_name(HEALTH.name + ".new")
+    tmp.write_text(json.dumps(doc, indent=2) + "\n")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, HEALTH)
+    ok(f"health baseline from {doc.get('baseline_utc', '?')} kept")
+    return True
+
+
+def _save_to_drive() -> None:
+    """Keep a copy of archive.toml and the health doc on the drive, so a
+    reinstall can take the drive back as it was (`add` re-attaches)."""
+    meta = ar.MOUNT / DRIVE_META
+    try:
+        meta.mkdir(mode=0o755, exist_ok=True)
+        for src in (ar.CONFIG, HEALTH):
+            if src.exists():
+                tmp = meta / (src.name + ".new")
+                tmp.write_bytes(src.read_bytes())
+                os.chmod(tmp, 0o644)
+                os.replace(tmp, meta / src.name)
+    except OSError as e:
+        warn(f"could not keep a copy of the settings on the drive ({e}); "
+             "a reinstall would need them set again")
+
+
 def _add(args) -> int:
     _with_sbin_on_path()
     if getattr(args, 'upgrade', False):
@@ -479,6 +565,15 @@ def _add(args) -> int:
         return rc
 
     channels = _channels_in_buffer()
+    dev = f"/dev/{disk.name}"
+    part = f"/dev/{ar.partition_name(disk.name)}"
+    reattach = (_partition_label(part) == ar.LABEL and not getattr(args, 'format', False))
+    if reattach:
+        # A reinstall wipes /etc, not the drive (AI6VN-1, 2026-11-14): take it
+        # back as it stands, its data and its health baseline with it.
+        ok(f"{part} is already a sigmond archive drive: re-attaching it as it stands, "
+           "nothing erased (--format erases it instead)")
+        return _attach(disk, part, reading, channels, dry, reattach=True)
     _say(f"\n  At about 15 GB per channel per day, {channels} channels fill this drive "
           f"in about {ar.days_fit(disk.size_bytes, channels):.0f} days.")
     warn(f"FORMATTING ERASES EVERYTHING ON /dev/{disk.name}.")
@@ -499,8 +594,6 @@ def _add(args) -> int:
             err(f"{tool} not found; it comes with util-linux / e2fsprogs")
             return 1
 
-    dev = f"/dev/{disk.name}"
-    part = f"/dev/{ar.partition_name(disk.name)}"
     info(("Would run" if dry else "Formatting") + f" {dev}:")
     if not dry:
         info("mkfs writes the ext4 journal (about 1 GB): seconds on a hard drive, "
@@ -515,7 +608,12 @@ def _add(args) -> int:
         if _run(cmd, dry, stdin) != 0:
             err(f"{dev} is partly formatted; run `smd archive add --device {disk.name}` again")
             return 1
+    return _attach(disk, part, reading, channels, dry, reattach=False)
 
+
+def _attach(disk, part: str, reading, channels: int, dry: bool, reattach: bool) -> int:
+    """fstab, archive.toml, mount, automount and health baseline for a drive
+    that carries the archive filesystem (just made, or kept from before)."""
     uuid = "<uuid>" if dry else _blkid_uuid(part)
     if not uuid:
         err(f"blkid found no UUID on {part}")
@@ -526,7 +624,9 @@ def _add(args) -> int:
     if dry:
         _say(f"    would mkdir {ar.MOUNT}")
         _say(f"    would set /etc/fstab's archive line to: {ar.fstab_line(uuid)}")
-        _say(f"    would write {ar.CONFIG}")
+        _say(f"    would write {ar.CONFIG}"
+             + (" (settings and health baseline from the drive's copy, if it has one)"
+                if reattach else ""))
         _say(f"    would run: systemctl daemon-reload; mount(2) {part} on {ar.MOUNT}, "
               "ext4, noatime, through a handle opened without following links")
         info("dry run: nothing changed")
@@ -559,15 +659,18 @@ def _add(args) -> int:
         err(f"the fstab line stands (backup {backup}); mount {ar.MOUNT} by hand to see why")
         return 1
     _make_client_dirs(ar.MOUNT)
-    _after_mount(reading, False)
+    restored = _restore_from_drive(uuid, disk, reading) if reattach else None
+    _after_mount(None if restored else reading, False)
+    _save_to_drive()
     _activate_automount(uuid, direct_mount=True)
     st = shutil.disk_usage(ar.MOUNT)
     ok(f"archive drive mounted at {ar.MOUNT}: {ar.human_bytes(st.free)} free, "
        f"about {ar.days_fit(st.free, channels):.0f} days at {channels} channels")
     info(f"UUID {uuid}; /etc/fstab (backup {backup.name}) and {ar.CONFIG} written.  "
          "A missing drive never holds up a boot.")
-    info("The archiver that fills the drive comes with hf-timestd (phase 2); until then "
-         "the drive stands ready and empty.  Unplug safely with `smd archive remove`.")
+    info("hf-timestd's archiver fills the drive"
+         + (" from where it left off." if reattach else ".")
+         + "  Unplug safely with `smd archive remove`.")
     return 0
 
 

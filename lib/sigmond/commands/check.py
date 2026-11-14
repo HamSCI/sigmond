@@ -988,6 +988,22 @@ def _json_file(p: Path) -> dict:
         return {}
 
 
+def _archive_label_device() -> Optional[str]:
+    """The partition carrying the archive label, from udev's by-label link
+    (no root, no drive access), or None."""
+    link = Path('/dev/disk/by-label/SIGMOND-ARCHIVE')
+    try:
+        return os.path.realpath(link) if link.exists() else None
+    except OSError:
+        return None
+
+
+def _whole_disk(part: str) -> str:
+    name = Path(part).name
+    m = re.match(r'^(nvme\d+n\d+|mmcblk\d+)p\d+$', name) or re.match(r'^([a-z]+)\d+$', name)
+    return m.group(1) if m else name
+
+
 def archive_line(env: Env) -> Optional[Line]:
     """Reads files only (the config, sigmond's cached health reading, the
     archiver's status): never the drive, so a check cannot wake it or block
@@ -998,7 +1014,13 @@ def archive_line(env: Env) -> Optional[Line]:
     try:
         cfg = tomllib.loads(ARCHIVE_TOML.read_text())
     except (OSError, ValueError):
-        return None
+        part = _archive_label_device()
+        if not part:
+            return None
+        # A reinstall wipes /etc but not the drive (AI6VN-1, 2026-11-14).
+        return Line(WAIT, label,
+                    f'an archive drive ({part}) is plugged in but not set up on this machine.  '
+                    f'{RUN}smd archive add --device {_whole_disk(part)} re-attaches it and keeps its data')
     fail, warn = [], []
     mount = str(cfg.get('mount', '/var/lib/sigmond/archive'))
     state = _archive_mount_state(str(cfg.get('uuid', '')))

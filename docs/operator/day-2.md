@@ -531,6 +531,12 @@ as fast as one without.  `/etc/sigmond/archive.toml` records which drive it is.
 From a script, name the drive and the answer: `smd archive add --device sdb
 --confirm sdb`.  `--dry-run` shows what `add` would run and changes nothing.
 
+**After a reinstall.**  A new image starts with no archive settings, but the
+drive keeps its data.  `smd check` says so, and `smd archive add --device sdb`
+re-attaches it: a drive already labelled `SIGMOND-ARCHIVE` is never erased
+(only `--format` erases it).  `add` keeps a copy of `archive.toml` and the health
+baseline on the drive, in `.sigmond/`, and brings them back.
+
 Once the drive stands mounted, the archiver (`timestd-archive.timer`, every
 ten minutes, at idle priority) copies each closed raw IQ file onto it in half
 precision, checks the copy, and deletes the oldest whole day when the drive
