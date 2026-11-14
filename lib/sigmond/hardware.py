@@ -79,8 +79,10 @@ def _sdr_present() -> bool:
 
 
 def _gpsdo_present() -> bool:
-    """Leo Bodnar GPSDO (USB/HID) — VID 1dd2 (LBE-1420/1421/mini) on the bus."""
-    return bool(re.search(r"1dd2:|leo bodnar", _lsusb(), re.I))
+    """Leo Bodnar GPSDO (USB/HID) — VID 1dd2 (LBE-1420/1421/mini) — or an
+    RP2040 CDC board (2e8a:000a), which may be an MVR GPSDO B, on the bus.
+    gpsdo-monitor confirms an MVR from its output and ignores other RP2040s."""
+    return bool(re.search(r"1dd2:|leo bodnar|2e8a:000a", _lsusb(), re.I))
 
 
 # Legacy lsusb fallbacks, keyed by client/component name.  Consulted ONLY when
@@ -154,11 +156,44 @@ def detect_magnetometer() -> bool:
 
 
 def detect_gpsdo() -> bool:
-    """True when a Leo Bodnar GPSDO is attached, per gpsdo-monitor's own
+    """True when a GPSDO (Leo Bodnar, or a possible MVR GPSDO B) is attached,
+    per gpsdo-monitor's own
     `inventory --json hardware_present` self-describe (CONTRACT §3 / Phase D),
-    falling back to the `1dd2:` USB/HID lsusb probe.  Unknown (None) is treated
+    falling back to the `1dd2:` / `2e8a:000a` lsusb probe.  Unknown (None) is treated
     as absent — don't scaffold gpsdo-monitor for hardware we can't confirm."""
     return hardware_ready('gpsdo-monitor') is True
+
+
+# gpsdo-monitor's runtime drop (one <serial>.json per device + index.json).
+GPSDO_RUN_DIR = '/run/gpsdo'
+
+
+def _gpsdo_reports() -> list:
+    """Every per-device report gpsdo-monitor published, as dicts."""
+    out = []
+    for f in sorted(glob.glob(os.path.join(GPSDO_RUN_DIR, '*.json'))):
+        if f.endswith('index.json'):
+            continue
+        try:
+            with open(f) as fh:
+                data = json.load(fh)
+        except Exception:   # noqa: BLE001
+            continue
+        if isinstance(data, dict):
+            out.append(data)
+    return out
+
+
+def gpsdo_advisories() -> list:
+    """The operator advisories gpsdo-monitor published with its reports (the
+    MVR GPSDO B uses them, e.g. to name the command that turns on the NMEA
+    passthrough its position depends on).  [] when there are none."""
+    out = []
+    for data in _gpsdo_reports():
+        adv = data.get('advisories')
+        if isinstance(adv, list):
+            out += [a for a in adv if isinstance(a, str)]
+    return out
 
 
 def gpsdo_fix():
@@ -169,17 +204,25 @@ def gpsdo_fix():
     so the bring-up gate + grid-derivation work BEFORE gpsdo-monitor is installed —
     otherwise a physically-locked GPSDO reads as 'no fix' on a fresh host (the bug
     the walk-through caught).  Both paths need root, so bringup elevates before the
-    gate."""
-    for f in glob.glob('/run/gpsdo/*.json'):
-        if f.endswith('index.json'):
-            continue
-        try:
-            h = json.load(open(f)).get('health', {})
-        except Exception:   # noqa: BLE001
+    gate.
+
+    An MVR GPSDO B without NMEA passthrough publishes ``gps_fix`` null (it has
+    no NMEA dimension to give) but its own fix test in ``gps_locked``; that
+    verdict counts, with the device's fix name (``gps_fix_type``) as fix_str.
+    Its position stays null until passthrough is on -- see gpsdo_advisories().
+    ⛔ gpsdo_fix_direct() must NOT learn the MVR: its stty-then-read path leaves
+    the echo window open, and an echoed byte opens the MVR's menu."""
+    for data in _gpsdo_reports():
+        h = data.get('health')
+        if not isinstance(h, dict):
             continue
         fix = h.get('gps_fix')
         if fix:                       # monitor is up and publishing
             return (fix in ('2D', '3D'), h.get('grid'), fix)
+        locked = h.get('gps_locked')
+        if isinstance(locked, bool):  # a fix verdict without an NMEA dimension
+            return (locked, h.get('grid'),
+                    h.get('gps_fix_type') or ('locked' if locked else 'no fix'))
     return gpsdo_fix_direct()
 
 
@@ -382,10 +425,22 @@ def gate_checks(prof, local: bool) -> list:
                 'connect the GPS antenna: no fix means an undisciplined '
                 'RX888 clock and no auto-derived location'))
         elif present and has_fix:
-            checks.append(GateCheck(f'GPSDO fix [{grid or "?"}]', True, 'located'))
+            checks.append(GateCheck(f'GPSDO fix [{grid or "no position"}]', True,
+                                    'located' if grid else 'locked'))
+            if not grid:
+                # Disciplined, but not located: an MVR GPSDO B gives position
+                # only in NMEA passthrough.  Say that (a warning row, never a
+                # hardware MISSING) instead of "connect the antenna".
+                advice = [a for a in gpsdo_advisories() if 'position' in a]
+                checks.append(GateCheck(
+                    'GPSDO position', None,
+                    advice[0] if advice else
+                    'the GPSDO reports a fix but no position; set the station '
+                    'grid by hand (smd config identity --grid ...) or enable its position '
+                    'output'))
         else:
             checks.append(GateCheck(
-                'GPSDO (Leo Bodnar)', present,
+                'GPSDO (Leo Bodnar or MVR)', present,
                 'attach the GPSDO on USB — without a fix the RX888 runs '
                 'undisciplined and location cannot be auto-derived'))
     if 'mag-recorder' in getattr(prof, 'clients', ()):

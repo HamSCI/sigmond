@@ -198,3 +198,97 @@ class TestRm3100HeldAdapter(unittest.TestCase):
                                      mag_dir=self.d, now=self.now)
         self.assertIs(r, True)
         self.assertFalse(self._probed())
+
+
+class TestGpsdoFixMvr(unittest.TestCase):
+    """The MVR GPSDO B (gpsdo-monitor, 2026-11-14) reports position only in
+    NMEA passthrough.  Locked without it, it publishes gps_fix null,
+    gps_locked true, and an advisory naming the passthrough command.  The
+    gate must say THAT, not "NO GPS fix -- connect the antenna"."""
+
+    ADVICE = ('position unavailable: the MVR reports position only in NMEA '
+              'passthrough, which is off; enable it with `gpsdo-monitor mvr '
+              'passthrough on --persist` (stop the gpsdo-monitor service first)')
+
+    def setUp(self):
+        import tempfile
+        self.d = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__('shutil').rmtree(self.d, True))
+        orig = hardware.GPSDO_RUN_DIR
+        hardware.GPSDO_RUN_DIR = str(self.d)
+        self.addCleanup(lambda: setattr(hardware, 'GPSDO_RUN_DIR', orig))
+        orig_direct = hardware.gpsdo_fix_direct
+        hardware.gpsdo_fix_direct = lambda: (False, None, None)
+        self.addCleanup(lambda: setattr(hardware, 'gpsdo_fix_direct', orig_direct))
+
+    def _write(self, health, advisories=()):
+        import json
+        (self.d / 'E6614C311B4B2A2B.json').write_text(json.dumps({
+            'schema': 'v1', 'device': {'model': 'MVR GPSDO B'},
+            'health': health, 'advisories': list(advisories)}))
+        (self.d / 'index.json').write_text('{}')
+
+    def _gate(self):
+        import types
+        prof = types.SimpleNamespace(local_radiod_infra=('gpsdo-monitor',), clients=())
+        orig = hardware.detect_gpsdo
+        hardware.detect_gpsdo = lambda: True
+        self.addCleanup(lambda: setattr(hardware, 'detect_gpsdo', orig))
+        return hardware.gate_checks(prof, False)
+
+    def test_locked_mvr_without_passthrough_has_a_fix(self):
+        self._write({'gps_fix': None, 'gps_locked': True, 'gps_fix_type': 'DGPS fix',
+                     'grid': None}, [self.ADVICE])
+        self.assertEqual(hardware.gpsdo_fix(), (True, None, 'DGPS fix'))
+
+    def test_unlocked_mvr_reports_no_fix_without_falling_through(self):
+        self._write({'gps_fix': 'no_fix', 'gps_locked': False})
+        self.assertEqual(hardware.gpsdo_fix()[0], False)
+        self._write({'gps_fix': None, 'gps_locked': False})
+        has_fix, _grid, fixstr = hardware.gpsdo_fix()
+        self.assertFalse(has_fix)
+        self.assertIsNotNone(fixstr)
+
+    def test_bodnar_report_unchanged(self):
+        self._write({'gps_fix': '3D', 'gps_locked': True, 'grid': 'EM38ww'})
+        self.assertEqual(hardware.gpsdo_fix(), (True, 'EM38ww', '3D'))
+
+    def test_advisories_are_read_from_the_report(self):
+        self._write({'gps_fix': None, 'gps_locked': True}, [self.ADVICE])
+        self.assertEqual(hardware.gpsdo_advisories(), [self.ADVICE])
+
+    def test_gate_says_passthrough_not_connect_the_antenna(self):
+        self._write({'gps_fix': None, 'gps_locked': True, 'gps_fix_type': 'GPS fix',
+                     'grid': None}, [self.ADVICE])
+        checks = self._gate()
+        text = ' '.join(f'{c.label} {c.hint}' for c in checks)
+        self.assertNotIn('connect the GPS antenna', text)
+        fix = [c for c in checks if c.label.startswith('GPSDO fix')]
+        self.assertEqual(len(fix), 1)
+        self.assertIs(fix[0].detected, True)
+        pos = [c for c in checks if c.label == 'GPSDO position']
+        self.assertEqual(len(pos), 1)
+        self.assertIsNone(pos[0].detected)       # warn; never a hardware MISSING
+        self.assertIn('gpsdo-monitor mvr passthrough on --persist', pos[0].hint)
+
+    def test_gate_with_a_located_gpsdo_has_no_position_row(self):
+        self._write({'gps_fix': '3D', 'gps_locked': True, 'grid': 'EM38ww'})
+        checks = self._gate()
+        self.assertEqual([c.label for c in checks], ['GPSDO fix [EM38ww]'])
+
+    def test_absent_gpsdo_row_names_the_mvr_too(self):
+        import types
+        prof = types.SimpleNamespace(local_radiod_infra=('gpsdo-monitor',), clients=())
+        orig = hardware.detect_gpsdo
+        hardware.detect_gpsdo = lambda: False
+        self.addCleanup(lambda: setattr(hardware, 'detect_gpsdo', orig))
+        checks = hardware.gate_checks(prof, False)
+        self.assertEqual(len(checks), 1)
+        self.assertIn('MVR', checks[0].label)
+        self.assertIs(checks[0].detected, False)
+
+    def test_legacy_lsusb_probe_sees_an_rp2040(self):
+        orig = hardware._lsusb
+        hardware._lsusb = lambda: 'Bus 001 Device 007: ID 2e8a:000a Seeed XIAO RP2040'
+        self.addCleanup(lambda: setattr(hardware, '_lsusb', orig))
+        self.assertTrue(hardware._gpsdo_present())
