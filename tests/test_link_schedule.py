@@ -12,6 +12,7 @@ import datetime as dt
 import importlib.machinery
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -488,3 +489,44 @@ class TestFollowVM(unittest.TestCase):
         self.assertTrue(cfg["enabled"])
         self.assertNotIn("followed_vm", cfg)
         self.assertEqual(self.calls, [])
+
+
+class TestFollowVMReviewFixes(TestFollowVM):
+    """Final review 2026-11-14: the host's own keys and limits hold."""
+
+    def test_vm_host_only_keys_never_leak(self):
+        self.host.write_text('follow_vm = 100\n')
+        cfg = m.read_settings(self.host, run=self.run_ok(), cache=self.cache)
+        self.assertEqual(cfg["rac_units"], list(m.DEFAULT_RAC_UNITS))
+
+    def test_follow_vm_inside_the_table_counts(self):
+        self.host.write_text('[link_schedule]\nenabled = false\nfollow_vm = 100\n')
+        cfg = m.read_settings(self.host, run=self.run_ok(), cache=self.cache)
+        self.assertEqual(cfg["followed_vm"], 100)
+        self.assertTrue(cfg["enabled"])
+
+    def test_vm_cannot_lift_the_hosts_ceiling(self):
+        cfg = m.read_settings(self.host, run=self.run_ok(self.VM_TOPO + 'max_suspend_hours = 60\n'),
+                              cache=self.cache)
+        self.assertEqual(cfg["max_suspend_hours"], 6.0)
+
+    def test_failed_read_backs_off(self):
+        m.read_settings(self.host, run=self.run_down, cache=self.cache, now=1000)
+        m.read_settings(self.host, run=self.run_down, cache=self.cache, now=1100)
+        self.assertEqual(len(self.calls), 1)
+        m.read_settings(self.host, run=self.run_down, cache=self.cache, now=1000 + 301)
+        self.assertEqual(len(self.calls), 2)
+
+    def test_future_cache_is_not_fresh(self):
+        m.read_settings(self.host, run=self.run_ok(), cache=self.cache)
+        os.utime(self.cache, (4e9, 4e9))
+        m.read_settings(self.host, run=self.run_ok(), cache=self.cache)
+        self.assertEqual(len(self.calls), 2)
+
+    def test_status_names_followed_vm(self):
+        import contextlib, io
+        cfg = m.read_settings(self.host, run=self.run_ok(), cache=self.cache)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            m.cmd_status(cfg, False)
+        self.assertIn("following VM 100", out.getvalue())

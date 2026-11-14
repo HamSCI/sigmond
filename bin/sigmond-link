@@ -90,6 +90,14 @@ topology.toml (or, on a Proxmox host, which has none, /etc/sigmond/link.toml):
   probe_fail_count = 2         # unanswered rounds before a probe window closes
   max_suspend_hours   = 6
   rac_resume_hold_min = 30
+
+On a Proxmox host, /etc/sigmond/link.toml with `follow_vm = <vmid>` (top
+level) takes the VM's own [link_schedule] through the guest agent, re-read
+hourly and kept in /var/lib/sigmond/link-vm.toml (delete it to re-read now;
+after a failed read the copy is used for 5 min before the next try).  The
+host keeps its own gated_units, rac_units and probe_targets, and the VM can
+lower max_suspend_hours on the host but never raise it above the host's
+(default 6).  No answer and no copy: disabled, tunnels run.
 """
 from __future__ import annotations
 
@@ -158,10 +166,15 @@ def fmt(t: dt.datetime | None) -> str:
 
 VM_CACHE = Path("/var/lib/sigmond/link-vm.toml")
 HOST_ONLY_KEYS = ("gated_units", "rac_units", "probe_targets")
+# The VM may lower these on the host, never raise them (final review 2026-11-14:
+# a typo in the VM must not keep the host's tunnels down for days).
+HOST_CEILINGS = {"max_suspend_hours": 6.0}
+VM_RETRY_S = 300          # after a failed read, the cached copy for this long
+VM_REFRESH_S = 3600       # a good copy is re-read after this long
 
 
 def vm_link_schedule(vmid: int, run=subprocess.run, cache: Path = VM_CACHE,
-                     now: float | None = None, refresh_s: float = 21600) -> dict | None:
+                     now: float | None = None, refresh_s: float = VM_REFRESH_S) -> dict | None:
     """The VM's [link_schedule] table, read through the guest agent and kept in
     ``cache`` (the VM's whole topology.toml); the cached copy when the VM or its
     agent is down or answers with bad TOML; None when there is neither.  An
@@ -173,11 +186,23 @@ def vm_link_schedule(vmid: int, run=subprocess.run, cache: Path = VM_CACHE,
     def from_text(text):
         return tomllib.loads(text).get("link_schedule") or {}
 
+    failed = cache.with_name(f".{cache.name}.failed")
+
+    def fresh(p, within):
+        try:
+            return p.exists() and 0 <= now - p.stat().st_mtime < within
+        except OSError:
+            return False
     try:
-        if cache.exists() and now - cache.stat().st_mtime < refresh_s:
+        if fresh(cache, refresh_s):
             return from_text(cache.read_text())
     except (OSError, ValueError):
         pass
+    if fresh(failed, VM_RETRY_S):
+        try:
+            return from_text(cache.read_text())
+        except (OSError, ValueError):
+            return None
     try:
         p = run(["qm", "guest", "exec", str(int(vmid)), "--timeout", "15", "--",
                  "cat", "/etc/sigmond/topology.toml"], capture_output=True, text=True, timeout=30)
@@ -189,12 +214,19 @@ def vm_link_schedule(vmid: int, run=subprocess.run, cache: Path = VM_CACHE,
         text = res.get("out-data", "")
         table = from_text(text)                      # raises on bad TOML: keep the cache
         cache.parent.mkdir(parents=True, exist_ok=True)
-        tmp = cache.with_name(f".{cache.name}.new")
+        tmp = cache.with_name(f".{cache.name}.new.{os.getpid()}")
         tmp.write_text(text)
         os.chmod(tmp, 0o644)
         os.replace(tmp, cache)
+        failed.unlink(missing_ok=True)
         return table
     except Exception as e:  # noqa: BLE001 -- fail open: never block on the VM
+        try:
+            failed.parent.mkdir(parents=True, exist_ok=True)
+            failed.touch()
+            os.utime(failed, (now, now))
+        except OSError:
+            pass
         _log(f"following VM {vmid}: cannot read its topology.toml ({type(e).__name__}: {e}); "
              f"using the cached copy" if cache.exists() else
              f"following VM {vmid}: cannot read its topology.toml ({type(e).__name__}: {e}) "
@@ -206,7 +238,7 @@ def vm_link_schedule(vmid: int, run=subprocess.run, cache: Path = VM_CACHE,
 
 
 def read_settings(path: Path | None = None, run=subprocess.run, cache: Path = VM_CACHE,
-                  now: float | None = None, refresh_s: float = 21600) -> dict:
+                  now: float | None = None, refresh_s: float = VM_REFRESH_S) -> dict:
     cfg = {"enabled": False, "source": "usap", "satellites": "all", "margin_min": 0.0,
            "refresh_hours": 6.0, "max_age_days": 8.0, "gated_units": list(DEFAULT_GATED),
            "rac_suspend": True, "rac_units": list(DEFAULT_RAC_UNITS),
@@ -221,7 +253,10 @@ def read_settings(path: Path | None = None, run=subprocess.run, cache: Path = VM
                 doc = tomllib.load(fh)
         except FileNotFoundError:
             continue
-        ls, follow = doc.get("link_schedule"), doc.get("follow_vm")
+        ls = doc.get("link_schedule")
+        # follow_vm belongs at the top, but a line appended below the table
+        # lands inside it; take it there too (final review 2026-11-14).
+        follow = doc.get("follow_vm", (ls or {}).get("follow_vm"))
         if ls is not None or follow is not None:
             break
     if follow is not None:
@@ -230,8 +265,12 @@ def read_settings(path: Path | None = None, run=subprocess.run, cache: Path = VM
         host = ls or {}
         ls = dict(vm_link_schedule(int(follow), run, cache, now, refresh_s) or {})
         for k in HOST_ONLY_KEYS:
+            ls.pop(k, None)                  # never the VM's units or targets
             if k in host:
                 ls[k] = host[k]
+        for k, dflt in HOST_CEILINGS.items():
+            cap = float(host.get(k, dflt))
+            ls[k] = min(float(ls.get(k, cap)), cap)
         cfg["followed_vm"] = int(follow)
     if not ls:
         return cfg
@@ -563,6 +602,13 @@ def cmd_status(cfg: dict, as_json: bool) -> int:
         return 0
     print(f"link schedule  {'enabled' if cfg['enabled'] else 'disabled'} (source {cfg['source']})"
           + (f", following VM {cfg['followed_vm']}" if cfg.get("followed_vm") else ""))
+    if cfg.get("followed_vm"):
+        try:
+            got = dt.datetime.fromtimestamp(VM_CACHE.stat().st_mtime, UTC).replace(microsecond=0)
+            print(f"VM {cfg['followed_vm']} copy     read {fmt(got)}; re-read hourly "
+                  f"(delete {VM_CACHE} to re-read now)")
+        except OSError:
+            print(f"VM {cfg['followed_vm']} copy     none yet (the VM has not answered)")
     print(f"now            {fmt(t)}")
     print(f"link           {'UP' if st['up'] else 'DOWN'}  ({st['reason']})")
     if st["until"]:
