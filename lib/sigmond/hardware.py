@@ -389,11 +389,17 @@ class GateCheck:
     ``detected`` is the same tri-state bring-up prints: True (present /
     ✓), False (MISSING / ✗ — hard-stops under ``--require-hardware``),
     None (unconfirmed / ?).  ``hint`` is the operator fix-it line.
+
+    ``advisory`` rows carry advice, not a requirement: bring-up prints the
+    hint and never fails ``--require-hardware`` on them.  Standing rule:
+    GPSDO location, else typed grid -- a GPSDO that disciplines the RX888
+    but publishes no position must not block a station that has a grid.
     """
 
     label: str
     detected: Optional[bool]
     hint: str
+    advisory: bool = False
 
     @property
     def presence(self) -> Presence:
@@ -429,11 +435,12 @@ def gate_checks(prof, local: bool) -> list:
                                     'located' if grid else 'locked'))
             if not grid:
                 # Disciplined, but not located: an MVR GPSDO B gives position
-                # only in NMEA passthrough.  Say that (a warning row, never a
-                # hardware MISSING) instead of "connect the antenna".
+                # only in NMEA passthrough.  Say that in an advisory row --
+                # never a hardware MISSING, never a --require-hardware stop --
+                # instead of "connect the antenna".
                 advice = [a for a in gpsdo_advisories() if 'position' in a]
                 checks.append(GateCheck(
-                    'GPSDO position', None,
+                    'GPSDO position', None, advisory=True, hint=
                     advice[0] if advice else
                     'the GPSDO reports a fix but no position; set the station '
                     'grid by hand (smd config identity --grid ...) or enable its position '

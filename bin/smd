@@ -11045,12 +11045,20 @@ def _bringup_hardware_gate(prof, local: bool, require: bool) -> bool:
     # sigmond.hardware.gate_checks so the TUI wizard reports the identical
     # verdict.  Printing + the abort decision stay here.
     from sigmond.hardware import gate_checks
-    checks = [(c.label, c.detected, c.hint) for c in gate_checks(prof, local)]
+    # Advisory rows (e.g. a GPSDO with a fix but no position) print their
+    # advice and never count toward the --require-hardware stop.
+    checks = [(c.label, c.detected, c.hint, getattr(c, 'advisory', False))
+              for c in gate_checks(prof, local)]
     if not checks:
         return True
     _heading('required external devices')
     missing = []
-    for label, det, hint in checks:
+    advice = []
+    for label, det, hint, advisory in checks:
+        if advisory:
+            print(f'  \033[33m!\033[0m  {label:<24} advisory')
+            advice.append((label, hint))
+            continue
         mark = ('\033[32m✓\033[0m' if det is True
                 else '\033[31m✗\033[0m' if det is False else '\033[33m?\033[0m')
         state = ('present' if det is True
@@ -11058,6 +11066,8 @@ def _bringup_hardware_gate(prof, local: bool, require: bool) -> bool:
         print(f'  {mark}  {label:<24} {state}')
         if det is not True:
             missing.append((label, hint))
+    for label, hint in advice:
+        _warn(f'{label}: {hint}')
     if missing:
         for label, hint in missing:
             (_err if require else _warn)(f'{label}: {hint}')
@@ -11801,7 +11811,7 @@ def cmd_bringup(args) -> int:
         # The dashboard has nothing to show without the sensor; same gate.
         dormant.add('gmag-webui')
     if 'gpsdo-monitor' in prof.local_radiod_infra and not _detect_gpsdo():
-        _warn('no Leo Bodnar GPSDO on the bus — gpsdo-monitor installs DORMANT, '
+        _warn('no GPSDO (Leo Bodnar or MVR) on the bus — gpsdo-monitor installs DORMANT, '
               'and the RX888 runs UNDISCIPLINED: WSPR / PSK / GRAPE (hf-timestd) '
               'frequency accuracy is degraded until a GPSDO is attached.')
         dormant.add('gpsdo-monitor')
