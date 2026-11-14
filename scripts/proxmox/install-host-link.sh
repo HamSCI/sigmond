@@ -12,26 +12,36 @@
 # Inert until /etc/sigmond/link.toml says enabled = true.
 set -euo pipefail
 SRC="$(cd "$(dirname "$0")/../.." && pwd)"
+# SIGMOND_ROOT: a prefix for the tests (tests/test_install_host_link.py); empty on a host.
+R="${SIGMOND_ROOT:-}"
+# VMID: the decoder VM this host follows (firstboot and pm-align pass it).
+VMID="${VMID:-}"
 
-install -m 0755 "$SRC/bin/sigmond-link" /usr/local/sbin/sigmond-link
+mkdir -p "$R/usr/local/sbin" "$R/etc/systemd/system" "$R/etc/sigmond"
+install -m 0755 "$SRC/bin/sigmond-link" "$R/usr/local/sbin/sigmond-link"
 for u in sigmond-link.service sigmond-link.timer sigmond-link-rac.service sigmond-link-rac.timer; do
-    install -m 0644 "$SRC/systemd/$u" "/etc/systemd/system/$u"
+    install -m 0644 "$SRC/systemd/$u" "$R/etc/systemd/system/$u"
 done
 command -v pdftotext >/dev/null 2>&1 \
     || DEBIAN_FRONTEND=noninteractive apt-get install -y -q poppler-utils >/dev/null 2>&1 \
-    || echo "WARNING: poppler-utils not installed: sigmond-link cannot read the USAP schedule" >&2
-mkdir -p /etc/sigmond
-if [[ ! -f /etc/sigmond/link.toml ]]; then
-    cat > /etc/sigmond/link.toml <<'EOF'
-# sigmond-link on this Proxmox host (the VM reads its own topology.toml).
-# See `sigmond-link --help` and HamSCI/sigmond tasks/plan-constrained-link-delivery.md.
-[link_schedule]
-enabled = false          # true at a site whose link follows a published schedule
-# Host jobs that only reach the internet; skipped during a gap.
-gated_units = ["apt-daily.service", "apt-daily-upgrade.service"]
-EOF
+    || echo "WARNING: poppler-utils not installed: sigmond-link cannot read the USAP schedule (probe mode still works)" >&2
+if [[ ! -f "$R/etc/sigmond/link.toml" ]]; then
+    {
+        echo "# sigmond-link on this Proxmox host.  See \`sigmond-link --help\` and"
+        echo "# HamSCI/sigmond tasks/plan-constrained-link-delivery.md."
+        if [[ -n "$VMID" ]]; then
+            echo "# follow_vm: this host takes VM $VMID's [link_schedule] (its /etc/sigmond/topology.toml)"
+            echo "# through the guest agent, so turning the guard on in the VM covers the host too."
+            echo "# Only the host-only keys below (gated_units, rac_units, probe_targets) stay the host's."
+            echo "follow_vm = $VMID"
+        fi
+        echo "[link_schedule]"
+        [[ -z "$VMID" ]] && echo "enabled = false          # true at a site whose link follows a published schedule"
+        echo "# Host jobs that only reach the internet; skipped during a gap."
+        echo 'gated_units = ["apt-daily.service", "apt-daily-upgrade.service"]'
+    } > "$R/etc/sigmond/link.toml"
 fi
 systemctl daemon-reload
 systemctl enable --now sigmond-link.timer sigmond-link-rac.timer
-/usr/local/sbin/sigmond-link apply || true
-echo "sigmond-link installed on $(hostname); $(grep -E '^enabled' /etc/sigmond/link.toml)"
+[[ -z "$R" ]] && { /usr/local/sbin/sigmond-link apply || true; }
+echo "sigmond-link installed on $(hostname)$([[ -n "$VMID" ]] && echo ", following VM $VMID")"
