@@ -28,7 +28,7 @@ def files(tmp_path, monkeypatch):
     monkeypatch.setattr(C, "ARCHIVER_STATUS", s)
     monkeypatch.setattr(C, "PRUNE_UNIT_FILES", lambda: sorted(d.glob("*")))
     state = {"m": "mounted"}
-    monkeypatch.setattr(C, "_archive_mount_state", lambda uuid: state["m"])
+    monkeypatch.setattr(C, "_archive_mount_state", lambda uuid, mount=None: state["m"])
     t.write_text('uuid = "u"\nmount = "/var/lib/sigmond/archive"\n')
     h.write_text(json.dumps({"baseline": _r(), "latest": _r()}))
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -119,3 +119,14 @@ def test_no_drive_no_line(tmp_path, monkeypatch):
     monkeypatch.setattr(C, "ARCHIVE_TOML", tmp_path / "none.toml")
     monkeypatch.setattr(C, "_archive_label_device", lambda: None)
     assert C.archive_line(None) is None
+
+
+def test_mount_state_reads_the_configured_mount(files, monkeypatch):
+    """KPH2 (2026-11-14): a drive set up by hand at /mnt/archive read as
+    'plugged in but not mounted' because the check looked at the default."""
+    seen = {}
+    monkeypatch.setattr(C, "_archive_mount_state",
+                        lambda uuid, mount=None: seen.setdefault("mount", mount) and "mounted")
+    files.toml.write_text('uuid = "u"\nmount = "/mnt/archive"\n')
+    C.archive_line(None)
+    assert str(seen["mount"]) == "/mnt/archive"

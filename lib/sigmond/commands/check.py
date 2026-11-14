@@ -975,9 +975,9 @@ def PRUNE_UNIT_FILES() -> List[Path]:
     return [base / 'timestd-prune.service', *sorted(base.glob('timestd-prune.service.d/*.conf'))]
 
 
-def _archive_mount_state(uuid: str) -> str:
+def _archive_mount_state(uuid: str, mount: Optional[str] = None) -> str:
     from .. import archive as ar
-    return ar.mount_state(uuid)
+    return ar.mount_state(uuid, mount=Path(mount) if mount else None)
 
 
 def _json_file(p: Path) -> dict:
@@ -1023,7 +1023,7 @@ def archive_line(env: Env) -> Optional[Line]:
                     f'{RUN}smd archive add --device {_whole_disk(part)} re-attaches it and keeps its data')
     fail, warn = [], []
     mount = str(cfg.get('mount', '/var/lib/sigmond/archive'))
-    state = _archive_mount_state(str(cfg.get('uuid', '')))
+    state = _archive_mount_state(str(cfg.get('uuid', '')), mount)
     if state == 'present':
         warn.append(f'the drive is plugged in but not mounted.  {RUN}sudo mount {mount}')
     elif state == 'absent':

@@ -699,7 +699,7 @@ def _health_refresh() -> int:
         doc = json.loads(HEALTH.read_text())
     except (OSError, ValueError):
         doc = {}
-    state = ar.mount_state(str(cfg["uuid"]))
+    state = ar.mount_state(str(cfg["uuid"]), mount=_cfg_mount(cfg))
     doc["latest_state"] = state
     if state != "absent":
         disk = _drive_disk(cfg)
@@ -777,6 +777,12 @@ def _eject() -> int:
 
 # ---------------------------------------------------------------- status / remove
 
+def _cfg_mount(cfg) -> Path:
+    """The drive's mount point as archive.toml names it (KPH2's is /mnt/archive,
+    set up by hand); add's own default otherwise."""
+    return Path(str(cfg.get("mount") or ar.MOUNT))
+
+
 def _config() -> Dict[str, object]:
     try:
         import tomllib
@@ -805,7 +811,7 @@ def _status() -> int:
         return 0
     _say(f"  drive    {cfg.get('model') or '?'}  serial {cfg.get('serial') or '?'}"
          f"  disk {cfg.get('disk_serial') or '?'}  UUID {cfg.get('uuid')}  added {cfg.get('added_utc')}")
-    state = ar.mount_state(str(cfg.get('uuid', '')))
+    state = ar.mount_state(str(cfg.get('uuid', '')), mount=_cfg_mount(cfg))
     health = _json(HEALTH)
     if health.get('latest'):
         latest = H.reading_from_dict(health['latest'])
