@@ -138,6 +138,17 @@ from sigmond import sdr_events  # noqa: E402
 from sigmond import usb_hubs  # noqa: E402
 from sigmond.radiod_ready import READY_SETTLE_S  # noqa: E402
 
+# tomllib is Python 3.11+.  These helpers run under the system python3 (they
+# are symlinked into /usr/local/sbin, not re-exec'd into the venv like smd),
+# which is 3.10 on Ubuntu 22.04: fall back to tomli (apt python3-tomli).
+try:
+    import tomllib
+except ModuleNotFoundError:  # py<3.11
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ModuleNotFoundError:
+        tomllib = None  # type: ignore[assignment]  # callers treat config as absent
+
 # The card blips off the bus for a second or two whenever it re-enumerates —
 # including during its own recovery.  Cycling inside that window would
 # interrupt the very thing we are waiting for.
@@ -930,7 +941,6 @@ def log_on_change(state: dict, msg: str) -> None:
 
 def read_config() -> dict:
     try:
-        import tomllib
         with CONFIG_PATH.open("rb") as fh:
             return tomllib.load(fh).get("radiod", {})
     except Exception as exc:
