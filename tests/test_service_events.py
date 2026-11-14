@@ -152,3 +152,22 @@ def test_status_written_atomically_0644(tmp_path):
     assert json.loads(p.read_text())["generated_at"] == "x"
     assert stat.S_IMODE(os.stat(p).st_mode) == 0o644
     assert not list(p.parent.glob(".*tmp*"))
+
+
+# ---------------------------------------------------------------- Task 3 (smd status)
+
+def test_status_lists_only_eventful_units():
+    doc = {"generated_at": "2026-11-14T10:00:00Z", "error": None, "global_oom": [
+               {"utc": "2026-11-14T09:00:00Z", "unit": "sshd.service", "task": "sshd"}],
+           "units": {
+               "quiet.service": {"auto_restarts": 0, "manual_restarts": 0, "memcg_oom": 0,
+                                 "unexpected_exits": 0, "last_utc": None, "peak_bytes": 10**8,
+                                 "max_bytes": 10**9, "peak_pct": 10.0},
+               "psk-recorder@A.service": {"auto_restarts": 2, "manual_restarts": 1, "memcg_oom": 1,
+                                          "unexpected_exits": 1, "last_utc": "2026-11-14T09:30:00Z",
+                                          "peak_bytes": 2_900_000_000, "max_bytes": 3_221_225_472,
+                                          "peak_pct": 90.0}}}
+    out = "\n".join(S.status_lines(doc))
+    assert "psk-recorder@A.service" in out and "quiet.service" not in out
+    assert "whole-machine" in out and "sshd.service" in out
+    assert S.status_lines({"generated_at": "x", "units": {}, "global_oom": [], "error": None}) == []

@@ -18056,6 +18056,13 @@ def cmd_status(args) -> int:
                   f'`smd adopt --dry-run <name>` reads the same picture.')
         except Exception:
             pass
+        # Restarts and memory kills (sigmond-service-events.timer's file).
+        try:
+            from sigmond import service_events as _se
+            for _line in _se.status_lines(_se.read_status()):
+                print(_line)
+        except Exception:
+            pass
 
     print()
     return 1 if any_bad else 0

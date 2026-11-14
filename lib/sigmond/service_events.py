@@ -186,3 +186,30 @@ def read_status(path: Path = STATUS_PATH, now: Optional[float] = None) -> Option
     except (OSError, ValueError, KeyError, TypeError):
         return None
     return doc if abs(now - t) <= STALE_S else None
+
+
+def status_lines(doc: Optional[dict]) -> List[str]:
+    """`smd status`'s section: only units with an event or a peak above
+    PEAK_WARN_PCT, plus any whole-machine OOM kills; [] when all is quiet."""
+    if not doc:
+        return []
+    rows = []
+    for name, u in sorted((doc.get("units") or {}).items()):
+        pct = u.get("peak_pct")
+        eventful = any(u.get(k) for k in ("auto_restarts", "manual_restarts", "memcg_oom",
+                                           "unexpected_exits"))
+        if not eventful and not (pct is not None and pct > PEAK_WARN_PCT):
+            continue
+        mem = (f"{round(u['peak_bytes'] / 2**20)}/{round(u['max_bytes'] / 2**20)} MB ({pct:.0f} %)"
+               if pct is not None else "-")
+        rows.append(f"  {name:<36} {u.get('auto_restarts', 0):>4} {u.get('manual_restarts', 0):>6}"
+                    f" {u.get('memcg_oom', 0):>5}  {u.get('last_utc') or '-':<20} {mem}")
+    glob = doc.get("global_oom") or []
+    if not rows and not glob:
+        return []
+    out = ["", "service events (24 h)",
+           f"  {'unit':<36} {'auto':>4} {'manual':>6} {'oom':>5}  {'last (UTC)':<20} memory peak/cap"]
+    out += rows
+    for g in glob:
+        out.append(f"  whole-machine OOM {g.get('utc')}: killed {g.get('unit')} ({g.get('task')})")
+    return out

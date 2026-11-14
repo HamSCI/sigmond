@@ -57,6 +57,7 @@ CHECK_META = {
     'bring-up':          ('platform.bringup', 'platform', None),
     'storage':           ('platform.storage', 'platform', None),
     'archive':           ('platform.archive', 'platform', None),
+    'services':          ('platform.services', 'platform', None),
     'magnetometer':      ('sensor.magnetometer', 'sensor', 'mag-recorder'),
     'PSK':               ('decode.psk', 'decode', 'psk-recorder'),
     'WSPR':              ('decode.wspr', 'decode', 'wspr-recorder'),
@@ -1052,6 +1053,48 @@ def archive_line(env: Env) -> Optional[Line]:
 
 
 # ---------------------------------------------------------------------------
+# Restarts and memory kills (docs/superpowers/plans/2026-11-14-restart-oom-reporting.md)
+# ---------------------------------------------------------------------------
+
+SERVICE_EVENTS = Path('/run/sigmond/service-events.json')
+
+
+def services_line(env: Env) -> Line:
+    """Reads the root timer's file, never the journal (hamsci cannot read
+    PID 1 or kernel lines)."""
+    from .. import service_events as se
+    label = 'services'
+    ascii_ = lambda s: s.encode('ascii', 'replace').decode()
+    doc = se.read_status(SERVICE_EVENTS)
+    if doc is None:
+        return Line(WAIT, label, 'restarts and memory kills not collected yet '
+                                 '(sigmond-service-events.timer runs every 5 min)')
+    if doc.get('error'):
+        return Line(WAIT, label, ascii_(f'service events could not be read: {doc["error"]}'))
+    glob = doc.get('global_oom') or []
+    if glob:
+        victims = sorted({g.get('unit', '-') for g in glob})
+        return Line(FAIL, label, ascii_(
+            f'the machine ran out of memory {len(glob)} time(s) in 24 h; killed: '
+            f'{", ".join(victims)} (last {glob[-1].get("utc")}).  Tell the fleet admin.'))
+    warns, manual = [], 0
+    for name, u in sorted((doc.get('units') or {}).items()):
+        manual += u.get('manual_restarts', 0)
+        if u.get('memcg_oom'):
+            warns.append(f'{name}: {u["memcg_oom"]} memory kill(s) at its cap')
+        if u.get('auto_restarts', 0) > se.RESTART_STORM:
+            warns.append(f'{name}: {u["auto_restarts"]} automatic restarts')
+        pct = u.get('peak_pct')
+        if pct is not None and pct > se.PEAK_WARN_PCT:
+            warns.append(f'{name}: memory peak {round(u["peak_bytes"] / 2**20)} of '
+                         f'{round(u["max_bytes"] / 2**20)} MB ({pct:.0f} %)')
+    if warns:
+        return Line(WAIT, label, ascii_('; '.join(warns)))
+    return Line(OK, label, f'no restarts or memory kills in 24 h'
+                           + (f' ({manual} manual restarts)' if manual else ''))
+
+
+# ---------------------------------------------------------------------------
 # Uploads
 # ---------------------------------------------------------------------------
 
@@ -1325,6 +1368,7 @@ CHECKS: List[Tuple[str, Callable[[Env], Optional[Line]]]] = [
     ('GRAPE', grape_line),
     ('storage', storage_line),
     ('archive', archive_line),
+    ('services', services_line),
     ('topology', topology_line),
     ('uploads', uploads_line),
     ('meteor scatter', meteor_line),
