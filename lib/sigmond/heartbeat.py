@@ -613,7 +613,36 @@ def _map_resources(raw) -> dict:
             verdict, reason = s_verdict, s_note
         elif s_verdict != "VALID" and s_verdict == verdict:
             reason = f"{reason}; {s_note}"
+
+    # Restarts and memory kills (sigmond-service-events.timer).  Same rule as
+    # the storage ledger: an absent key adds nothing; None (missing or stale)
+    # is INDETERMINATE, never VALID.
+    if "services" in raw:
+        v_verdict, v_note = _services_verdict(raw["services"])
+        if isinstance(raw["services"], dict):
+            data["services"] = raw["services"]
+        if PRECEDENCE[v_verdict] > PRECEDENCE[verdict]:
+            verdict, reason = v_verdict, v_note
+        elif v_verdict != "VALID" and v_verdict == verdict:
+            reason = f"{reason}; {v_note}"
     return _block(verdict, reason, data)
+
+
+def _services_verdict(doc) -> tuple:
+    from .service_events import PEAK_WARN_PCT, RESTART_STORM
+    if not isinstance(doc, dict):
+        return "INDETERMINATE", "service events missing, unreadable or stale"
+    if doc.get("global_oom"):
+        return "INVALID", f"the machine ran out of memory {len(doc['global_oom'])} time(s) in 24 h"
+    hits = []
+    for name, u in sorted((doc.get("units") or {}).items()):
+        pct = u.get("peak_pct")
+        if (u.get("memcg_oom") or u.get("auto_restarts", 0) > RESTART_STORM
+                or (pct is not None and pct > PEAK_WARN_PCT)):
+            hits.append(name)
+    if hits:
+        return "INCONCLUSIVE", f"memory kills, restart storms or near-cap memory: {', '.join(hits)}"
+    return "VALID", "no restarts or memory kills"
 
 
 _STORAGE_VERDICT = {
@@ -986,7 +1015,13 @@ def _read_resources() -> dict:
         raise ReaderUnavailable("local_resources probe returned nothing")
     fields = dict(observations[0].fields)
     _add_storage(fields)
+    fields["services"] = _read_service_events()
     return fields
+
+
+def _read_service_events(path=None, now=None) -> Optional[dict]:
+    from . import service_events
+    return service_events.read_status(path or service_events.STATUS_PATH, now)
 
 
 STORAGE_TIMER = "sigmond-storage.timer"
