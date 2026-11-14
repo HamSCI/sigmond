@@ -1087,7 +1087,7 @@ def services_line(env: Env) -> Line:
         pct = u.get('peak_pct')
         if pct is not None and pct > se.PEAK_WARN_PCT:
             warns.append(f'{name}: memory peak {round(u["peak_bytes"] / 2**20)} of '
-                         f'{round(u["max_bytes"] / 2**20)} MB ({pct:.0f} %)')
+                         f'{round(u["max_bytes"] / 2**20)} MB ({pct:.0f} %) since it last started')
     if warns:
         return Line(WAIT, label, ascii_('; '.join(warns)))
     return Line(OK, label, f'no restarts or memory kills in 24 h'

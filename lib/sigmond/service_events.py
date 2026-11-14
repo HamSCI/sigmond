@@ -48,9 +48,15 @@ def _utc(t: float) -> str:
 
 
 def _unit_of_memcg(path: str) -> str:
+    """The service a cgroup path belongs to.  Template instances sit one
+    level down, in their own slice: /system.slice/system-wspr\\x2drecorder.slice/
+    wspr-recorder@X.service, so take the last .service component."""
     parts = [p for p in path.split("/") if p]
-    if len(parts) >= 2 and parts[0] == "system.slice":
-        return parts[1]
+    if not parts or parts[0] != "system.slice":
+        return "-"
+    for p in reversed(parts):
+        if p.endswith(".service"):
+            return p
     return "-"
 
 
@@ -118,11 +124,29 @@ def parse_events(lines: Iterable[str], now: float, window_s: int = WINDOW_S
     return units, glob
 
 
+def _service_dirs(cgroup_root: Path) -> Dict[str, Path]:
+    """Every *.service cgroup under system.slice, template instances (one
+    slice down) included."""
+    out: Dict[str, Path] = {}
+    try:
+        for d in Path(cgroup_root).rglob("*.service"):
+            if d.is_dir():
+                out.setdefault(d.name, d)
+    except OSError:
+        pass
+    return out
+
+
 def memory_headroom(units: Iterable[str], cgroup_root: Path = CGROUP_ROOT
                     ) -> Dict[str, Tuple[int, Optional[int]]]:
+    """(memory.peak, memory.max) per unit.  memory.peak is the high-water
+    mark since the service last started, page cache included."""
     out = {}
+    dirs = _service_dirs(cgroup_root)
     for unit in units:
-        d = Path(cgroup_root) / unit
+        d = dirs.get(unit)
+        if d is None:
+            continue
         try:
             peak = int((d / "memory.peak").read_text().strip())
             mx = (d / "memory.max").read_text().strip()
@@ -133,12 +157,14 @@ def memory_headroom(units: Iterable[str], cgroup_root: Path = CGROUP_ROOT
 
 
 def _capped_units(cgroup_root: Path) -> List[str]:
-    try:
-        return sorted(p.name for p in Path(cgroup_root).iterdir()
-                      if p.name.endswith(".service") and (p / "memory.max").exists()
-                      and (p / "memory.max").read_text().strip() != "max")
-    except OSError:
-        return []
+    out = []
+    for name, d in _service_dirs(cgroup_root).items():
+        try:
+            if (d / "memory.max").read_text().strip() != "max":
+                out.append(name)
+        except OSError:
+            pass
+    return sorted(out)
 
 
 def collect(now: float, run=subprocess.run, cgroup_root: Path = CGROUP_ROOT,
@@ -146,8 +172,15 @@ def collect(now: float, run=subprocess.run, cgroup_root: Path = CGROUP_ROOT,
     doc = {"generated_at": _utc(now), "window_h": WINDOW_S // 3600, "units": {},
            "global_oom": [], "error": None}
     try:
+        # Filtered at the source: PID 1 lines with one of the four message
+        # ids (same-field matches OR, different fields AND), or kernel lines;
+        # only the fields parse_events reads.  A busy station logs tens of
+        # thousands of PID 1 lines a day.
         p = run(["journalctl", "-o", "json", "--no-pager", "--since", "-24h",
-                 "_PID=1", "+", "_TRANSPORT=kernel"],
+                 "--output-fields=MESSAGE,MESSAGE_ID,UNIT,JOB_TYPE,EXIT_CODE,EXIT_STATUS,_TRANSPORT",
+                 "_PID=1", f"MESSAGE_ID={MSG_RESTART_SCHEDULED}", f"MESSAGE_ID={MSG_STOPPING}",
+                 f"MESSAGE_ID={MSG_EXITED}", f"MESSAGE_ID={MSG_FAILED}",
+                 "+", "_TRANSPORT=kernel"],
                 capture_output=True, text=True, timeout=60)
         if p.returncode != 0:
             raise RuntimeError((p.stderr or "").strip()[:200] or f"journalctl exited {p.returncode}")

@@ -36,8 +36,10 @@ The service reached its memory limit and was restarted.  Its data has gaps at ea
 **wait: `<service>: N automatic restarts`**
 More than 3 crashes in 24 hours.  `journalctl -u <service>` (with sudo) shows why.
 
-**wait: `<service>: memory peak X of Y MB (Z %)`**
-The service has come within 15 % of its memory cap and is at risk of being killed.
+**wait: `<service>: memory peak X of Y MB (Z %) since it last started`**
+Since the service last started, it has come within 15 % of its memory cap and is at risk of
+being killed.  The peak includes file cache charged to the service, and it only resets when the
+service restarts.
 
 **wait: `restarts and memory kills not collected yet`** or **`could not be read`**
 The timer has not run since boot, or the journal could not be read.  It runs every 5 minutes.

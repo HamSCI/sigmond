@@ -171,3 +171,38 @@ def test_status_lists_only_eventful_units():
     assert "psk-recorder@A.service" in out and "quiet.service" not in out
     assert "whole-machine" in out and "sshd.service" in out
     assert S.status_lines({"generated_at": "x", "units": {}, "global_oom": [], "error": None}) == []
+
+
+# ---------------------------------------------------------------- final-review fixes
+
+WSPR = "wspr-recorder@AI6VN-1.service"
+WSPR_CG = "/system.slice/system-wspr\\x2drecorder.slice/" + WSPR
+
+
+def test_template_memcg_maps_to_instance():
+    units, glob = S.parse_events([kernel_oom(60, WSPR_CG)], NOW)
+    assert units[WSPR].memcg_oom == 1 and "system-wspr\\x2drecorder.slice" not in units
+
+
+def test_headroom_finds_template_instances(tmp_path):
+    d = tmp_path / "system-wspr\\x2drecorder.slice" / WSPR
+    d.mkdir(parents=True)
+    (d / "memory.peak").write_text("3500000000\n")
+    (d / "memory.max").write_text("4294967296\n")
+    assert S.memory_headroom([WSPR], cgroup_root=tmp_path)[WSPR] == (3_500_000_000, 4_294_967_296)
+    doc = S.collect(NOW, run=lambda *a, **k: subprocess.CompletedProcess(a, 0, "", ""),
+                    cgroup_root=tmp_path)
+    assert WSPR in doc["units"] and round(doc["units"][WSPR]["peak_pct"]) == 81
+
+
+def test_journal_filtered_at_source(tmp_path):
+    seen = {}
+
+    def run(argv, **kw):
+        seen["argv"] = argv
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    S.collect(NOW, run=run, cgroup_root=tmp_path, units=[])
+    a = seen["argv"]
+    for mid in (S.MSG_RESTART_SCHEDULED, S.MSG_STOPPING, S.MSG_EXITED):
+        assert f"MESSAGE_ID={mid}" in a
+    assert "_TRANSPORT=kernel" in a and any(x.startswith("--output-fields=") for x in a)

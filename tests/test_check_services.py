@@ -88,3 +88,8 @@ def test_text_ascii(status):
 def test_registered():
     assert ("services", C.services_line) in C.CHECKS
     assert C.CHECK_META["services"][0] == "platform.services"
+
+
+def test_peak_says_since_last_start(status):
+    status(_doc({"p.service": _u(peak_bytes=2_900_000_000, max_bytes=3_221_225_472, peak_pct=90.0)}))
+    assert "since it last started" in C.services_line(None).text

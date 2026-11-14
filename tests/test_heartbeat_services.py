@@ -54,3 +54,9 @@ def test_reader_reads_fresh_file(tmp_path, monkeypatch):
     p.write_text(json.dumps({**_svc(), "generated_at": t}))
     assert HB._read_service_events(path=p, now=now)["units"] == {}
     assert HB._read_service_events(path=p, now=now + 3600) is None
+
+
+def test_collect_error_indeterminate():
+    doc = {**_svc(), "error": "TimeoutExpired: journalctl"}
+    b = HB._map_resources(_raw(services=doc))
+    assert b["verdict"] == "INDETERMINATE" and "could not be read" in b["reason"]

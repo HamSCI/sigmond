@@ -632,6 +632,8 @@ def _services_verdict(doc) -> tuple:
     from .service_events import PEAK_WARN_PCT, RESTART_STORM
     if not isinstance(doc, dict):
         return "INDETERMINATE", "service events missing, unreadable or stale"
+    if doc.get("error"):
+        return "INDETERMINATE", f"service events could not be read: {doc['error']}"
     if doc.get("global_oom"):
         return "INVALID", f"the machine ran out of memory {len(doc['global_oom'])} time(s) in 24 h"
     hits = []
