@@ -22884,6 +22884,65 @@ def _spool_watch_instance(raw, client: str):
     return None if instance is None else _unit_instance(instance)
 
 
+# Directories under codar-sounder's data root (<root>/<radiod>/) that hold
+# something other than a transmitter's records.  The per-sweep phase series
+# lives in <radiod>/phase/ (codar_sounder.core.sigmondb.PhaseStore).
+_CODAR_NON_STATION_DIRS = frozenset({'phase'})
+
+
+def _codar_station_dirs(data_dir: Path) -> list:
+    """Transmitter (station) names under a codar-sounder radiod data dir."""
+    return sorted(p.name for p in data_dir.iterdir()
+                  if p.is_dir() and not p.name.startswith('.')
+                  and p.name not in _CODAR_NON_STATION_DIRS)
+
+
+def _pick_instance_with_data(client: str, instances: list, pattern: str,
+                             root: Optional[Path] = None,
+                             recursive: bool = False):
+    """Choose which active instance a watch tails.
+
+    Prefer instances whose resolved data dir (per-instance config status,
+    else the instance name) holds files matching ``pattern``, newest first;
+    ignore a stray ``default`` whenever another instance qualifies.  With
+    no data anywhere, take the first non-default instance, else the first.
+    Returns ``(chosen, other_qualifying_instances)``.  ``recursive`` looks
+    one level down, under station dirs (codar), never under ``phase``.
+    """
+    root = root if root is not None else Path(f'/var/lib/{client}')
+
+    def newest(inst: str) -> Optional[float]:
+        status = _radiod_status_from_per_instance_config(client, inst)
+        d = root / (status or inst)
+        try:
+            if recursive:
+                files = [f for st in _codar_station_dirs(d)
+                         for f in (d / st).rglob(pattern)]
+            else:
+                files = list(d.glob(pattern))
+            return max((f.stat().st_mtime for f in files), default=None)
+        except OSError:
+            return None
+
+    scored = [(i, newest(i)) for i in instances]
+    with_data = [(i, m) for i, m in scored if m is not None]
+    others_ok = [(i, m) for i, m in with_data if i != 'default']
+    pool = others_ok or with_data
+    if pool:
+        pool = sorted(pool, key=lambda im: im[1], reverse=True)
+        return pool[0][0], [i for i, _ in pool[1:]]
+    non_default = [i for i in instances if i != 'default']
+    return (non_default or instances)[0], []
+
+
+def _watch_pick_note(chosen: str, others: list) -> None:
+    if others:
+        _info(f'   ▸ several instances hold data; watching '
+              f'{_display_rid(chosen)} (also: '
+              f'{", ".join(_display_rid(o) for o in others)}; '
+              f'use --instance to pick)')
+
+
 def _watch_preflight(target_label: str, unit_pattern: str,
                      hint: str = '') -> int:
     """Check that at least one service matching ``unit_pattern`` is
@@ -25286,12 +25345,17 @@ def cmd_hfdl_watch(args) -> int:
             _err('no active hfdl-recorder@* service — is hfdl-recorder '
                  'running? (smd status hfdl-recorder)')
             return 1
-        unit = lines[0].split()[0]
-        try:
-            instance = unit.split('@', 1)[1].rsplit('.', 1)[0]
-        except IndexError:
-            _err(f'unexpected unit name: {unit}')
-            return 1
+        active = []
+        for line in lines:
+            unit = line.split()[0]
+            try:
+                active.append(unit.split('@', 1)[1].rsplit('.', 1)[0])
+            except IndexError:
+                _err(f'unexpected unit name: {unit}')
+                return 1
+        instance, _others = _pick_instance_with_data(
+            'hfdl-recorder', active, 'HFDL*.json')
+        _watch_pick_note(instance, _others)
 
     # Phase 6 (RADIOD-IDENTIFICATION.md §3.1): hfdl-recorder keys its
     # spool tree on the radiod's mDNS status name, NOT on the systemd
@@ -25597,12 +25661,17 @@ def cmd_codar_watch(args) -> int:
                   f'data dir anyway (records will only update once '
                   f'the service starts)')
         else:
-            unit = lines[0].split()[0]
-            try:
-                instance = unit.split('@', 1)[1].rsplit('.', 1)[0]
-            except IndexError:
-                _err(f'unexpected unit name: {unit}')
-                return 1
+            active = []
+            for line in lines:
+                unit = line.split()[0]
+                try:
+                    active.append(unit.split('@', 1)[1].rsplit('.', 1)[0])
+                except IndexError:
+                    _err(f'unexpected unit name: {unit}')
+                    return 1
+            instance, _others = _pick_instance_with_data(
+                'codar-sounder', active, '*.jsonl', recursive=True)
+            _watch_pick_note(instance, _others)
 
     # Phase 6 (RADIOD-IDENTIFICATION.md §3.1): codar-sounder keys its
     # spool tree on the radiod's mDNS status name, NOT on the systemd
@@ -25624,8 +25693,7 @@ def cmd_codar_watch(args) -> int:
     # subdirs — both are correct (the day's JSONL is the source of
     # truth for "did we ever produce anything").
     def _list_stations() -> list:
-        return sorted(p.name for p in data_dir.iterdir()
-                      if p.is_dir() and not p.name.startswith('.'))
+        return _codar_station_dirs(data_dir)
 
     stations = _list_stations()
     if not stations:
