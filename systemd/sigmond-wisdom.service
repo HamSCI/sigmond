@@ -29,6 +29,9 @@ TimeoutStartSec=infinity
 ExecStartPre=-/usr/local/bin/smd admin wisdom suspend
 # --auto: top up wisdom made here; plan fresh, discarding the old plans, when
 # it was made on another CPU, core type or L3 (final review, 2026-11-05).
+# A top-up measures only the small sizes fft.log lists; it never plans a large
+# forward transform (rof N >= 1000000, hours).  `smd admin wisdom status`
+# reports one, and `smd admin wisdom plan` is the explicit fix.
 ExecStart=/usr/local/bin/smd admin wisdom plan --auto
 # ExecStopPost, not ExecStartPost: systemd skips ExecStartPost when the
 # planner fails or refuses, which would leave the station stopped every boot.

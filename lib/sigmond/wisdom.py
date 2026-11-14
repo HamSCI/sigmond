@@ -508,7 +508,9 @@ def xhci_irqs_on(cpus, proc_interrupts: Path = Path('/proc/interrupts'),
 def adopt_legacy_wisdom(wisdom_file: Path, sidecar: Path, cpuinfo: Path,
                         bundle_dirs, appliance: bool) -> bool:
     """Judge a wisdom file that has no sidecar (the image bakes one; every
-    station that predates the sidecar has one).  True means current.
+    station that predates the sidecar has one).  True means adopted: the
+    caller then judges fft.log with wisdom_verdict(), so an adopted file can
+    still need a top-up.
 
     Image install: current as before, and a sidecar (adopted=legacy-image) is
     written so later checks have one.  ``placement`` stays out of that

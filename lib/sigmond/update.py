@@ -324,7 +324,7 @@ def plan_update(state: dict) -> list:
                    f'run does it — to measure it, stop the station and run '
                    f'`smd admin wisdom plan`',
             run_as='root',
-            verify='/var/lib/ka9q-radio/fft.log lists no rof entry'))
+            verify='`smd admin wisdom status` reports no large forward miss'))
 
     if needs_restart:
         actions.append(Action(

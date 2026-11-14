@@ -166,9 +166,50 @@ def test_non_adopted_top_up_excludes_the_big_forward(plan_env, monkeypatch):
 
 
 def test_update_reports_a_big_forward_and_names_the_explicit_fix():
-    from tests.test_update_plan import CLEAN, _state
+    from tests.test_update_plan import _state
     plan = __import__('sigmond.update', fromlist=['x']).plan_update(
         _state(wisdom_large_misses=['rof3240000']))
     (w,) = [a for a in plan if a.kind == 'wisdom']
     assert 'FFTW_ESTIMATE' in w.detail and 'smd admin wisdom plan' in w.detail
     assert [a for a in plan if a.kind == 'restart'] == []
+
+
+def test_a_top_up_verdict_does_not_block_applys_radiod_start(tmp_path, monkeypatch):
+    kw = _host(tmp_path, sidecar=ADOPTED, miss='cdb300\n')
+    _live(kw, monkeypatch)
+    assert smd._wisdom_verdict() == 'top-up'
+    assert smd._wisdom_blocks_radiod() is False
+    # apply's start and firmware-restart branch both hang on this one gate
+    src = (Path(__file__).parent.parent / 'bin' / 'smd').read_text()
+    assert 'wisdom_ready = not _wisdom_blocks_radiod(_WISDOM_FILE)' in src
+
+
+def test_fresh_or_missing_wisdom_still_blocks_radiod(tmp_path, monkeypatch):
+    _live(_host(tmp_path, sidecar=f'model={CXC}\nplanned_profiles=\n'), monkeypatch)
+    assert smd._wisdom_blocks_radiod() is True
+    _live(_host(tmp_path / 'x', sidecar=ADOPTED, wisdom_text=None)
+          if (tmp_path / 'x').mkdir() is None else None, monkeypatch)
+    assert smd._wisdom_blocks_radiod() is True
+
+
+def test_update_state_ignores_a_large_miss_the_sidecar_already_planned(tmp_path):
+    kw = _host(tmp_path, sidecar=f'model={B4}\nplanned_profiles=rof3240000\n',
+               miss='rof3240000\ncdb300\n')
+    assert wisdom.large_forward_misses(kw['sidecar'], kw['miss_log']) == []
+    assert wisdom.topup_misses(kw['sidecar'], kw['miss_log']) == ['cdb300']
+    src = (Path(__file__).parent.parent / 'bin' / 'smd').read_text()
+    assert "'wisdom_large_misses': large_forward_misses(" in src
+
+
+def test_the_big_forward_verify_string_can_pass():
+    from tests.test_update_plan import _state
+    from sigmond.update import plan_update
+    (w,) = [a for a in plan_update(_state(wisdom_large_misses=['rof3240000']))
+            if a.kind == 'wisdom']
+    assert 'fft.log lists no' not in w.verify and 'wisdom status' in w.verify
+
+
+def test_a_top_up_run_does_not_promise_hours(plan_env, monkeypatch, capsys):
+    _topup_env(plan_env, monkeypatch, ADOPTED, 'cdb300\n')
+    assert smd.cmd_wisdom_plan(_Auto()) == 0
+    assert 'can run for hours' not in capsys.readouterr().out
