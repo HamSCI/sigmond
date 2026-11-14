@@ -2238,6 +2238,24 @@ def cmd_config_upload(args) -> int:
             return 1
         if client in lowered:
             hold = "below upload"
+    # The hs-uploader gate follows the client's sink switch, not the env
+    # flag: --off holds (fill), --on releases (upload).  Set it first, so a
+    # failure leaves the flag as it stood.
+    try:
+        action, detail = upload.sync_client_sink(client, instance, on)
+    except upload.SinkSyncError as e:
+        err(str(e))
+        return 1
+    if action == "set":
+        info(f"sink switch {client}: {detail}")
+        if on and hold:
+            # The switch moved; ask again whether anything still holds it
+            # (the site switch may).
+            lowered, _why = _upload_on_lowered()
+            if lowered is not None and client not in lowered:
+                hold = None
+    elif action == "kept":
+        info(f"sink switch {client} stays fill: {detail}")
     try:
         kw = {"hold_level": hold} if hold else {}
         path, flag, dests, delivery_set = upload.apply_enable(

@@ -22072,6 +22072,13 @@ def _receiver_apply(receivers, *, profile_clients,
             env = _upload.env_path_for(client, rid, base=str(etc_root))
             if _upload.read_flag(env, _upload.UPLOAD_ENABLE[client][0]) == want:
                 continue          # already so; do not reset a chosen pipeline
+            try:
+                _upload.sync_client_sink(client, rid, bool(r.uploads),
+                                         base=str(etc_root))
+            except _upload.SinkSyncError as exc:
+                _err(f'{client}@{r.reporter_id}: {exc}')
+                rc = 1
+                continue
             _upload.apply_enable(client, rid, r.uploads, base=str(etc_root))
             _ok(f'{client}@{r.reporter_id}: upload '
                 f'{"on" if r.uploads else "off"}')
@@ -23778,12 +23785,12 @@ def cmd_verifier_watch(args) -> int:
     pass fetches the upload server's recent spot set and confirms our
     locally-produced spots round-trip cleanly.
 
-    Two verifiers exist today:
+    Two verifiers exist today, both observe-only:
 
-      * ``wsprnet-verifier`` (HTML scrape of wsprnet.org's olddb +
-        local pending_uploads cleanup)
       * ``wsprdaemon-verifier`` (parallel ClickHouse queries against
-        wd10/wd20/wd30; observe-only)
+        wd10/wd20/wd30)
+      * ``wsprnet-mirror-verifier`` (the wspr.rx mirror backstop, which
+        stamps the wsprnet audit)
 
     Both emit lines of the same shape::
 

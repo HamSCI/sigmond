@@ -185,6 +185,87 @@ def apply_enable(client: str, instance: str, on: bool, base: str = "/etc",
     return path, flag, dests, delivery_set
 
 
+class SinkSyncError(RuntimeError):
+    """The client's sink switch could not be read or set."""
+
+
+def sync_client_sink(client: str, instance: str, on: bool, base: str = "/etc",
+                     roots=None) -> "tuple[str, str]":
+    """Make the client's sink switch follow ``--on`` / ``--off``.
+
+    PSK_USE_HS_UPLOADER=0 is the bring-up hold: the station decodes and
+    stages rows, and nothing ships until uploads are on.  The hs-uploader
+    gate follows ``sinks/<client>.toml``, not the env flag, so ``--off``
+    sets the switch to ``fill`` and ``--on`` to ``upload``, through
+    ``hs-uploader sink set`` (never by writing the toml here).
+
+    Covers the clients whose flag the carry-over reads as an order
+    (sink_carryover.STOP_FLAGS).  WSPR_USE_HS_UPLOADER marks a decode-only
+    role, not an order, so wspr-recorder is left alone.  A switch is per
+    client: ``--on`` leaves ``fill`` while another instance's flag still
+    reads off.  Before the carry-over marker stands, the carry-over reads
+    the flag itself, so nothing is written here.
+
+    Returns ``(action, detail)``: action is ``skip``, ``same``, ``kept`` or
+    ``set``.  Raises SinkSyncError when the switches cannot be read or the
+    set fails."""
+    import getpass
+    from . import sink_state
+    from . import uploader_manifest as um
+    from .sink_carryover import STOP_FLAGS, _OFF_WORDS
+    if client not in STOP_FLAGS:
+        return "skip", "its flag is not an upload order"
+    if roots is None:
+        from .commands import uploader as up_cmd
+        roots = up_cmd._step_roots()
+    if not sink_state.marker_stands(roots.marker):
+        return "skip", "carry-over has not run; it reads the flag"
+    state = sink_state.read_state(
+        python=roots.python, manifest=str(roots.manifest),
+        sinks=str(roots.sinks), marker=str(roots.marker),
+        store=None if roots.store is None else str(roots.store))
+    if state is None:
+        raise SinkSyncError(
+            f"cannot read hs-uploader sink status, so {client}'s sink switch "
+            "is unchanged; nothing written")
+    cur = state.clients.get(client)
+    if cur is None:
+        return "skip", "no switch governs this client"
+    want = "upload" if on else "fill"
+    if on:
+        mine = env_path_for(client, instance, base=base)
+        flag = STOP_FLAGS[client]
+        env_dir = Path(base) / client / "env"
+        for other in sorted(env_dir.glob("*.env")) if env_dir.is_dir() else []:
+            if other == mine:
+                continue
+            v = read_flag(other, flag)
+            if v is not None and v.strip().lower() in _OFF_WORDS:
+                return "kept", f"{other.stem} still has {flag} off"
+    if cur.file_state == want:
+        return "same", want
+    reason = ("smd config upload --off: bring-up hold" if not on
+              else "smd config upload --on")
+    try:
+        user = getpass.getuser()
+    except Exception:
+        user = "?"
+    args = ["sink", "set", client, want, "--reason", reason,
+            "--by", f"smd config upload ({user})", "--sinks", str(roots.sinks)]
+    try:
+        r = um.run_hs_uploader(args, python=roots.python)
+    except Exception as exc:
+        raise SinkSyncError(
+            f"hs-uploader sink set {client} {want} failed "
+            f"({type(exc).__name__}: {exc}); nothing written") from exc
+    if r.returncode != 0:
+        lines = [ln for ln in (r.stderr or "").splitlines() if ln.strip()]
+        raise SinkSyncError(
+            f"hs-uploader sink set {client} {want} exited {r.returncode}: "
+            f"{lines[-1].strip() if lines else 'no message'}; nothing written")
+    return "set", f"{cur.file_state} -> {want}"
+
+
 def is_truthy(v) -> bool:
     return v is not None and str(v).strip().lower() not in (
         "", "0", "false", "no", "off")
