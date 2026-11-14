@@ -415,3 +415,76 @@ class TestTargets(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ── a Proxmox host follows its VM's [link_schedule] (plan 2026-11-14 satellite-host-guard) ──
+
+import subprocess as _sp
+
+
+class TestFollowVM(unittest.TestCase):
+    VM_TOPO = '[link_schedule]\nenabled = true\nmode = "probe"\nrac_units = ["vm-only@*"]\n'
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.host = self.tmp / "link.toml"
+        self.host.write_text('follow_vm = 100\n[link_schedule]\nenabled = false\n'
+                             'rac_units = ["sigmond-rac-host@*"]\n')
+        self.cache = self.tmp / "link-vm.toml"
+        self.calls = []
+
+    def run_ok(self, text=None, rc=0):
+        text = self.VM_TOPO if text is None else text
+
+        def run(argv, **kw):
+            self.calls.append(argv)
+            return _sp.CompletedProcess(argv, rc, json.dumps({"exitcode": 0, "out-data": text}), "")
+        return run
+
+    def run_down(self, argv, **kw):
+        self.calls.append(argv)
+        return _sp.CompletedProcess(argv, 255, "", "QEMU guest agent is not running")
+
+    def test_follow_vm_takes_vm_schedule(self):
+        cfg = m.read_settings(self.host, run=self.run_ok(), cache=self.cache)
+        self.assertTrue(cfg["enabled"])
+        self.assertEqual(cfg["mode"], "probe")
+        self.assertEqual(cfg["followed_vm"], 100)
+        self.assertEqual(self.calls[0][:5], ["qm", "guest", "exec", "100", "--timeout"])
+
+    def test_host_only_keys_stay_host(self):
+        cfg = m.read_settings(self.host, run=self.run_ok(), cache=self.cache)
+        self.assertEqual(cfg["rac_units"], ["sigmond-rac-host@*"])
+
+    def test_vm_down_uses_cache(self):
+        m.read_settings(self.host, run=self.run_ok(), cache=self.cache)
+        cfg = m.read_settings(self.host, run=self.run_down, cache=self.cache, now=0, refresh_s=-1)
+        self.assertTrue(cfg["enabled"])
+
+    def test_vm_bad_toml_keeps_cache(self):
+        m.read_settings(self.host, run=self.run_ok(), cache=self.cache)
+        cfg = m.read_settings(self.host, run=self.run_ok("[link_schedule\nenabled="),
+                              cache=self.cache, refresh_s=-1)
+        self.assertTrue(cfg["enabled"])
+        self.assertIn("enabled = true", self.cache.read_text())
+
+    def test_no_vm_no_cache_disabled(self):
+        cfg = m.read_settings(self.host, run=self.run_down, cache=self.cache)
+        self.assertFalse(cfg["enabled"])
+        self.assertEqual(cfg["followed_vm"], 100)
+
+    def test_vm_without_table_is_disabled(self):
+        cfg = m.read_settings(self.host, run=self.run_ok('[host]\nhostname = "x"\n'), cache=self.cache)
+        self.assertFalse(cfg["enabled"])
+
+    def test_cache_refreshed_only_after_refresh_hours(self):
+        m.read_settings(self.host, run=self.run_ok(), cache=self.cache)
+        m.read_settings(self.host, run=self.run_ok(), cache=self.cache)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_without_follow_vm_unchanged(self):
+        self.host.write_text('[link_schedule]\nenabled = true\n')
+        cfg = m.read_settings(self.host, run=self.run_ok(), cache=self.cache)
+        self.assertTrue(cfg["enabled"])
+        self.assertNotIn("followed_vm", cfg)
+        self.assertEqual(self.calls, [])

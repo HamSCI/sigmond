@@ -156,7 +156,57 @@ def fmt(t: dt.datetime | None) -> str:
     return f"{t:%Y-%m-%d %H:%M}Z ({t.astimezone():%H:%M %Z})"
 
 
-def read_settings(path: Path | None = None) -> dict:
+VM_CACHE = Path("/var/lib/sigmond/link-vm.toml")
+HOST_ONLY_KEYS = ("gated_units", "rac_units", "probe_targets")
+
+
+def vm_link_schedule(vmid: int, run=subprocess.run, cache: Path = VM_CACHE,
+                     now: float | None = None, refresh_s: float = 21600) -> dict | None:
+    """The VM's [link_schedule] table, read through the guest agent and kept in
+    ``cache`` (the VM's whole topology.toml); the cached copy when the VM or its
+    agent is down or answers with bad TOML; None when there is neither.  An
+    absent table means disabled ({})."""
+    import time
+    import tomllib
+    now = time.time() if now is None else now
+
+    def from_text(text):
+        return tomllib.loads(text).get("link_schedule") or {}
+
+    try:
+        if cache.exists() and now - cache.stat().st_mtime < refresh_s:
+            return from_text(cache.read_text())
+    except (OSError, ValueError):
+        pass
+    try:
+        p = run(["qm", "guest", "exec", str(int(vmid)), "--timeout", "15", "--",
+                 "cat", "/etc/sigmond/topology.toml"], capture_output=True, text=True, timeout=30)
+        if p.returncode != 0:
+            raise OSError((p.stderr or "").strip() or f"qm exited {p.returncode}")
+        res = json.loads(p.stdout)
+        if int(res.get("exitcode", 1)) != 0:
+            raise OSError(f"cat exited {res.get('exitcode')} in VM {vmid}")
+        text = res.get("out-data", "")
+        table = from_text(text)                      # raises on bad TOML: keep the cache
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cache.with_name(f".{cache.name}.new")
+        tmp.write_text(text)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, cache)
+        return table
+    except Exception as e:  # noqa: BLE001 -- fail open: never block on the VM
+        _log(f"following VM {vmid}: cannot read its topology.toml ({type(e).__name__}: {e}); "
+             f"using the cached copy" if cache.exists() else
+             f"following VM {vmid}: cannot read its topology.toml ({type(e).__name__}: {e}) "
+             f"and no cached copy; link schedule disabled")
+    try:
+        return from_text(cache.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def read_settings(path: Path | None = None, run=subprocess.run, cache: Path = VM_CACHE,
+                  now: float | None = None, refresh_s: float = 21600) -> dict:
     cfg = {"enabled": False, "source": "usap", "satellites": "all", "margin_min": 0.0,
            "refresh_hours": 6.0, "max_age_days": 8.0, "gated_units": list(DEFAULT_GATED),
            "rac_suspend": True, "rac_units": list(DEFAULT_RAC_UNITS),
@@ -164,14 +214,25 @@ def read_settings(path: Path | None = None) -> dict:
            "mode": "schedule", "probe_min": 5.0, "probe_targets": [], "probe_fail_count": 2.0}
     import tomllib
     ls = None
+    follow = None
     for p in ([path] if path else [TOPOLOGY, HOST_CONF]):
         try:
             with p.open("rb") as fh:
-                ls = tomllib.load(fh).get("link_schedule")
+                doc = tomllib.load(fh)
         except FileNotFoundError:
             continue
-        if ls is not None:
+        ls, follow = doc.get("link_schedule"), doc.get("follow_vm")
+        if ls is not None or follow is not None:
             break
+    if follow is not None:
+        # A Proxmox host follows its VM (plan 2026-11-14): the VM's table, with
+        # the host's own host-only keys (its units and probe targets).
+        host = ls or {}
+        ls = dict(vm_link_schedule(int(follow), run, cache, now, refresh_s) or {})
+        for k in HOST_ONLY_KEYS:
+            if k in host:
+                ls[k] = host[k]
+        cfg["followed_vm"] = int(follow)
     if not ls:
         return cfg
     for k in ("enabled", "rac_suspend"):
@@ -500,7 +561,8 @@ def cmd_status(cfg: dict, as_json: bool) -> int:
                           "fetched_at": (doc or {}).get("fetched_at"),
                           "next_windows": nxt}, indent=1))
         return 0
-    print(f"link schedule  {'enabled' if cfg['enabled'] else 'disabled'} (source {cfg['source']})")
+    print(f"link schedule  {'enabled' if cfg['enabled'] else 'disabled'} (source {cfg['source']})"
+          + (f", following VM {cfg['followed_vm']}" if cfg.get("followed_vm") else ""))
     print(f"now            {fmt(t)}")
     print(f"link           {'UP' if st['up'] else 'DOWN'}  ({st['reason']})")
     if st["until"]:
