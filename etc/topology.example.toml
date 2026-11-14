@@ -52,6 +52,24 @@ smd_bin = "/usr/local/sbin/smd"
 # other_max_mhz  = 1400
 # fast_mode      = "fft-pair"
 
+# L3 cache allocation (optional).  On bare metal with ONE L3 shared by every
+# core (Ryzen 5560U / 5825U / 5850U ...), pinning radiod to its own cores
+# gives it no private cache: decoder bursts evict its FFT's hot lines.  smd
+# reserves an exclusive share of the L3 ways for radiod's cores with Intel
+# RDT / AMD PQoS CAT (resctrl), via sigmond-l3-cat.service.  It is set at
+# boot, before radiod starts, and never changed on a running station.
+#   enabled          Bare metal applies it by default (bring-up and
+#                    `smd align --apply` install the unit); false opts out.
+#                    Never on a Proxmox guest or host (host-apply.sh does it
+#                    there), or a split-L3 part (radiod gets a whole island).
+#   radiod_fraction  share of the L3 ways for radiod's cores (0.62 = 10 of
+#                    16 ways); the rest is shared by every other core.
+# Check it with `smd admin diag l3-cat`.
+#
+# [l3_cat]
+# enabled         = true
+# radiod_fraction = 0.62
+
 # Timing site policy (optional).  hf-timestd's offset judge can escalate
 # a sustained radiod timing contradiction into a restart REQUEST artifact
 # (/run/hf-timestd/radiod-restart-request.json — it never restarts radiod

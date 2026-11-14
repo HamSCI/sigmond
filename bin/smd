@@ -22,7 +22,7 @@ Observe (what is, read-only):
     smd component update [<name> | --components C] [--ref R] [--dry-run]         pull latest + reapply (sudo)
     smd status      [<component>]                                service health
     smd admin log         [--files | --level LEVEL] [<client>]         tail journal or file logs
-    smd admin diag        [net | cpu-affinity | cpu-freq]              diagnostics
+    smd admin diag        [net | cpu-affinity | cpu-freq | l3-cat]     diagnostics
     smd admin environment list | probe | describe                      discover network peers
     smd watch       <wspr|psk|hfdl|codar|superdarn|meteor|hf-tec|mag|ka9q|radiod|uploads|verifier> [args...] unified service watcher
     smd admin sources     list | add | remove | apply                  per-client SDR source selection
@@ -1082,6 +1082,7 @@ def _load_topology(path: Path, client_dir_override: str = None) -> dict:
             } for name, c in t.components.items()
         },
         'cpu_freq':     dict(t.cpu_freq),
+        'l3_cat':       dict(t.l3_cat),
         'cpu_affinity': dict(t.cpu_affinity),
         'timing':       dict(t.timing),
     }
@@ -8988,6 +8989,23 @@ def _align_bringup(*, run=subprocess.run, say=print, site_timing_refreshed: bool
     except Exception:                                          # noqa: BLE001
         pass
 
+    # Bare metal with one shared L3 carries the L3 CAT boot unit (staged for
+    # the next boot, never applied to a running station).  Never blocks.
+    try:
+        topo = _load_topology(TOPOLOGY_PATH) or {}
+        wanted, _why = _l3_cat_wanted(
+            topo, run=lambda a, **kw: _align_run(a, run=run, timeout=15, action=' '.join(a),
+                                                 stdin=subprocess.DEVNULL))
+        if wanted:
+            r = _align_run([sys.executable, str(_SCRIPT), 'admin', 'diag', 'l3-cat',
+                            '--apply'], run=run, timeout=60,
+                           action='admin diag l3-cat --apply', stdin=subprocess.DEVNULL)
+            detail = _tail(r) if r.returncode == 0 else \
+                f'not applied (exit {r.returncode}): {_tail(r)}'
+            steps.append(align_apply.Step('admin diag l3-cat --apply', 'ran', detail))
+    except Exception:                                          # noqa: BLE001
+        pass
+
     return steps
 
 
@@ -14569,6 +14587,13 @@ def cmd_apply(args) -> int:
             _ensure_cpu_freq_policy(topology)
         except Exception:
             pass
+        # Bare metal with one shared L3: radiod's exclusive L3 share (CAT),
+        # staged for the next boot like the kernel isolation above.
+        try:
+            if _ensure_l3_cat(topology):
+                something_changed = True
+        except Exception:
+            pass
 
     # Disable hf-timestd's radiod-affinity watcher if it ever got enabled
     # (typically by a re-run of hf-timestd's deploy.sh on a host where the
@@ -16429,6 +16454,202 @@ def _install_cpu_freq_boot_unit() -> None:
             _ok('smd-cpu-freq.service enabled — clock policy re-applied at every boot')
     except OSError as e:
         _warn(f'could not persist the clock policy at boot: {e}')
+
+
+# ── L3 CAT on bare metal ────────────────────────────────────────────────────
+#
+# On a part with ONE L3 shared by every core (5560U, 5825U, 5850U, ...)
+# pinning radiod to its own cores buys it no private cache: the decoders'
+# even-minute bursts evict its FFT's hot lines (docs/PRODUCER-THREAT-MODEL.md,
+# 0.68 -> 0.00 gaps/channel-hour with CAT).  The Proxmox host-apply.sh
+# partitions the L3 with scripts/proxmox/sigmond-host-resctrl.sh; a
+# bare-metal station IS the host, so it runs the same script with its own
+# radiod cores.  Found converting VK5ARG (5850U) from WsprDaemon, whose
+# wd-resctrl had partitioned that L3; the conversion removed it and nothing
+# replaced it.
+#
+# Boot-only, never started on a running station: the script's header records
+# restarting it once stepped two guests' clocks ~2 s and cost a WSPR cycle.
+
+_L3_CAT_UNIT = 'sigmond-l3-cat.service'
+_L3_CAT_UNIT_PATH = Path('/etc/systemd/system') / _L3_CAT_UNIT
+_L3_CAT_SCRIPT = Path('/usr/local/sbin/sigmond-host-resctrl.sh')
+_L3_CAT_SCRIPT_SRC = _SCRIPT.parent.parent / 'scripts' / 'proxmox' / 'sigmond-host-resctrl.sh'
+_CPUINFO = Path('/proc/cpuinfo')
+_RESCTRL = Path('/sys/fs/resctrl')
+
+
+def _l3_cat_wanted(topology, *, cpuinfo: Path = None, l3_islands=None,
+                   run=None) -> tuple:
+    """(wanted, reason): should this host carry smd's L3 CAT partition?
+
+    Bare metal only, like the [cpu_freq] policy: not a VM guest (no resctrl;
+    the host partitions for it), not a Proxmox host (host-apply.sh owns it).
+    Only with ONE L3 domain: on a split-L3 part the affinity plan already
+    gives radiod a whole island, and the script writes domain 0 only.  Not
+    while WsprDaemon's wd-resctrl.service is still enabled (two writers on
+    one /sys/fs/resctrl).  `[l3_cat] enabled = false` opts out."""
+    run = run or _run
+    cfg = (topology.get('l3_cat', {}) or {}) if isinstance(topology, dict) else {}
+    if cfg.get('enabled', True) is False:
+        return False, '[l3_cat] enabled = false'
+    virt = run(['systemd-detect-virt', '--vm'], capture=True)
+    kind = (getattr(virt, 'stdout', '') or '').strip()
+    if kind and kind != 'none':
+        return False, f'a {kind} guest: the host partitions the L3'
+    if _PVE_DIR.exists():
+        return False, 'Proxmox host: host-apply.sh partitions the L3'
+    try:
+        flags = (cpuinfo or _CPUINFO).read_text()
+    except OSError:
+        flags = ''
+    if not re.search(r'^flags\s*:.*\bcat_l3\b', flags, re.M):
+        return False, 'no L3 CAT on this CPU'
+    if l3_islands is None:
+        from sigmond.cpu import get_cache_islands
+        l3_islands = [i for i in get_cache_islands(3)
+                      if (getattr(i, 'cache_type', '') or 'Unified') == 'Unified']
+    if len(l3_islands) != 1:
+        return False, (f'{len(l3_islands)} L3 domains: the affinity plan '
+                       f'segregates radiod by L3 island instead')
+    r = run(['systemctl', 'is-enabled', 'wd-resctrl.service'])
+    if (getattr(r, 'stdout', '') or '').strip() == 'enabled':
+        return False, "WsprDaemon's wd-resctrl.service owns resctrl here"
+    return True, ''
+
+
+def _l3_cat_cpus(topology) -> tuple:
+    """(radiod_cpus, other_cpus) from the affinity plan, as kernel list strings
+    ('14-15', '0-13'); ('', '') when no local radiod is planned."""
+    from sigmond.cpu import compute_affinity_plan, _cpus_to_range_str
+    plan = compute_affinity_plan(topology.get('cpu_affinity'))
+    radiod = set().union(*plan.radiod.values()) if plan.radiod else set()
+    if not radiod:
+        return '', ''
+    others = set(range(os.cpu_count() or 1)) - radiod
+    return (_cpus_to_range_str(sorted(radiod)),
+            _cpus_to_range_str(sorted(others)))
+
+
+def _l3_cat_unit_text(radiod: str, others: str, fraction: float) -> str:
+    return (
+        '# Managed by `smd admin diag l3-cat --apply`.  L3 CAT partition\n'
+        '# (resctrl) giving radiod\'s cores an exclusive share of the L3, set\n'
+        '# at boot before the network -- so before any radiod -- and never\n'
+        '# restarted on a running station (see the script\'s header).\n'
+        '\n'
+        '[Unit]\n'
+        'Description=smd L3 CAT partition for radiod (boot-time)\n'
+        'DefaultDependencies=no\n'
+        'After=local-fs.target\n'
+        'Before=network-pre.target sysinit.target\n'
+        'Wants=network-pre.target\n'
+        f'ConditionPathExists={_L3_CAT_SCRIPT}\n'
+        '\n'
+        '[Service]\n'
+        'Type=oneshot\n'
+        'RemainAfterExit=yes\n'
+        f'ExecStart={_L3_CAT_SCRIPT} {radiod} {others} {fraction:g}\n'
+        '\n'
+        '[Install]\n'
+        'WantedBy=sysinit.target\n'
+    )
+
+
+def _l3_cat_active(resctrl: Path = None) -> str:
+    """The running partition, e.g. 'radiod 14-15 L3:0=3ff', or '' if none."""
+    root = resctrl or _RESCTRL
+    try:
+        cpus = (root / 'radiod' / 'cpus_list').read_text().strip()
+        sch = [l.strip() for l in (root / 'radiod' / 'schemata').read_text().splitlines()
+               if l.strip().startswith('L3')]
+    except OSError:
+        return ''
+    return f'radiod {cpus} {" ".join(sch)}'.strip()
+
+
+def cmd_diag_l3_cat(args) -> int:
+    """Show, and with --apply install, the boot-time L3 CAT partition."""
+    apply_ = getattr(args, 'apply', False)
+    if apply_ and _need_root('diag l3-cat --apply'):
+        return 1
+    topology = getattr(args, '_topology_override', None) or \
+        _load_topology(Path(args.topology) if getattr(args, 'topology', None)
+                       else TOPOLOGY_PATH)
+    _heading('diag: L3 cache allocation (CAT)')
+    wanted, why = _l3_cat_wanted(topology)
+    active = _l3_cat_active()
+    if active:
+        _info(f'active now: {active}')
+    if not wanted:
+        _info(f'not managed here: {why}')
+        return 0
+    radiod, others = _l3_cat_cpus(topology)
+    if not radiod:
+        _warn('no local radiod in the affinity plan: nothing to partition for')
+        return 0
+    fraction = float((topology.get('l3_cat', {}) or {}).get('radiod_fraction', 0.62))
+    _info(f'plan: radiod cpus {radiod} get {fraction:.0%} of the L3 ways, '
+          f'cpus {others} the rest  (topology.toml [l3_cat] radiod_fraction)')
+    desired = _l3_cat_unit_text(radiod, others, fraction)
+    try:
+        current = _L3_CAT_UNIT_PATH.read_text()
+    except OSError:
+        current = ''
+    if not apply_:
+        if current == desired:
+            _ok(f'{_L3_CAT_UNIT} installed and current')
+        else:
+            _info(f'{_L3_CAT_UNIT} {"differs from the plan" if current else "not installed"}'
+                  f' — `smd admin diag l3-cat --apply` installs it')
+        return 0
+    try:
+        src = _L3_CAT_SCRIPT_SRC.read_bytes()
+        if not _L3_CAT_SCRIPT.exists() or _L3_CAT_SCRIPT.read_bytes() != src:
+            _L3_CAT_SCRIPT.write_bytes(src)
+            _L3_CAT_SCRIPT.chmod(0o755)
+        if current != desired:
+            _L3_CAT_UNIT_PATH.write_text(desired)
+            _run(['systemctl', 'daemon-reload'])
+        r = _run(['systemctl', 'is-enabled', _L3_CAT_UNIT])
+        if (getattr(r, 'stdout', '') or '').strip() != 'enabled':
+            _run(['systemctl', 'enable', _L3_CAT_UNIT])
+    except OSError as exc:
+        _err(f'could not install {_L3_CAT_UNIT}: {exc}')
+        return 1
+    if current != desired:
+        _ok(f'{_L3_CAT_UNIT} installed and enabled')
+        _warn('the L3 partition takes effect at the NEXT REBOOT (never applied '
+              'to a running station)')
+    else:
+        _ok(f'{_L3_CAT_UNIT} already current')
+    return 0
+
+
+def _ensure_l3_cat(topology, *, dry_run: bool = False) -> bool:
+    """`smd apply`'s hook: install the boot unit when this host wants it and
+    it is missing or stale.  Best-effort; returns True when it changed it."""
+    wanted, _why = _l3_cat_wanted(topology)
+    if not wanted:
+        return False
+    radiod, others = _l3_cat_cpus(topology)
+    if not radiod:
+        return False
+    fraction = float((topology.get('l3_cat', {}) or {}).get('radiod_fraction', 0.62))
+    try:
+        if _L3_CAT_UNIT_PATH.read_text() == _l3_cat_unit_text(radiod, others, fraction):
+            return False
+    except OSError:
+        pass
+    if dry_run:
+        _info(f'would install {_L3_CAT_UNIT} (L3 CAT for radiod cpus {radiod}, next boot)')
+        return False
+    ns = argparse.Namespace(apply=True, topology=None, _topology_override=topology)
+    try:
+        return cmd_diag_l3_cat(ns) == 0
+    except Exception as exc:                               # noqa: BLE001
+        _warn(f'L3 CAT unit not installed: {exc}')
+        return False
 
 
 def _cpufreq_nominal_khz(freq_dir: Path) -> int:
@@ -19792,11 +20013,14 @@ _smd_complete() {
                                 cpu-freq)
                                     COMPREPLY=($(compgen -W "--apply --reapply --radiod-max-mhz --other-max-mhz --topology" -- "$cur"))
                                     ;;
+                                l3-cat)
+                                    COMPREPLY=($(compgen -W "--apply --topology" -- "$cur"))
+                                    ;;
                                 net)
                                     COMPREPLY=($(compgen -W "--interface --listen --json --topology" -- "$cur"))
                                     ;;
                                 *)
-                                    COMPREPLY=($(compgen -W "cpu-affinity cpu-freq net --components --topology" -- "$cur"))
+                                    COMPREPLY=($(compgen -W "cpu-affinity cpu-freq l3-cat net --components --topology" -- "$cur"))
                                     ;;
                             esac
                             ;;
@@ -31017,6 +31241,14 @@ def _build_parser() -> argparse.ArgumentParser:
                         'topology.toml [cpu_freq] (root), so the boot-time '
                         'smd-cpu-freq.service keeps them; without it they apply once')
 
+    p = diag_sub.add_parser(
+        'l3-cat',
+        help='show + install the bare-metal L3 CAT partition for radiod (boot-time)')
+    p.add_argument('--apply', action='store_true',
+                   help='BARE-METAL ONLY: install + enable sigmond-l3-cat.service '
+                        '(requires root; takes effect at the next boot, never on '
+                        'a running station)')
+
     p = diag_sub.add_parser('net',
                              help='classify network for multi-host radiod (IGMP, multicast)')
     p.add_argument('--interface', metavar='IFACE',
@@ -32802,6 +33034,8 @@ def main() -> int:
         diag_cmd = getattr(args, 'diag_command', None)
         if diag_cmd == 'cpu-affinity':
             return cmd_diag_cpu_affinity(args)
+        if diag_cmd == 'l3-cat':
+            return cmd_diag_l3_cat(args)
         if diag_cmd == 'cpu-freq':
             topo = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
             if getattr(args, 'radiod_max_mhz', None):
