@@ -1386,15 +1386,25 @@ class AlignBringupTests(unittest.TestCase):
     """_align_bringup — re-runs bring-up's own steps in bring-up's own
     order. Task 6 of Plan 2b; not yet wired into `_align_apply` (Task 7)."""
 
-    def _run(self, answers, say=None, refreshed=False):
+    def _run(self, answers, say=None, refreshed=False, l3_cat=False):
         fake = _FakeBringupRun(answers)
         # Never read the real /etc/hs-uploader/pipelines.toml (Fix round 1 audit).
+        # The L3 CAT step depends on the host (bare metal, cat_l3, one L3):
+        # never on whatever machine runs the tests.
         with tempfile.TemporaryDirectory() as tmp, \
              mock.patch("sigmond.uploader_manifest.MANIFEST_PATH", Path(tmp) / "pipelines.toml"), \
-             mock.patch("os.access", return_value=True):
+             mock.patch("os.access", return_value=True), \
+             mock.patch.object(smd, "_l3_cat_wanted", return_value=(l3_cat, "test")):
             steps = smd._align_bringup(run=fake, say=say or (lambda *a, **k: None),
                                        site_timing_refreshed=refreshed)
         return steps, fake
+
+    def test_l3_cat_step_runs_the_apply_when_wanted(self):
+        steps, fake = self._run([(0, "", "")] * 4, l3_cat=True)
+        self.assertEqual(steps[-1].component, "admin diag l3-cat --apply")
+        self.assertEqual(steps[-1].outcome, "ran")
+        self.assertIn("l3-cat", fake.calls[-1])
+        self.assertIn("--apply", fake.calls[-1])
 
     def test_order_is_site_timing_render_manifest_doctor(self):
         steps, fake = self._run([(0, "", "")] * 5, refreshed=True)

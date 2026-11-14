@@ -63,6 +63,18 @@ _DEFAULT_CPU_FREQ = {
 }
 CPU_FREQ_FAST_MODES = ('radiod', 'fft-pair')
 
+# L3 CAT (resctrl) on bare metal with ONE shared L3: radiod's cores get an
+# exclusive radiod_fraction of the L3 ways, every other core the rest.  The
+# same partition scripts/proxmox/host-apply.sh gives a guest's radiod
+# (default 0.62: 10 of 16 ways, the measured-good split on the 5560U).
+# Installed by `smd apply` / `smd align --apply` as sigmond-l3-cat.service,
+# which applies it at the next boot, never on a running station.  Not on a
+# VM guest, a Proxmox host or a split-L3 part.  `enabled = false` opts out.
+_DEFAULT_L3_CAT = {
+    'enabled':         True,
+    'radiod_fraction': 0.62,
+}
+
 # Timing site policy.  honor_radiod_restart_request gates whether the
 # sigmond radiod watchdog acts on hf-timestd's opt-in escalation artifact
 # (/run/hf-timestd/radiod-restart-request.json, offset-judge spec §9
@@ -80,6 +92,7 @@ class Topology:
     components: dict = field(default_factory=dict)
     cpu_affinity: dict = field(default_factory=lambda: dict(_DEFAULT_CPU_AFFINITY))
     cpu_freq: dict = field(default_factory=lambda: dict(_DEFAULT_CPU_FREQ))
+    l3_cat: dict = field(default_factory=lambda: dict(_DEFAULT_L3_CAT))
     timing: dict = field(default_factory=lambda: dict(_DEFAULT_TIMING))
 
     def enabled_components(self, only: Optional[list] = None) -> list:
@@ -203,12 +216,31 @@ def load_topology(path: Path = TOPOLOGY_PATH,
             warn(f"topology cpu_freq.fast_mode {cf['fast_mode']!r} not one of "
                  f"{CPU_FREQ_FAST_MODES} — using 'radiod'")
 
+    l3_cat = dict(_DEFAULT_L3_CAT)
+    lc = raw.get('l3_cat', {})
+    if 'enabled' in lc:
+        if isinstance(lc['enabled'], bool):
+            l3_cat['enabled'] = lc['enabled']
+        else:
+            warn(f"topology l3_cat.enabled not a bool: {lc['enabled']!r} — using true")
+    if 'radiod_fraction' in lc:
+        try:
+            frac = float(lc['radiod_fraction'])
+        except (TypeError, ValueError):
+            frac = None
+        if frac is not None and 0.0 < frac < 1.0:
+            l3_cat['radiod_fraction'] = frac
+        else:
+            warn(f"topology l3_cat.radiod_fraction must be between 0 and 1 "
+                 f"(exclusive): {lc['radiod_fraction']!r} — using 0.62")
+
     return Topology(
         client_dir=client_dir,
         smd_bin=smd_bin,
         components=components,
         cpu_affinity=cpu_affinity,
         cpu_freq=cpu_freq,
+        l3_cat=l3_cat,
         timing=timing,
     )
 
