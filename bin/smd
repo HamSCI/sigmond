@@ -8995,9 +8995,9 @@ def _align_bringup(*, run=subprocess.run, say=print, site_timing_refreshed: bool
     # the next boot, never applied to a running station).  Never blocks.
     try:
         topo = _load_topology(TOPOLOGY_PATH) or {}
-        wanted, _why = _l3_cat_wanted(
-            topo, run=lambda a, **kw: _align_run(a, run=run, timeout=15, action=' '.join(a),
-                                                 stdin=subprocess.DEVNULL))
+        # Decided locally, like the cpu-freq step above: only the apply
+        # itself goes through align's runner.
+        wanted, _why = _l3_cat_wanted(topo)
         if wanted:
             r = _align_run([sys.executable, str(_SCRIPT), 'admin', 'diag', 'l3-cat',
                             '--apply'], run=run, timeout=60,
