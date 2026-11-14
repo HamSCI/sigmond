@@ -195,7 +195,7 @@ left to list: the v2 removals in
 | `admin uploader` | uploads | generate `/etc/hs-uploader/pipelines.toml` from each client's `deploy.toml` (`manifest`); see [The uploader manifest step](#the-uploader-manifest-step) | `cmd_uploader_manifest` → `commands/uploader.py`, `uploader_manifest.py` | `--write`/`--enable` (root) |
 | `admin validate` | before a change | run the cross-client harmonization rules, read-only | `cmd_validate` → `commands/validate.py`, `harmonize.py`, `sysview.py` | no |
 | `admin verifier` | uploads | upload audit — uploaded → verified → lost, for `wspr`, `psk`, `timestd` (`report`, `rehabilitate`) | `commands/verifier_report.py`, `verifier_report_psk.py`, `verifier_report_timestd.py` | `rehabilitate` does (root) |
-| `admin wisdom` | tuning | FFTW3 wisdom planner radiod reads from `/etc/fftw/wisdomf`: `status`, `plan` | `cmd_wisdom_status`, `cmd_wisdom_plan` → `wisdom.py` | `plan` does (root) |
+| `admin wisdom` | tuning | FFTW3 wisdom planner radiod reads from `/etc/fftw/wisdomf`: `status`, `plan`; `--auto` tops up (image-adopted wisdom too) from fft.log and never plans a large `rof<N>` (N >= 1000000): those are reported, and `plan` is the explicit fix | `cmd_wisdom_status`, `cmd_wisdom_plan` → `wisdom.py` | `plan` does (root) |
 
 Two conventions the table encodes. **Read-only verbs never take the lifecycle
 lock and never elevate** — `status`, `component list`, `log`, `diag`, `validate` are safe

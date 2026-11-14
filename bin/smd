@@ -5638,7 +5638,7 @@ def cmd_update(args) -> int:
     import subprocess
     from pathlib import Path
     from sigmond.doctor import component_checkouts, git_state
-    from sigmond.wisdom import plans_from_fft_log
+    from sigmond.wisdom import plans_from_fft_log, is_large_forward
     from sigmond.update import plan_update, Action, Refusal
     from sigmond.sink_state import update_notice
     # Before any pull: a pulled sigmond must never feed this process code
@@ -5836,7 +5836,8 @@ def cmd_update(args) -> int:
         'venv_skew': skew,
         'radiod': ({'running': running, 'pin': pin,
                     'contains_pin': contains_pin} if pin else {}),
-        'wisdom_misses': plans_from_fft_log(),
+        'wisdom_misses': [p for p in plans_from_fft_log() if not is_large_forward(p)],
+        'wisdom_large_misses': [p for p in plans_from_fft_log() if is_large_forward(p)],
         'locally_managed': sorted(local.names),
     }
 
@@ -20440,7 +20441,13 @@ def _wisdom_verdict(wisdom_file=None) -> str:
         adopted = _w.adopt_legacy_wisdom(
             wf, _w.WISDOM_SIDECAR, _w.CPUINFO, _WISDOM_BUNDLE_DIRS,
             is_appliance_install())
-        return 'current' if adopted else 'fresh'
+        if not adopted:
+            return 'fresh'
+        # Adopted: read fft.log like any wisdom made here, so an image
+        # station tops up.  Only if the sidecar could not be written (no
+        # root) is there nothing to read: current, as before.
+        if not _w.read_sidecar(_w.WISDOM_SIDECAR):
+            return 'current'
     # Read the module attributes at call time (not wisdom_verdict's bound
     # defaults), so one seam moves every path.
     return _w.wisdom_verdict(
@@ -20608,11 +20615,24 @@ def cmd_wisdom_needed(args) -> int:
     else:
         _warn(f'FFT wisdom: NO bundled wisdom for {verdict["model"]} '
               f'(wisdomf-{verdict["slug"]} is absent)')
-    if _wisdom_current():
+    current = _wisdom_current()
+    _report_large_forward()
+    if current:
         _info('FFT wisdom is current; nothing to plan')
         return 1
     _info('FFT wisdom is missing or not made for this CPU, sizes or placement')
     return 0
+
+
+def _report_large_forward() -> None:
+    """Say plainly when radiod runs the main forward FFT on FFTW_ESTIMATE.
+
+    No automatic run plans a rof<N> with N >= 1000000 (hours), so this is the
+    only place the operator learns of it."""
+    from sigmond import wisdom as _w
+    big = _w.large_forward_misses(_w.WISDOM_SIDECAR, _w.FFT_MISS_LOG)
+    if big:
+        _warn('FFT wisdom: ' + _w.large_forward_advice(big))
 
 
 def _pause_sigmond_timers() -> list:
@@ -20700,6 +20720,7 @@ def cmd_wisdom_plan(args) -> int:
         FFT_WISDOM_PROFILES, WISDOM_FILE, WISDOM_TMP, WISDOM_LOG,
         install_wisdom, profiles_for_planning,
         WISDOM_SIDECAR, cpu_model, radiod_placement, write_sidecar,
+        read_sidecar, topup_misses, FFT_MISS_LOG,
     )
 
     fftwf = shutil.which('fftwf-wisdom')
@@ -20842,6 +20863,21 @@ def cmd_wisdom_plan(args) -> int:
     # (new zoom levels, new channel bandwidths, another operator's client).
     profiles = profiles_for_planning()
     extra = profiles[len(FFT_WISDOM_PROFILES):]
+    # ⛔ AN AUTOMATIC TOP-UP PLANS ONLY WHAT fft.log LISTS, AND NEVER A LARGE
+    # FORWARD.  The static list holds rof1620000 and rof3240000, hours each;
+    # an unattended boot-time run must not start them (2026-11-14).  The
+    # planner keeps the installed plans, so the misses are all it measures.
+    # `smd admin wisdom plan` without --auto still plans the whole list.
+    topup = (getattr(args, 'auto', False) and auto_verdict == 'top-up'
+             and not getattr(args, 'fresh', False))
+    prior_side = read_sidecar(WISDOM_SIDECAR)
+    if topup:
+        profiles = topup_misses(WISDOM_SIDECAR, FFT_MISS_LOG)
+        extra = []
+        _info(f'auto: top-up measures only what fft.log lists: '
+              f'{" ".join(profiles)}')
+    elif getattr(args, 'auto', False) and auto_verdict is not None:
+        _report_large_forward()
     if extra:
         _info(f'fft.log reports {len(extra)} transform(s) radiod had to '
               f'estimate; adding them to this run:')
@@ -21011,9 +21047,25 @@ def cmd_wisdom_plan(args) -> int:
     _ok(f'installed → {WISDOM_FILE}')
     try:
         from sigmond.cpu import get_performance_cpus
-        write_sidecar(
-            WISDOM_SIDECAR, cpu_model(), profiles,
-            radiod_placement(pin, get_performance_cpus()) if pin else None)
+        if topup:
+            # Keep what the wisdom was already known to hold, and the
+            # image's adopted mark (it exempts the station from a fresh
+            # replan on a placement change).  Adopted sidecars record no
+            # placement; others record this run's.
+            planned = [*[p for p in prior_side.get('planned_profiles', '').split(',') if p],
+                       *profiles]
+            planned = list(dict.fromkeys(planned))
+            adopted = prior_side.get('adopted') == 'legacy-image'
+            write_sidecar(
+                WISDOM_SIDECAR, cpu_model() or prior_side.get('model', ''),
+                planned,
+                None if adopted or not pin
+                else radiod_placement(pin, get_performance_cpus()),
+                extra={'adopted': 'legacy-image'} if adopted else None)
+        else:
+            write_sidecar(
+                WISDOM_SIDECAR, cpu_model(), profiles,
+                radiod_placement(pin, get_performance_cpus()) if pin else None)
     except OSError as exc:
         _warn(f'could not write {WISDOM_SIDECAR}: {exc} — the next check will replan')
     _info('Now: smd start')
@@ -21034,6 +21086,7 @@ def cmd_wisdom_status(args) -> int:
                else f'{int(age_s / 3600)}h ago' if age_s > 3600
                else f'{int(age_s / 60)}m ago')
     _ok(f'{WISDOM_FILE}  ({st.st_size:,} bytes, last updated {age_str})')
+    _report_large_forward()
     return 0
 
 

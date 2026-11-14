@@ -20,6 +20,18 @@ Profile list mirrors ka9q-radio's docs/FFTW3.md recommendations:
 inverse FFTs (``cob…``) for every demodulator-channel size radiod
 ever uses, plus the forward FFTs (``rof…``) for the two RX-888 sample
 rates that dominate planning time on x86 / Pi5.
+
+Top-ups and large transforms (2026-11-14).  radiod logs every size it
+could not find in /var/lib/ka9q-radio/fft.log and runs it on FFTW_ESTIMATE.
+Wisdom made here, bundle-seeded, or adopted from an install image tops up:
+the planner keeps its plans and measures only the sizes fft.log lists.
+A large forward transform (``rof<N>`` with N >= 1000000, so rof1620000 and
+rof3240000) takes hours.  No automatic run plans it.  Status, ``needed`` and
+``smd update`` report it, and name ``smd admin wisdom plan`` as the explicit
+fix.  A top-up records what it measured in the sidecar's planned_profiles, so
+the next verdict reads 'current'.  Image-adopted wisdom keeps its
+``adopted=legacy-image`` mark through a top-up: it still never replans fresh
+for a placement change, only for another CPU.
 """
 
 from __future__ import annotations
@@ -109,6 +121,20 @@ FFT_WISDOM_PROFILES: tuple[str, ...] = (
     'cdb1920', 'cdb2080', 'cdb2400', 'cdb3200',  'cdb3240', 'cdb3250',
     'cdb4095', 'cdb4800', 'cdb4860', 'cdb6930',  'cdb8100', 'cdb8125',
     'cdb9600', 'cdb16200', 'cdb32400', 'cdb40500', 'cdb81000', 'cdb162000',
+    # ── 2026-11-14 fleet sweep: HFDL, CODAR/chirp, wider WSPR/FT channels ──
+    # A read-only look at fft.log on 18 stations found misses on 14 and 96
+    # distinct sizes; 48 of them were in none of the groups above.  They come
+    # from the newer channel sets.  The union is kept in
+    # tests/fixtures/fleet-misses-20261114.txt, and a test holds this list to
+    # it.  Small sizes only: each plans in seconds to minutes.
+    'cob55',   'cob100',  'cob175',  'cob220',  'cob350',  'cob420',
+    'cob825',  'cob2000', 'cob2048', 'cob2500', 'cob4000', 'cob5500',
+    'cdb55',   'cdb100',  'cdb175',  'cdb220',  'cdb350',  'cdb420',
+    'cdb825',  'cdb2000', 'cdb2048', 'cdb2500', 'cdb4000', 'cdb5500',
+    'cif55',   'cif100',  'cif175',  'cif200',  'cif220',  'cif350',
+    'cif400',  'cif420',  'cif825',  'cif1600', 'cif2000', 'cif2048',
+    'cif2500', 'cif3200', 'cif4000', 'cif4800', 'cif5500', 'cif6930',
+    'cof1680', 'cof1750', 'cof1760', 'cof2000', 'cof2048', 'cof2200',
     # ── front-end forward real FFTs — the expensive pair, planned LAST ──
     'rof1620000',   # RX888 MkII @  64.8 MHz, 20 ms block, overlap 5
     'rof3240000',   # RX888 MkII @ 129.6 MHz, 20 ms block, overlap 5  ← hours
@@ -120,6 +146,18 @@ FFT_WISDOM_PROFILES: tuple[str, ...] = (
 # which is the only way to observe the gap: planning stays fast either
 # way, so startup time proves nothing.
 FFT_MISS_LOG = Path('/var/lib/ka9q-radio/fft.log')
+
+
+# A forward transform this large plans for hours: automation reports it and
+# never plans it (rof1620000, rof3240000).
+LARGE_FORWARD_MIN = 1_000_000
+_LARGE_RE = re.compile(r'rof(\d+)')
+
+
+def is_large_forward(name: str) -> bool:
+    """True for ``rof<N>`` with N >= LARGE_FORWARD_MIN."""
+    m = _LARGE_RE.fullmatch(name)
+    return bool(m) and int(m.group(1)) >= LARGE_FORWARD_MIN
 
 
 def plans_from_fft_log(log: Path = FFT_MISS_LOG) -> list[str]:
@@ -361,11 +399,18 @@ def wisdom_verdict(wisdom_file: Path | None = None,
     its plans and measures only what is missing.
     current: neither.
 
+    A large forward transform (``rof<N>``, N >= 1000000) never counts as a
+    missing size: it takes hours, so automation reports it
+    (large_forward_misses) and `smd admin wisdom plan` is the explicit fix.
+
     A sidecar that records no placement (a bundled one: its radiod_l3_bytes
     reads "unknown-from-guest") cannot be compared and does not block.  An
-    image's adopted sidecar (adopted=legacy-image) keeps the image's old
-    behaviour: no fft.log check, no placement check, and an empty model on
-    either side never counts as another CPU.
+    image's adopted sidecar (adopted=legacy-image) is fresh only for another
+    CPU, with an empty model on either side never counting as another CPU.
+    It makes no placement check, so a layout change never replans an image
+    station.  Otherwise it reads fft.log like any wisdom made here: a size
+    missing there is a 'top-up' (fixed 2026-11-14; the verdict used to say
+    'current' without reading fft.log, so image stations never topped up).
     """
     wisdom_file = WISDOM_FILE if wisdom_file is None else wisdom_file
     sidecar = WISDOM_SIDECAR if sidecar is None else sidecar
@@ -383,7 +428,8 @@ def wisdom_verdict(wisdom_file: Path | None = None,
         was = side.get('model', '')
         if was and model and was != model:
             return 'fresh'
-        return 'current'
+        # No placement check, and never fresh otherwise: only a top-up.
+        return 'top-up' if topup_misses(sidecar, miss_log) else 'current'
     if not model or side.get('model') != model:
         return 'fresh'
     for key, now in (placement or {}).items():
@@ -392,10 +438,38 @@ def wisdom_verdict(wisdom_file: Path | None = None,
             continue
         if str(was) != str(now):
             return 'fresh'
-    planned = {p for p in side.get('planned_profiles', '').split(',') if p}
-    if any(p not in planned for p in plans_from_fft_log(miss_log)):
-        return 'top-up'
-    return 'current'
+    return 'top-up' if topup_misses(sidecar, miss_log) else 'current'
+
+
+def _planned(sidecar: Path) -> set:
+    side = read_sidecar(sidecar)
+    return {p for p in side.get('planned_profiles', '').split(',') if p}
+
+
+def topup_misses(sidecar: Path, miss_log: Path) -> list:
+    """fft.log sizes the sidecar has not planned, large forwards excluded.
+
+    The list an automatic top-up plans."""
+    planned = _planned(sidecar)
+    return [p for p in plans_from_fft_log(miss_log)
+            if p not in planned and not is_large_forward(p)]
+
+
+def large_forward_misses(sidecar: Path, miss_log: Path) -> list:
+    """fft.log large forward transforms the sidecar has not planned.
+
+    These run on FFTW_ESTIMATE and no automatic run plans them: report them."""
+    planned = _planned(sidecar)
+    return [p for p in plans_from_fft_log(miss_log)
+            if p not in planned and is_large_forward(p)]
+
+
+def large_forward_advice(names) -> str:
+    """The plain sentence status, needed and update print for large misses."""
+    return (f'the main forward FFT ({" ".join(names)}) runs on FFTW_ESTIMATE: '
+            f'radiod found no wisdom for it.  Planning it takes hours, so no '
+            f'automatic run does.  To measure it, stop the station and run '
+            f'`smd admin wisdom plan`.')
 
 
 def wisdom_is_current(wisdom_file: Path | None = None,

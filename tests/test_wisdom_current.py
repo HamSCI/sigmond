@@ -282,10 +282,12 @@ def _legacy_env(tmp_path, monkeypatch, *, appliance, model=B4, content='(baked)'
 
 def test_image_wisdom_with_no_sidecar_is_current_and_gets_one(tmp_path, monkeypatch):
     kw = _legacy_env(tmp_path, monkeypatch, appliance=True)
-    kw['miss_log'].write_text('cob9999\n')      # no miss check on the image
     assert smd._wisdom_current()
     assert wisdom.read_sidecar(kw['sidecar'])['adopted'] == 'legacy-image'
     assert smd._wisdom_current()                # still, with the sidecar present
+    # 2026-11-14: the image reads fft.log now; a small miss is a top-up.
+    kw['miss_log'].write_text('cob9999\n')
+    assert smd._wisdom_verdict() == 'top-up'
 
 
 def test_image_adoption_survives_an_unwritable_sidecar(tmp_path, monkeypatch):

@@ -32,7 +32,10 @@ The traps, and how each is encoded:
   quietly defeating the provenance it exists to provide.
 * **wisdom coverage** — radiod plans `WISDOM_ONLY|PATIENT` and falls
   back to `FFTW_ESTIMATE` on a miss: fast to plan, suboptimal forever,
-  invisible in startup time.  `fft.log` is written only on a miss.
+  invisible in startup time.  `fft.log` is written only on a miss.  A large
+  forward transform (`rof<N>`, N >= 1000000) takes hours: the plan reports
+  it (`state['wisdom_large_misses']`) and names `smd admin wisdom plan`,
+  and never plans it itself.
 * **restart order** — radiod first, recorders after it is stable; a
   recorder started against a restarting radiod picks up a bad anchor.
 * **a pinned checkout stays pinned** — bring-up's image build and
@@ -309,6 +312,19 @@ def plan_update(state: dict) -> list:
             run_as='root',
             verify='wc -l /var/lib/ka9q-radio/fft.log == 0'))
         needs_restart = True
+
+    # A large forward transform (rof<N>, N >= 1000000) takes hours; no
+    # automatic run plans it.  Say so, and name the explicit fix.
+    big = state.get('wisdom_large_misses') or []
+    if big:
+        actions.append(Action(
+            'wisdom', 'ka9q-radio',
+            detail=f'the main forward FFT ({" ".join(big)}) runs on '
+                   f'FFTW_ESTIMATE; planning it takes hours, so no automatic '
+                   f'run does it — to measure it, stop the station and run '
+                   f'`smd admin wisdom plan`',
+            run_as='root',
+            verify='/var/lib/ka9q-radio/fft.log lists no rof entry'))
 
     if needs_restart:
         actions.append(Action(
