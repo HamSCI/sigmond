@@ -14367,6 +14367,18 @@ def _apply_uploader_manifest() -> bool:
     return True
 
 
+def _topology_holds_off(topology, name: str) -> bool:
+    """True when topology lists `name` and the operator turned it off.
+
+    A component topology does not list (hs-uploader runs outside topology by
+    design) is not held off.  `smd apply` leaves a held-off component's units
+    as `smd disable` left them: N8UR, 2026-11-14, mag-recorder came back
+    systemd-enabled after a disable because apply re-enabled every installed
+    component's units."""
+    comp = getattr(topology, 'components', {}).get(name)
+    return comp is not None and not comp.enabled
+
+
 def cmd_apply(args) -> int:
     if _need_root('apply'):
         return 1
@@ -14410,6 +14422,8 @@ def cmd_apply(args) -> int:
             for name, entry in sorted(catalog.items()):
                 repo_dir = Path('/opt/git/sigmond') / name
                 if not repo_dir.exists():
+                    continue
+                if _topology_holds_off(topology, name):
                     continue
                 msgs = apply_deploy_toml_links(repo_dir, dry_run=dry_run)
                 for msg in msgs:

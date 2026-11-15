@@ -71,3 +71,53 @@ class StopComponentUnitsTests(unittest.TestCase):
             smd._stop_component_units("psk-recorder")
         self.assertIn(["systemctl", "stop", "psk-recorder.service"], calls)
         self.assertIn(["systemctl", "disable", "psk-recorder.service"], calls)
+
+
+class ApplyHonoursTopologyTests(unittest.TestCase):
+    """N8UR, 2026-11-14: mag-recorder was disabled, yet its unit was
+    systemd-enabled again.  `smd apply` re-enabled every installed catalog
+    component's units, topology or not."""
+
+    def _topology(self):
+        from sigmond.topology import Topology, Component
+        return Topology(client_dir=Path("/x"), smd_bin=Path("/y"), components={
+            "mag-recorder": Component("mag-recorder", enabled=False, managed=True),
+            "psk-recorder": Component("psk-recorder", enabled=True, managed=True),
+        })
+
+    def test_disabled_component_is_held_off(self):
+        self.assertTrue(smd._topology_holds_off(self._topology(), "mag-recorder"))
+
+    def test_enabled_component_is_not(self):
+        self.assertFalse(smd._topology_holds_off(self._topology(), "psk-recorder"))
+
+    def test_component_outside_topology_is_not(self):
+        # hs-uploader runs outside topology by design
+        self.assertFalse(smd._topology_holds_off(self._topology(), "hs-uploader"))
+
+    def test_apply_loop_skips_a_held_off_component(self):
+        src = (REPO / "bin" / "smd").read_text()
+        body = src.split("def cmd_apply(", 1)[1].split("\ndef ", 1)[0]
+        pre = body.split("apply_systemd_enables(repo_dir", 1)[0]
+        self.assertIn("_topology_holds_off(topology, name)", pre)
+
+
+class DisableCoversTimersTests(unittest.TestCase):
+    """N8UR: mag-recorder-upload.timer stayed active after the disable."""
+
+    def test_a_timer_is_stopped_and_disabled_with_its_service(self):
+        import subprocess
+        calls = []
+        def fake_run(cmd, **kw):
+            calls.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, "inactive", "")
+        units = [_unit("mag-recorder.service"),
+                 _unit("mag-recorder-upload.timer", "timer")]
+        with mock.patch.object(smd, "_run", side_effect=fake_run), \
+             mock.patch.object(smd, "resolve_units", return_value=units), \
+             mock.patch.object(smd, "_load_topology", return_value=object()), \
+             mock.patch.object(smd, "order_units", side_effect=lambda u, coordination=None: u), \
+             mock.patch.object(smd, "load_coordination", return_value=None):
+            smd._stop_component_units("mag-recorder")
+        for verb in ("stop", "disable"):
+            self.assertIn(["systemctl", verb, "mag-recorder-upload.timer"], calls)

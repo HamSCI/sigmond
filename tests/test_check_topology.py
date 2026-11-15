@@ -20,13 +20,16 @@ def test_running_not_enabled_fails_with_enable_fix():
     ln = check.topology_line(_env(Drift(['hfdl-recorder'], [])))
     assert ln.mark == check.FAIL
     assert 'hfdl-recorder runs but topology does not enable it' in ln.text
-    assert ln.text.endswith('Fix: smd enable hfdl-recorder')
+    # Topology is the operator's truth: the first remedy stops the run.
+    assert ln.text.endswith('Fix: stop it: smd disable hfdl-recorder; '
+                            'or, if it should run: smd enable hfdl-recorder')
 
 
 def test_two_running_not_enabled_read_plural():
     ln = check.topology_line(_env(Drift(['codar-sounder', 'hfdl-recorder'], [])))
     assert 'run but topology does not enable them, so their uploads' in ln.text
-    assert ln.text.endswith('smd enable codar-sounder hfdl-recorder')
+    assert 'stop them: smd disable codar-sounder hfdl-recorder' in ln.text
+    assert ln.text.endswith('if they should run: smd enable codar-sounder hfdl-recorder')
 
 
 def test_enabled_stopped_fails_with_start_fix():

@@ -17,9 +17,10 @@ def _state(table):
     return state
 
 
-def _drift(table, catalog=None, units=lambda n, a: True):
+def _drift(table, catalog=None, units=lambda n, a: True, running=lambda n, a: True):
     catalog = catalog or _cat(**{n: {} for n in table})
-    return topology_drift(None, catalog, state=_state(table), has_units=units)
+    return topology_drift(None, catalog, state=_state(table), has_units=units,
+                          service_running=running)
 
 
 def test_running_not_enabled():
@@ -51,3 +52,9 @@ def test_component_without_units_never_counts_as_stopped():
 def test_declared_services_entry_runs_outside_topology_by_design():
     cat = _cat(**{'hs-uploader': {'services': ('hs-uploader.service',)}})
     assert not _drift({'hs-uploader': (True, False, True)}, catalog=cat)
+
+
+def test_an_active_timer_alone_is_not_a_run():
+    # N8UR, 2026-11-14: mag-recorder-upload.timer waiting, no service running.
+    d = _drift({'mag-recorder': (True, False, True)}, running=lambda n, a: False)
+    assert d.running_not_enabled == []

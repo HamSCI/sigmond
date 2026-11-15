@@ -52,9 +52,34 @@ def _has_units(name: str, alias: Optional[str]) -> bool:
     return False
 
 
+def _service_running(name: str, alias: Optional[str]) -> bool:
+    """True when a long-running unit of the component is active.  A timer
+    that waits for its next shot is not a run: N8UR, 2026-11-14, a disabled
+    mag-recorder showed as running on mag-recorder-upload.timer alone."""
+    import subprocess
+    try:
+        from .lifecycle import resolve_units
+    except ImportError:
+        return True
+    for n in (name, alias):
+        if not n:
+            continue
+        try:
+            units = [u for u in resolve_units([n], [n])
+                     if not u.orphaned and u.kind != 'timer']
+        except Exception:
+            continue
+        for u in units:
+            r = subprocess.run(['systemctl', 'is-active', '--quiet', u.unit])
+            if r.returncode == 0:
+                return True
+    return False
+
+
 def topology_drift(topology, catalog=None,
                    state: Optional[Callable] = None,
-                   has_units: Optional[Callable[[str, Optional[str]], bool]] = None) -> Drift:
+                   has_units: Optional[Callable[[str, Optional[str]], bool]] = None,
+                   service_running: Optional[Callable[[str, Optional[str]], bool]] = None) -> Drift:
     """Compare every catalogued component's systemd state with topology.
 
     ``state`` (name, topology, alias -> ComponentState) and ``has_units``
@@ -66,6 +91,7 @@ def topology_drift(topology, catalog=None,
         from .component_state import compute_state
         state = compute_state
     has_units = has_units or _has_units
+    service_running = service_running or _service_running
     running, stopped = [], []
     seen = set()
     for name, entry in sorted(catalog.items()):
@@ -75,7 +101,7 @@ def topology_drift(topology, catalog=None,
         seen.add(name)
         alias = getattr(entry, 'topology_alias', None)
         st = state(name, topology, alias)
-        if st.active and not st.enabled:
+        if st.active and not st.enabled and service_running(name, alias):
             running.append(name)
         elif st.enabled and st.installed and not st.active and has_units(name, alias):
             stopped.append(name)

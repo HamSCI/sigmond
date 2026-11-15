@@ -1286,6 +1286,8 @@ def mag_page_line(env: Env, mag_dir: Path = MAG_DIR, device: str = MAG_DEVICE) -
     only when this one appears."""
     if not env.installed('mag-recorder') or no_magnetometer(env, mag_dir, device):
         return None
+    if not env.service('mag-recorder.service').enabled and not env.exists(device):
+        return None         # dormant: the magnetometer line says so, and no page is owed
     return page_check(MAG_PAGE, 8082, None)(env)
 
 
@@ -1364,7 +1366,8 @@ def topology_line(env: Env) -> Optional[Line]:
                     f'{"runs" if one else "run"} but topology does not enable '
                     f'{"it" if one else "them"}, so '
                     f'{"its" if one else "their"} uploads do not render.  '
-                    f'{FIX}smd enable {names}')
+                    f'{FIX}stop {"it" if one else "them"}: smd disable {names}; '
+                    f'or, if {"it" if one else "they"} should run: smd enable {names}')
     if stopped:
         names = ' '.join(stopped)
         hold = bringup_hold(env)

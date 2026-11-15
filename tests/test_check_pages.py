@@ -57,6 +57,16 @@ class PageTests(unittest.TestCase):
             env = make_env(http=lambda url: (200, ''), exists=lambda p: False)
             self.assertEqual(check.mag_page_line(env, mag_dir=Path(d)).mark, OK)
 
+    def test_no_magnetometer_page_line_while_the_magnetometer_is_dormant(self):
+        # N8UR, 2026-11-14: mag-recorder disabled (its unit gone), no adapter:
+        # gmag-webui is not running either, and the page is not owed.
+        from tests.check_fakes import svc
+        with tempfile.TemporaryDirectory() as d:
+            env = make_env(http=lambda url: (None, 'refused'), exists=lambda p: False,
+                           service=lambda pattern: svc(state='inactive', enabled=False),
+                           mag_psws_id=lambda: '84')
+            self.assertIsNone(check.mag_page_line(env, mag_dir=Path(d)))
+
     def test_a_refused_or_wrong_status_fails(self):
         env = make_env(http=lambda url: (None, '[Errno 111] Connection refused') if '8081' in url
                        else (503, ''))
