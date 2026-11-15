@@ -19,7 +19,7 @@
 # Runs the real generator out of the real script: the embedded python is
 # extracted verbatim, so these tests cannot drift from the shipped code.
 set -u
-SCRIPT="$(dirname "$(readlink -f "$0")")/sigmond-site-timing"
+SCRIPT="$(dirname "$(readlink -f "$0")")/../bin/sigmond-site-timing"
 pass=0; fail=0
 ok(){   printf '  ✓ %s\n' "$1"; pass=$((pass+1)); }
 bad(){  printf '  ✗ %s\n     %s\n' "$1" "$2"; fail=$((fail+1)); }

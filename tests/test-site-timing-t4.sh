@@ -9,7 +9,7 @@
 # round 2, 2026-10-05).  The cases below are that rule, both opt-outs, and
 # idempotency.
 set -u
-HERE="$(cd "$(dirname "$0")" && pwd)"
+HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 fail=0
 # The settle-wait (180 s by default) is off for the rule cases below; the
@@ -18,7 +18,7 @@ export SITE_TIMING_T4_WAIT_S=0 SITE_TIMING_T4_POLL_S=1
 
 # The step, verbatim, with only the hardcoded chrony path redirected.
 awk '/^# ── 2b\. declare those LAN stratum-1/{f=1} /^# ── 2\.5 identity reconciliation/{f=0} f' \
-    "$HERE/sigmond-site-timing" \
+    "$HERE/../bin/sigmond-site-timing" \
     | sed -e "s#/etc/chrony/conf.d/local-timeservers.conf#$T/lts.conf#g" \
           -e "s#/etc/chrony/conf.d/10-sigmond-ntp.conf#$T/wiz.conf#g" > "$T/step.sh"
 grep -q 'T4OK' "$T/step.sh" || { echo "FAIL: step 2b not found in sigmond-site-timing"; exit 1; }

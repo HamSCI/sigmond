@@ -10,15 +10,15 @@
 # arms by itself; a LAN advertisement may only object.  Never override an
 # enabled T6 or a local TS-1.  Nothing unvalidated reaches the config.
 set -u
-HERE="$(cd "$(dirname "$0")" && pwd)"
-SIGMOND_LIB="${SIGMOND_LIB:-$HERE/../sigmond/lib}"
-[ -f "$SIGMOND_LIB/sigmond/sdr_map.py" ] || { echo "SKIP: no sigmond checkout at $SIGMOND_LIB (set SIGMOND_LIB)"; exit 0; }
+HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+SIGMOND_LIB="${SIGMOND_LIB:-$HERE/../lib}"
+[ -f "$SIGMOND_LIB/sigmond/sdr_map.py" ] || { echo "FAIL: no sigmond lib at $SIGMOND_LIB"; exit 1; }
 export SIGMOND_LIB
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 fail=0
 
 awk '/^# ── 4\.9 T6 from a TS-1 shared/{f=1} /^# ── 5\. full timing profile/{f=0} f' \
-    "$HERE/sigmond-site-timing" > "$T/step.sh"
+    "$HERE/../bin/sigmond-site-timing" > "$T/step.sh"
 grep -q 'T6LAN' "$T/step.sh" || { echo "FAIL: step 4.9 not found in sigmond-site-timing"; exit 1; }
 mkdir -p "$T/bin" "$T/radio" "$T/usb"
 printf '#!/bin/bash\necho "$*" >> %s/systemctl.log\nexit 0\n' "$T" > "$T/bin/systemctl"

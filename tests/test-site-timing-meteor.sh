@@ -9,13 +9,13 @@
 # nobody enabled.  `tr '/' '='` never upper-cased, so a lower-case reporter
 # id split the config file's name from the unit's.
 set -u
-HERE="$(cd "$(dirname "$0")" && pwd)"
+HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 T=$(mktemp -d)
 trap 'rm -rf "${T:?}"' EXIT
 fail=0
 
 awk '/^# ── 4\.5 meteor-scatter/{f=1} /^# ── 4\.7 ka9q-web/{f=0} f' \
-    "$HERE/sigmond-site-timing" \
+    "$HERE/../bin/sigmond-site-timing" \
     | sed -e "s#/etc/sigmond/site-profile.toml#$T/site-profile.toml#g" \
           -e "s#/etc/radio/#$T/radio/#g" \
           -e "s#/etc/meteor-scatter/#$T/meteor-scatter/#g" \
@@ -25,7 +25,7 @@ grep -q 'meteor-scatter' "$T/step.sh" || { echo "FAIL: step 4.5 not found in sig
 # with sudo.  The script's smd wrapper must clear SUDO_* -- the stub below
 # refuses like smd does, and the whole run goes under a sudo-like env.
 export SUDO_USER=rob SUDO_UID=1001 SUDO_GID=1001 SUDO_COMMAND=/usr/local/sbin/sigmond-site-timing
-{ grep '^smd()' "$HERE/sigmond-site-timing"; cat "$T/step.sh"; } > "$T/step2.sh" && mv "$T/step2.sh" "$T/step.sh"
+{ grep '^smd()' "$HERE/../bin/sigmond-site-timing"; cat "$T/step.sh"; } > "$T/step2.sh" && mv "$T/step2.sh" "$T/step.sh"
 mkdir -p "$T/bin" "$T/radio" "$T/meteor-scatter" "$T/opt-meteor"
 : > "$T/radio/radiod@b4.conf"
 
