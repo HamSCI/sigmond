@@ -1051,6 +1051,14 @@ $SUDO /usr/local/sbin/sigmond-time-sync --apply --wait 30 || warn "clock not syn
 $SUDO bash "$REPO_DIR/scripts/install/journald-cap.sh" \
     || warn "could not set the journald cap — see the line above"
 
+# sigmond-site-timing: wires hf-timestd's timing chain to the site.  It lived
+# in sigmond-appliance and reached a station only at image install; now the
+# sbin path links to this checkout, so every pull carries it.  A plain copy
+# from an older install is kept once as .pre-sigmond-link.
+info "Installing sigmond-site-timing → /usr/local/sbin/"
+$SUDO bash "$REPO_DIR/scripts/install/site-timing-link.sh" \
+    || warn "could not link /usr/local/sbin/sigmond-site-timing — see the line above"
+
 # radiod drop-in: patient retry instead of a five-restart budget.
 if compgen -G "/etc/systemd/system/radiod@*.service" >/dev/null 2>&1 || \
    systemctl list-unit-files "radiod@.service" &>/dev/null; then
