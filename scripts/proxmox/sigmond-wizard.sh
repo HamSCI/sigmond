@@ -4130,15 +4130,21 @@ fi
 # sigmond-site-timing: everything the timing chain needs from the local
 # site, discovered and wired automatically after bringup (rob 2026-07-29:
 # NO manual-only fixes — whatever the live station needed by hand must be
-# in the greenfield flow). The script rides the stick as its own payload
-# file (staged by the importer); the sentinel runs it after each
-# successful bringup, and it is safe to rerun any time.
+# in the greenfield flow). Safe to rerun any time.
+# Since 2026-11-15 the script lives in sigmond: the VM's own checkout holds
+# it, and /usr/local/sbin/sigmond-site-timing links there (sigmond's
+# install.sh made the link when the golden VM was built; this repeats it).
+# A VM whose sigmond predates the move gets the copy an older stick staged,
+# written beside the target and moved over it, never through a link.
 say "installing the site-timing auto-wiring helper in the VM"
-if [ -f /root/sigmond-appliance/sigmond-site-timing ]; then
-    gexec 60 "echo $(base64 -w0 /root/sigmond-appliance/sigmond-site-timing) | base64 -d > /usr/local/sbin/sigmond-site-timing && chmod 755 /usr/local/sbin/sigmond-site-timing" \
+ST_LINK=/opt/git/sigmond/sigmond/scripts/install/site-timing-link.sh
+if gexec 60 "[ -f $ST_LINK ] && bash $ST_LINK"; then
+    :
+elif [ -f /root/sigmond-appliance/sigmond-site-timing ]; then
+    gexec 60 "echo $(base64 -w0 /root/sigmond-appliance/sigmond-site-timing) | base64 -d > /usr/local/sbin/.sigmond-site-timing.new && chmod 755 /usr/local/sbin/.sigmond-site-timing.new && mv -f /usr/local/sbin/.sigmond-site-timing.new /usr/local/sbin/sigmond-site-timing" \
         || say "WARN: could not install sigmond-site-timing"
 else
-    say "WARN: sigmond-site-timing not staged — timing chain will need manual wiring"
+    say "WARN: sigmond-site-timing not in the VM's sigmond and not staged — timing chain will need manual wiring"
 fi
 # ⛔ Tell the VM which network the SITE is on.  site-timing discovers a LAN
 # stratum-1 (T4) and a GNSS VTEC stream (:9000) by scanning the VM's own
