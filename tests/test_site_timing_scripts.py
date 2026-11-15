@@ -32,3 +32,33 @@ def test_site_timing_script(script):
     out = r.stdout + r.stderr
     assert r.returncode == 0, out[-4000:]
     assert 'SKIP' not in out, out[-2000:]
+
+
+def test_siblings_resolve_through_the_sbin_link(tmp_path):
+    """Run through a symlink (as /usr/local/sbin/sigmond-site-timing is),
+    the script finds lib/ and sigmond-ts1-advertise in its real checkout;
+    as a plain copy elsewhere, it falls back to the fixed paths."""
+    repo = TESTS.parent
+    text = (repo / 'bin' / 'sigmond-site-timing').read_text()
+    head = text[:text.index('\nsay(){')]
+    probe = head + '\necho "$_ST_LIB|$_ST_TS1_ADVERTISE"\n'
+    fake = tmp_path / 'checkout'
+    (fake / 'bin').mkdir(parents=True)
+    (fake / 'lib' / 'sigmond').mkdir(parents=True)
+    (fake / 'lib' / 'sigmond' / 'sdr_map.py').write_text('')
+    adv = fake / 'bin' / 'sigmond-ts1-advertise'
+    adv.write_text('#!/bin/sh\n')
+    adv.chmod(0o755)
+    real = fake / 'bin' / 'sigmond-site-timing'
+    real.write_text(probe)
+    real.chmod(0o755)
+    link = tmp_path / 'sbin' / 'sigmond-site-timing'
+    link.parent.mkdir()
+    link.symlink_to(real)
+    out = subprocess.run([str(link)], capture_output=True, text=True).stdout.strip()
+    assert out == f'{fake}/lib|{fake}/bin/sigmond-ts1-advertise'
+    plain = tmp_path / 'plain'
+    plain.write_text(probe)
+    plain.chmod(0o755)
+    out = subprocess.run([str(plain)], capture_output=True, text=True).stdout.strip()
+    assert out == '/opt/git/sigmond/sigmond/lib|/usr/local/sbin/sigmond-ts1-advertise'

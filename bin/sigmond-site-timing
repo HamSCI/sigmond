@@ -1,7 +1,9 @@
 #!/bin/bash
 # sigmond-site-timing — wire hf-timestd's timing chain to the local site.
-# Runs INSIDE the decoder VM; installed by sigmond-setup, invoked by the
-# SDR sentinel after each successful bringup, and safe to rerun any time
+# Runs INSIDE the decoder VM (or on a bare-metal station).  Lives in sigmond;
+# install.sh links /usr/local/sbin/sigmond-site-timing to this file, so every
+# smd update carries it.  Run by the wizard, firstrun bring-up, the
+# location check and smd align, and safe to rerun any time
 # (every step skips when already wired). Encodes what used to be manual
 # post-install work (rob 2026-07-29: NO manual-only fixes — anything the
 # live station needed by hand must be in the greenfield flow):
@@ -13,6 +15,15 @@
 #   5. timestd profile "full"
 #   6. hs-uploader key ownership repair (sigmond#41 family, until upstream fix)
 set -u
+# This script runs through the /usr/local/sbin link to sigmond's checkout.
+# Siblings it needs (lib/sigmond, bin/sigmond-ts1-advertise) come from the
+# checkout it really lives in; the fixed paths are the fallback for a plain
+# copy left by an older install.
+_ST_ROOT=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." 2>/dev/null && pwd)
+_ST_LIB=/opt/git/sigmond/sigmond/lib
+[ -f "$_ST_ROOT/lib/sigmond/sdr_map.py" ] && _ST_LIB="$_ST_ROOT/lib"
+_ST_TS1_ADVERTISE=/usr/local/sbin/sigmond-ts1-advertise
+[ -x "$_ST_ROOT/bin/sigmond-ts1-advertise" ] && _ST_TS1_ADVERTISE="$_ST_ROOT/bin/sigmond-ts1-advertise"
 say(){ echo "[site-timing] $*" | systemd-cat -t sigmond-site-timing -p notice; }
 # smd refuses to run when SUDO_USER is set, and a person runs this script with
 # sudo.  Every smd call below goes through this wrapper, which clears SUDO_*
@@ -659,9 +670,9 @@ fi
 # (the authority runner reads t6_pps).  Never metrology: it reads authority
 # state, and stopping it kills T6 (N8UR 2026-11-14).
 if [ -f "$CFG" ]; then
-    T6LAN=$(SIGMOND_LIB="${SIGMOND_LIB:-/opt/git/sigmond/sigmond/lib}" python3 - "$CFG" \
+    T6LAN=$(SIGMOND_LIB="${SIGMOND_LIB:-${_ST_LIB:-/opt/git/sigmond/sigmond/lib}}" python3 - "$CFG" \
         "${TS1_LOCAL_GLOB:-/dev/serial/by-id/usb-Adafruit_Trinket_M0_*}" \
-        "${TS1_BROWSE_CMD:-/usr/local/sbin/sigmond-ts1-advertise}" \
+        "${TS1_BROWSE_CMD:-${_ST_TS1_ADVERTISE:-/usr/local/sbin/sigmond-ts1-advertise}}" \
         "${RADIOD_CONF_GLOB:-/etc/radio/radiod@*.conf}" "${TS1_LAN_MAX_AGE_S:-1800}" \
         "${TS1_TRUST_FILE:-/etc/sigmond/ts1-trust.toml}" 2>&1 <<'PYEOF'
 import copy, glob, ipaddress, json, os, re, shutil, subprocess, sys, time, tomllib
