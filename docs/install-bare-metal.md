@@ -152,7 +152,19 @@ Proxmox host to align`; that line is expected.  It may also offer to install
 `sigmond-location-check`, a helper script the image carries; take it.  `sigmond-site-timing`
 lives in sigmond itself: `/usr/local/sbin/sigmond-site-timing` links to
 `/opt/git/sigmond/sigmond/bin/sigmond-site-timing`, so each update of sigmond carries it.  A plain
-copy left there by hand is kept once as `sigmond-site-timing.pre-sigmond-link`.  A component you run ahead of the release stays where it is unless you add
+copy left there by hand is kept once as `sigmond-site-timing.pre-sigmond-link`.
+
+`sigmond-site-timing` wires a LAN stratum-1 NTP server or a LAN GNSS stream (port 9000) only after
+you accept it.  When it finds one you have not accepted, it writes nothing and logs an offer with
+the command that accepts it (`journalctl -t sigmond-site-timing`):
+
+```bash
+sudo sigmond-site-timing --trust-ntp 192.168.8.144   # record the server, then wire it
+sudo sigmond-site-timing --trust-gnss 192.168.8.50   # the same for the GNSS stream
+sigmond-site-timing --show-trust                     # what is accepted (/etc/sigmond/lan-trust.toml)
+```
+
+Servers wired before this record existed stay as they are.  A component you run ahead of the release stays where it is unless you add
 `--allow-rollback`.
 
 Debian itself stays yours.  Update it as you would any machine you run; sigmond pins none of its

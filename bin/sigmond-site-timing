@@ -8,9 +8,11 @@
 # post-install work (rob 2026-07-29: NO manual-only fixes — anything the
 # live station needed by hand must be in the greenfield flow):
 #   1. chrony refclocks for the timestd FUSE/HPPS feed
-#   2. LAN stratum-1 NTP discovery → chrony local time servers
+#   2. LAN stratum-1 NTP: wire the servers the operator trusts; OFFER the rest
+#      (sudo sigmond-site-timing --trust-ntp <addr>; record in lan-trust.toml)
 #   3. metrology channel env files (from [station]) + per-channel instances
-#   4. LAN GNSS UBX stream discovery (:9000) → [gnss_vtec]
+#   4. LAN GNSS stream (:9000): wire the host the operator trusts; OFFER one
+#      found (sudo sigmond-site-timing --trust-gnss <addr>)
 #   4.9 T6 from a TS-1 the operator declared (ts1 trust), shared by splitter
 #   5. timestd profile "full"
 #   6. hs-uploader key ownership repair (sigmond#41 family, until upstream fix)
@@ -29,6 +31,108 @@ say(){ echo "[site-timing] $*" | systemd-cat -t sigmond-site-timing -p notice; }
 # sudo.  Every smd call below goes through this wrapper, which clears SUDO_*
 # (sigmond-location-check does the same for `smd config render`).
 smd(){ env -u SUDO_USER -u SUDO_UID -u SUDO_GID -u SUDO_COMMAND smd "$@"; }
+
+# ── the LAN trust record ────────────────────────────────────────────────────
+# A LAN reply is no authority: any host can answer stratum 1 on UDP 123 or
+# speak UBX on :9000, and steps 2 and 4 used to wire whatever answered into
+# chrony and [gnss_vtec] (security review, 2026-11-15).  Discovery now OFFERS
+# and the operator adopts, as with the TS-1 (`ts1 trust`).  The adoption
+# lands in /etc/sigmond/lan-trust.toml:
+#     [ntp]   servers = ["192.168.8.144"]
+#     [gnss]  host = "192.168.8.50"
+# written by this script's own flags, so the one command works on a VM and on
+# bare metal alike (`sigmond-setup --ntp` exists only on a Proxmox host):
+#     sudo sigmond-site-timing --trust-ntp <addr>    add a LAN NTP server
+#     sudo sigmond-site-timing --untrust-ntp <addr>  drop one
+#     sudo sigmond-site-timing --trust-gnss <addr>   the LAN GNSS stream host
+#     sudo sigmond-site-timing --untrust-gnss
+#     sigmond-site-timing --show-trust
+# A trust flag records, then runs the wiring (add --no-run to record only).
+# Already wired before the record existed, and so trusted as it stands: every
+# server in local-timeservers.conf, whatever the wizard wrote to
+# 10-sigmond-ntp.conf (the operator named it), and a [gnss_vtec] host that is
+# set.  Nothing here removes a working time source.
+LAN_TRUST=${LAN_TRUST_FILE:-/etc/sigmond/lan-trust.toml}
+LAN_TRUST_NOTED=${LAN_TRUST_NOTED_FILE:-/var/lib/sigmond/lan-trust-legacy.noted}
+lan_trust() {   # lan_trust get-ntp | get-gnss | add-ntp A | del-ntp A | set-gnss A | del-gnss | show
+    python3 - "$LAN_TRUST" "$@" <<'PYEOF'
+import ipaddress, os, sys, tomllib
+path, verb, arg = sys.argv[1], sys.argv[2], (sys.argv[3] if len(sys.argv) > 3 else '')
+try:
+    with open(path, 'rb') as f:
+        t = tomllib.load(f)
+except FileNotFoundError:
+    t = {}
+except (OSError, tomllib.TOMLDecodeError) as e:
+    sys.exit('%s unreadable (%s) - fix or remove it' % (path, e))
+def addr(v):
+    try:
+        return str(ipaddress.ip_address(v))
+    except (ValueError, TypeError):
+        return None
+ntp = [a for a in (addr(v) for v in (t.get('ntp') or {}).get('servers', []) or []) if a]
+gnss = addr((t.get('gnss') or {}).get('host'))
+if verb == 'get-ntp':
+    print('\n'.join(ntp)); sys.exit(0)
+if verb == 'get-gnss':
+    print(gnss or ''); sys.exit(0)
+if verb == 'show':
+    print('LAN NTP servers trusted: %s' % (', '.join(ntp) or 'none'))
+    print('LAN GNSS host trusted:   %s' % (gnss or 'none'))
+    print('(record: %s)' % path); sys.exit(0)
+if verb in ('add-ntp', 'del-ntp', 'set-gnss'):
+    a = addr(arg)
+    if a is None:
+        sys.exit('%r is not an IP address - the trust record holds addresses only' % arg)
+if verb == 'add-ntp':
+    ntp = ntp + [a] if a not in ntp else ntp
+elif verb == 'del-ntp':
+    ntp = [x for x in ntp if x != a]
+elif verb == 'set-gnss':
+    gnss = a
+elif verb == 'del-gnss':
+    gnss = None
+else:
+    sys.exit('unknown verb %s' % verb)
+out = ['# LAN time sources the operator trusts; sigmond-site-timing wires only these.',
+       '# Change with: sudo sigmond-site-timing --trust-ntp/--untrust-ntp/--trust-gnss/--untrust-gnss',
+       '[ntp]', 'servers = [%s]' % ', '.join('"%s"' % x for x in ntp), '', '[gnss]']
+if gnss:
+    out.append('host = "%s"' % gnss)
+text = '\n'.join(out) + '\n'
+tomllib.loads(text)
+os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+tmp = path + '.tmp'
+with open(tmp, 'w') as f:
+    f.write(text)
+os.chmod(tmp, 0o644)
+os.replace(tmp, path)
+print('recorded in %s' % path)
+PYEOF
+}
+lan_noted_once() {   # lan_noted_once <key>: true the first time only
+    grep -qxF "$1" "$LAN_TRUST_NOTED" 2>/dev/null && return 1
+    mkdir -p "$(dirname "$LAN_TRUST_NOTED")" 2>/dev/null
+    echo "$1" >> "$LAN_TRUST_NOTED" 2>/dev/null
+    return 0
+}
+if [ $# -gt 0 ]; then
+    _run=1; _rc=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --trust-ntp)    lan_trust add-ntp "${2:-}" || _rc=2; shift 2 || shift ;;
+            --untrust-ntp)  lan_trust del-ntp "${2:-}" || _rc=2; shift 2 || shift ;;
+            --trust-gnss)   lan_trust set-gnss "${2:-}" || _rc=2; shift 2 || shift ;;
+            --untrust-gnss) lan_trust del-gnss || _rc=2; shift ;;
+            --show-trust)   lan_trust show || _rc=2; _run=0; shift ;;
+            --no-run)       _run=0; shift ;;
+            *) echo "usage: sigmond-site-timing [--trust-ntp ADDR] [--untrust-ntp ADDR] [--trust-gnss ADDR] [--untrust-gnss] [--show-trust] [--no-run]" >&2
+               exit 2 ;;
+        esac
+    done
+    [ "$_rc" = 0 ] || exit "$_rc"
+    [ "$_run" = 1 ] || exit 0
+fi
 command -v timestd >/dev/null 2>&1 || { say "hf-timestd not installed - skipping"; exit 0; }
 CFG=/etc/hf-timestd/timestd-config.toml
 SUBNET=$(ip -4 route | awk '/proto kernel/{print $1; exit}')
@@ -84,16 +188,49 @@ if [ -e "$RC_LEGACY" ]; then
 fi
 
 # ── 2. LAN stratum-1 NTP servers ────────────────────────────────────────────
-if [ -n "$SUBNET" ] && [ ! -f /etc/chrony/conf.d/local-timeservers.conf ]; then
+# Wire what the operator trusts (lan-trust.toml [ntp]); OFFER what the scan
+# finds.  A scan reply counts only from the probed address, as a server
+# (mode 4), not unsynchronised (leap 3), stratum 1, and echoing in its origin
+# timestamp the random transmit timestamp of our request -- so a host cannot
+# answer for another, and a stray or replayed packet does not qualify.
+LTS=/etc/chrony/conf.d/local-timeservers.conf
+WIZ=/etc/chrony/conf.d/10-sigmond-ntp.conf
+LTS_HAVE=$( [ -f "$LTS" ] && awk '$1 ~ /^(server|pool|peer)$/ {print $2}' "$LTS")
+WIZ_HAVE=$( [ -f "$WIZ" ] && awk '$1 ~ /^(server|peer)$/ {print $2}' "$WIZ")
+NTP_TRUSTED=$(lan_trust get-ntp 2>/dev/null)
+# An existing local-timeservers.conf predates the record: its servers stay,
+# trusted as they stand.  Say so once.
+_untracked=""
+for ip in $LTS_HAVE; do printf '%s\n' "$NTP_TRUSTED" | grep -qxF "$ip" || _untracked="$_untracked $ip"; done
+if [ -n "$_untracked" ] && lan_noted_once ntp; then
+    say "LAN NTP server(s)${_untracked} wired before the trust record existed - kept, as trusted.  To record: sudo sigmond-site-timing --trust-ntp <addr> --no-run (each)"
+fi
+_add=""
+for ip in $NTP_TRUSTED; do printf '%s\n' "$LTS_HAVE" | grep -qxF "$ip" || _add="$_add $ip"; done
+if [ -n "$_add" ]; then
+    for ip in $_add; do echo "server $ip iburst minpoll 4 maxpoll 6"; done >> "$LTS"
+    CHANGED=1; say "trusted LAN stratum-1 NTP wired:$_add"
+fi
+if [ -n "$SUBNET" ] && [ ! -f "$LTS" ]; then
     NTP1=$(python3 - "$SUBNET" <<'PYEOF'
-import ipaddress, socket, sys, concurrent.futures
+import ipaddress, os, socket, sys, concurrent.futures
 net = ipaddress.ip_network(sys.argv[1], strict=False)
 def q(ip):
+    ip = str(ip)
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(1)
-        s.sendto(b'\x1b' + 47*b'\0', (str(ip),123)); d,_ = s.recvfrom(512); s.close()
-        if d[1] == 1: return str(ip)
-    except Exception: pass
+        s.connect((ip, 123))                  # the kernel drops datagrams from any other source
+        xmt = os.urandom(8)
+        s.send(b'\x23' + 39 * b'\0' + xmt)   # v4 client; transmit timestamp at 40..47
+        d, src = s.recvfrom(512); s.close()
+    except Exception:
+        return None
+    if src[0] != ip or len(d) < 48: return None
+    if d[0] & 7 != 4 or d[0] >> 6 == 3 or d[1] != 1: return None
+    if d[24:32] != xmt: return None           # origin timestamp must echo our transmit
+    refid = d[12:16].decode('ascii', 'replace').strip('\0').strip()
+    refid = ''.join(c for c in refid if c.isalnum()) or '?'
+    return '%s %s' % (ip, refid)
 if net.num_addresses > 1024:
     # never report 'none found' for a network that was not looked at
     print(f"site LAN {net} too large to scan ({net.num_addresses} addresses) - not scanned", file=sys.stderr)
@@ -103,13 +240,14 @@ if net.num_addresses <= 1024:
             if r: print(r)
 PYEOF
 )
-    if [ -n "$NTP1" ]; then
-        for ip in $NTP1; do echo "server $ip iburst minpoll 4 maxpoll 6"; done \
-            > /etc/chrony/conf.d/local-timeservers.conf
-        CHANGED=1; say "local stratum-1 NTP wired: $(echo $NTP1 | tr '\n' ' ')"
-    else
-        say "no local stratum-1 NTP found - public pool only"
-    fi
+    while read -r ip refid; do
+        [ -n "$ip" ] || continue
+        printf '%s\n' "$WIZ_HAVE" | grep -qxF "$ip" && continue    # the operator named it already
+        say "LAN stratum-1 NTP OFFER: $ip (stratum 1, refid $refid) - not wired.  To use it: sudo sigmond-site-timing --trust-ntp $ip"
+    done <<EOF
+$NTP1
+EOF
+    [ -z "$NTP1" ] && say "no local stratum-1 NTP found - public pool only"
 fi
 [ "$CHANGED" = 1 ] && systemctl restart chrony 2>/dev/null
 
@@ -439,8 +577,20 @@ fi
 # timestd-vtec reads either: u-blox UBX (sync b5 62) or RTCM3 (preamble 0xD3,
 # MSM/1004 -- the Quectel LG290P at AC0G-ND).  Probing for UBX alone left
 # ND's VTEC off on every flash.
-if [ -n "$SUBNET" ] && [ -f "$CFG" ] && grep -q '<YOUR_GNSS_HOST>' "$CFG"; then
-    GHOST=$(python3 - "$SUBNET" <<'PYEOF'
+# The stream is wired only from the trust record (lan-trust.toml [gnss]); a
+# stream the scan finds is OFFERED.  A host already in [gnss_vtec] stays.
+GNSS_TRUSTED=$(lan_trust get-gnss 2>/dev/null)
+if [ -f "$CFG" ] && ! grep -q '<YOUR_GNSS_HOST>' "$CFG"; then
+    _gh=$(python3 -c 'import sys, tomllib; g = tomllib.load(open(sys.argv[1], "rb")).get("gnss_vtec", {}); print(g.get("host", "") if g.get("enabled") else "")' "$CFG" 2>/dev/null)
+    if [ -n "$_gh" ] && [ "$_gh" != "$GNSS_TRUSTED" ] && lan_noted_once gnss; then
+        say "GNSS stream host $_gh was set before the trust record existed - kept, as trusted.  To record: sudo sigmond-site-timing --trust-gnss <addr> --no-run"
+    fi
+fi
+GHOST=""
+if [ -f "$CFG" ] && grep -q '<YOUR_GNSS_HOST>' "$CFG" && [ -n "$GNSS_TRUSTED" ]; then
+    GHOST=$GNSS_TRUSTED
+elif [ -n "$SUBNET" ] && [ -f "$CFG" ] && grep -q '<YOUR_GNSS_HOST>' "$CFG"; then
+    GFOUND=$(python3 - "$SUBNET" <<'PYEOF'
 import ipaddress, socket, sys, concurrent.futures
 net = ipaddress.ip_network(sys.argv[1], strict=False)
 def probe(ip):
@@ -454,7 +604,7 @@ def probe(ip):
                 d += b
         except socket.timeout: pass
         s.close()
-        if b"\xb5\x62" in d: return str(ip)
+        if b"\xb5\x62" in d: return str(ip) + " UBX"
         # RTCM3: preamble D3, 6 reserved bits zero, 10-bit length.  Require
         # two frames back to back so a stray 0xD3 byte cannot qualify.
         for i in range(len(d) - 3):
@@ -462,7 +612,7 @@ def probe(ip):
                 n = ((d[i + 1] & 0x03) << 8) | d[i + 2]
                 j = i + 3 + n + 3
                 if j + 1 < len(d) and d[j] == 0xD3 and d[j + 1] & 0xFC == 0:
-                    return str(ip)
+                    return str(ip) + " RTCM3"
     except Exception: pass
 if net.num_addresses > 1024:
     # never report 'none found' for a network that was not looked at
@@ -473,25 +623,29 @@ if net.num_addresses <= 1024:
             if r: print(r); break
 PYEOF
 )
-    if [ -n "$GHOST" ]; then
-        cp -p "$CFG" "$CFG.bak-site-timing"
-        python3 - "$CFG" "$GHOST" <<'PYEOF'
+    if [ -n "$GFOUND" ]; then
+        read -r _gip _gproto <<<"$GFOUND"
+        say "GNSS stream OFFER: $_gip:9000 ($_gproto) - not wired.  To use it: sudo sigmond-site-timing --trust-gnss $_gip"
+    else
+        say "no local GNSS stream (UBX/RTCM3) on :9000 - vtec stays off"
+    fi
+fi
+if [ -n "$GHOST" ]; then
+    cp -p "$CFG" "$CFG.bak-site-timing"
+    python3 - "$CFG" "$GHOST" <<'PYEOF'
 import re, sys
 p, host = sys.argv[1], sys.argv[2]
 s = open(p).read()
 def sub(s, key, val):
     pat = re.compile(r"(\[gnss_vtec\].*?)(^" + key + r"\s*=\s*[^\n]*)", re.S | re.M)
     return pat.sub(lambda m: m.group(1) + key + " = " + val, s, count=1)
-s = sub(s, "enabled", "true  # auto-wired by sigmond-site-timing")
+s = sub(s, "enabled", "true  # wired by sigmond-site-timing from lan-trust.toml")
 s = sub(s, "host", '"%s"' % host)
 open(p, "w").write(s)
 PYEOF
-        say "GNSS stream (UBX/RTCM3) found: $GHOST:9000 - gnss_vtec enabled"
-        # an already-running vtec service read the config before this edit
-        systemctl try-restart timestd-vtec 2>/dev/null
-    else
-        say "no local GNSS stream (UBX/RTCM3) on :9000 - vtec stays off"
-    fi
+    say "trusted GNSS stream wired: $GHOST:9000 - gnss_vtec enabled"
+    # an already-running vtec service read the config before this edit
+    systemctl try-restart timestd-vtec 2>/dev/null
 fi
 
 # ── 4.5 meteor-scatter (MSK144) — dasi2 appliance policy: ON ────────────────

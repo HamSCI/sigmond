@@ -27,3 +27,33 @@ def test_fallback_never_redirects_into_the_link():
 
 def test_nowhere_else_in_the_wizard_writes_it():
     assert not re.search(r'>\s*/usr/local/sbin/sigmond-site-timing\b', WIZ)
+
+
+# --- LAN offers (security review, 2026-11-15) --------------------------------
+# site-timing in the VM wires a LAN NTP server or GNSS stream only from its
+# trust record now.  The wizard, with the operator present, offers what it
+# finds and records each yes in the VM.
+
+def _fn(name):
+    start = WIZ.index(f'{name}() {{')
+    return WIZ[start:WIZ.index('\n}\n', start)]
+
+
+def test_lan_offers_ask_only_on_a_tty():
+    body = _fn('ask_lan_extras')
+    assert body.index('[ -t 0 ] || return 0') < body.index('rd -r -p')
+
+
+def test_ask_ntp_ends_with_the_lan_offers():
+    assert 'ask_lan_extras "$scan"' in _fn('ask_ntp')
+
+
+def test_trust_is_recorded_only_into_a_site_timing_that_knows_it():
+    body = _fn('lan_trust_record')
+    assert body.index('grep -q -- --trust-ntp') < body.index('--trust-ntp $ip --no-run')
+    assert '--trust-gnss $GNSS_TRUST --no-run' in body
+
+
+def test_trust_is_recorded_after_site_timing_is_installed():
+    assert WIZ.index('\nlan_trust_record\n') > WIZ.index(
+        'say "installing the site-timing auto-wiring helper in the VM"')

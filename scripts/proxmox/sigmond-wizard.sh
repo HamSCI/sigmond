@@ -2347,12 +2347,14 @@ ntp_from_dhcp() {
 # Only stratum 1 counts: a LAN GPS+PPS server can become T4, while a router
 # serving stratum 2 or 3 adds nothing the public pool lacks -- and taking it
 # would make one unvetted box the only time source on both planes.  An
-# unsynchronised server (leap 3) is dropped too.  Prints nothing on an
+# unsynchronised server (leap 3) is dropped too, and so is a reply from an
+# address not probed or one whose origin timestamp does not echo the
+# request's random transmit timestamp.  Prints nothing on an
 # IPv6-only uplink.
 ntp_scan_lan() {
     command -v python3 >/dev/null 2>&1 || return 0
     python3 - <<'NTPSCANEOF' 2>/dev/null
-import ipaddress, socket, subprocess, time
+import ipaddress, os, socket, subprocess, time
 r = subprocess.run(["ip", "-4", "route", "show", "default"], capture_output=True, text=True).stdout.split()
 if "dev" not in r: raise SystemExit
 iface = r[r.index("dev") + 1]
@@ -2362,12 +2364,16 @@ if "inet" not in a: raise SystemExit
 me = ipaddress.ip_interface(a[a.index("inet") + 1])
 net = me.network if me.network.prefixlen >= 22 else ipaddress.ip_network(f"{me.ip}/22", strict=False)
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.setblocking(False)
-pkt = b"\x23" + b"\0" * 47          # version 4, mode 3 (client)
+# version 4, mode 3 (client); a random transmit timestamp (bytes 40-47) that
+# a real reply echoes as its origin timestamp (bytes 24-31)
+xmt = os.urandom(8)
+pkt = b"\x23" + b"\0" * 39 + xmt
+probed = set()
 t0 = time.monotonic()
 for h in net.hosts():
     if h == me.ip: continue
     for _ in range(3):
-        try: s.sendto(pkt, (str(h), 123)); break
+        try: s.sendto(pkt, (str(h), 123)); probed.add(str(h)); break
         except BlockingIOError: time.sleep(0.002)
         except OSError: break
 found = {}
@@ -2375,7 +2381,8 @@ while time.monotonic() - t0 < 2.0:
     try: data, (ip, _) = s.recvfrom(512)
     except BlockingIOError: time.sleep(0.02); continue
     except OSError: continue
-    if len(data) < 48 or data[0] & 7 != 4 or data[0] >> 6 == 3 or data[1] != 1: continue
+    if ip not in probed or len(data) < 48 or data[0] & 7 != 4 or data[0] >> 6 == 3 or data[1] != 1: continue
+    if data[24:32] != xmt: continue    # not an answer to our request
     found[ip] = (data[1], data[12:16].decode("ascii", "replace").strip("\0"))
 print(f"# {net}")
 for ip in sorted(found, key=lambda x: (x != gw, found[x][0], ipaddress.ip_address(x))):
@@ -2429,6 +2436,103 @@ EOF
     else
         echo "  → $NTP_PUBLIC_POOL, capped at $NTP_MAXSOURCES sources (not the ~30 a"
         echo "    stock install reaches)."
+    fi
+    ask_lan_extras "$scan"
+}
+
+# ask_lan_extras <scan>: the LAN stratum-1 servers and GNSS stream the decoder
+# VM's site-timing used to wire on its own.  Since 2026-11-15 it wires only
+# what the operator trusts (/etc/sigmond/lan-trust.toml in the VM) and logs
+# the rest as offers.  The operator is here now, so offer them here: a yes is
+# recorded in the VM once site-timing is installed (lan_trust_record).
+# ⛔ Only on a tty: a prompt on piped stdin eats the next answer (the
+# 2026-08-11 nested-test hunt).  Unattended, nothing is trusted, and
+# site-timing logs the offers in the VM's journal.
+NTP_LAN_TRUST=""
+GNSS_TRUST=""
+ask_lan_extras() {
+    local scan="${1:-}" extra="" _ip _st _ref _gw _a _g _gp
+    [ -t 0 ] || return 0
+    [ -n "$scan" ] || scan=$(ntp_scan_lan | grep -v '^#' | grep .)
+    while read -r _ip _st _ref _gw; do
+        [ -n "$_ip" ] && [ "$_ip" != "$NTP_LOCAL" ] && extra="$extra $_ip"
+    done <<EOF
+$scan
+EOF
+    extra="${extra# }"
+    if [ -n "$extra" ]; then
+        echo "  Stratum-1 NTP also answering on this network: $extra"
+        rd -r -p "  Add them as further time sources for the station? [Y/n]: " _a
+        case "${_a:-y}" in [Yy]*) NTP_LAN_TRUST="$extra" ;; esac
+    fi
+    echo "  Looking for a GNSS receiver streaming UBX or RTCM3 on port 9000 (~5 s)..."
+    _g=$(gnss_scan_lan | head -1)
+    if [ -n "$_g" ]; then
+        read -r _ip _gp <<<"$_g"
+        echo "  Found a GNSS stream at $_ip:9000 ($_gp) — it feeds the ionosphere (VTEC) product."
+        rd -r -p "  Use it? [Y/n]: " _a
+        case "${_a:-y}" in [Yy]*) GNSS_TRUST="$_ip" ;; esac
+    fi
+}
+
+# gnss_scan_lan -> "ip UBX|RTCM3" per host on the uplink's IPv4 subnet (the
+# /22 around this host when wider) that streams u-blox UBX or two back-to-back
+# RTCM3 frames on TCP 9000 -- the same test site-timing applies.
+gnss_scan_lan() {
+    command -v python3 >/dev/null 2>&1 || return 0
+    python3 - <<'GNSSSCANEOF' 2>/dev/null
+import concurrent.futures, ipaddress, socket, subprocess
+r = subprocess.run(["ip", "-4", "route", "show", "default"], capture_output=True, text=True).stdout.split()
+if "dev" not in r: raise SystemExit
+iface = r[r.index("dev") + 1]
+a = subprocess.run(["ip", "-4", "-o", "addr", "show", iface], capture_output=True, text=True).stdout.split()
+if "inet" not in a: raise SystemExit
+me = ipaddress.ip_interface(a[a.index("inet") + 1])
+net = me.network if me.network.prefixlen >= 22 else ipaddress.ip_network(f"{me.ip}/22", strict=False)
+def probe(ip):
+    try:
+        s = socket.create_connection((str(ip), 9000), timeout=1); s.settimeout(2)
+        d = b""
+        try:
+            while len(d) < 2048:
+                b = s.recv(2048)
+                if not b: break
+                d += b
+        except socket.timeout: pass
+        s.close()
+    except OSError:
+        return None
+    if b"\xb5\x62" in d: return f"{ip} UBX"
+    for i in range(len(d) - 3):
+        if d[i] == 0xD3 and d[i + 1] & 0xFC == 0:
+            n = ((d[i + 1] & 0x03) << 8) | d[i + 2]
+            j = i + 3 + n + 3
+            if j + 1 < len(d) and d[j] == 0xD3 and d[j + 1] & 0xFC == 0:
+                return f"{ip} RTCM3"
+    return None
+with concurrent.futures.ThreadPoolExecutor(128) as ex:
+    for res in ex.map(probe, [h for h in net.hosts() if h != me.ip]):
+        if res: print(res)
+GNSSSCANEOF
+}
+
+# lan_trust_record: write the operator's yes from ask_lan_extras into the VM's
+# trust record.  Record only (--no-run): bring-up runs site-timing later,
+# once hf-timestd's config exists.  A VM whose site-timing predates the trust
+# record wires whatever answers on its own, so nothing needs recording there.
+lan_trust_record() {
+    local ip
+    [ -n "$NTP_LAN_TRUST$GNSS_TRUST" ] || return 0
+    gexec 15 "grep -q -- --trust-ntp /usr/local/sbin/sigmond-site-timing" || return 0
+    for ip in $NTP_LAN_TRUST; do
+        gexec 30 "/usr/local/sbin/sigmond-site-timing --trust-ntp $ip --no-run" \
+            && say "LAN NTP server $ip trusted in the VM" \
+            || say "WARN: could not record LAN NTP server $ip in the VM -- sudo sigmond-site-timing --trust-ntp $ip"
+    done
+    if [ -n "$GNSS_TRUST" ]; then
+        gexec 30 "/usr/local/sbin/sigmond-site-timing --trust-gnss $GNSS_TRUST --no-run" \
+            && say "GNSS stream $GNSS_TRUST trusted in the VM" \
+            || say "WARN: could not record GNSS stream $GNSS_TRUST in the VM -- sudo sigmond-site-timing --trust-gnss $GNSS_TRUST"
     fi
 }
 
@@ -4146,6 +4250,7 @@ elif [ -f /root/sigmond-appliance/sigmond-site-timing ]; then
 else
     say "WARN: sigmond-site-timing not in the VM's sigmond and not staged — timing chain will need manual wiring"
 fi
+lan_trust_record
 # ⛔ Tell the VM which network the SITE is on.  site-timing discovers a LAN
 # stratum-1 (T4) and a GNSS VTEC stream (:9000) by scanning the VM's own
 # kernel route -- but since v3.50 the VM sits on the host-only 10.99.0.0/30

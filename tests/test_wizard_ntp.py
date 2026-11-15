@@ -243,8 +243,12 @@ def _scan_py() -> str:
     return m.group(1)
 
 
-def _reply(stratum: int, refid: bytes, leap: int = 0) -> bytes:
-    return bytes([leap << 6 | 4 << 3 | 4, stratum]) + b"\0" * 10 + refid + b"\0" * 32
+ECHO = b"\xee" * 8   # stands for "the origin timestamp echoes our request"
+
+
+def _reply(stratum: int, refid: bytes, leap: int = 0, origin: bytes = ECHO) -> bytes:
+    return (bytes([leap << 6 | 4 << 3 | 4, stratum]) + b"\0" * 10 + refid
+            + b"\0" * 8 + origin + b"\0" * 16)
 
 
 def scan_with(replies: dict) -> list[str]:
@@ -259,10 +263,13 @@ def scan_with(replies: dict) -> list[str]:
         class Sock:
             def __init__(self, *a): self.q = list(REPLIES.items())
             def setblocking(self, flag): pass
-            def sendto(self, pkt, addr): pass
+            def sendto(self, pkt, addr): self.xmt = pkt[40:48]
             def recvfrom(self, n):
                 if not self.q: raise BlockingIOError
-                ip, data = self.q.pop(0); return data, (ip, 123)
+                ip, data = self.q.pop(0)
+                if data[24:32] == b"\\xee" * 8:
+                    data = data[:24] + self.xmt + data[32:]
+                return data, (ip, 123)
         socket.socket = Sock
     """)
     p = subprocess.run(["python3", "-c", fake + _scan_py()],
@@ -289,3 +296,15 @@ def test_scan_puts_the_gateway_first():
                        "192.168.7.1": _reply(1, b"GPS\0")})
     assert [l.split()[0] for l in found] == ["192.168.7.1", "192.168.7.4"]
     assert found[0].endswith("gateway")
+
+
+def test_scan_drops_a_reply_that_does_not_echo_our_transmit_timestamp():
+    """Security review, 2026-11-15: a reply counts only when its origin
+    timestamp echoes the request's random transmit timestamp."""
+    assert scan_with({"192.168.7.4": _reply(1, b"GPS\0", origin=b"\0" * 8)}) == []
+    assert scan_with({"192.168.7.4": _reply(1, b"GPS\0", origin=b"\x01" * 8)}) == []
+
+
+def test_scan_drops_a_reply_from_an_address_it_did_not_probe():
+    assert scan_with({"10.9.9.9": _reply(1, b"GPS\0")}) == []
+    assert scan_with({"192.168.7.2": _reply(1, b"GPS\0")}) == []   # ourselves
