@@ -1686,3 +1686,73 @@ class DeployBuildTests(unittest.TestCase):
         step = align_apply.Step("station-web", "current", "x", built=True)
         align_apply.record_history(rel(), [step], history=lines.append, now=lambda: "T")
         self.assertEqual(len(lines), 1)
+
+
+class RepointOriginTests(unittest.TestCase):
+    """A catalog entry may name the repo it replaces (ka9q-web moved to a fork
+    while a fix waits upstream).  Align repoints origin from that repo only;
+    any other mismatch still refuses."""
+
+    FORK = "https://github.com/mijahauan/ka9q-web"
+    OLD = "https://github.com/wa2n-code/ka9q-web"
+
+    def _catalog(self, replaces=(OLD,)):
+        return {"ka9q-web": types.SimpleNamespace(repo=self.FORK, replaces=tuple(replaces))}
+
+    def test_origin_named_in_replaces_is_repointed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _repo(base, "ka9q-web")
+            git = _MultiFakeGit()
+            origins = {"ka9q-web": self.OLD + ".git"}
+            said = []
+            align_apply.repoint_origins(base, self._catalog(), origins, run=git,
+                                        as_owner=lambda o, a: ["as", o, *a],
+                                        owner_of=lambda p: "sigmond", say=said.append)
+            self.assertEqual(origins["ka9q-web"], self.FORK)
+            seturl = [c for c in git.calls if git._subcommand(c) == "remote"]
+            self.assertEqual(len(seturl), 1)
+            self.assertEqual(seturl[0][:2], ["as", "sigmond"])
+            self.assertEqual(seturl[0][-3:], ["set-url", "origin", self.FORK])
+            self.assertIn("repointed", said[0])
+
+    def test_origin_not_in_replaces_is_left_and_still_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _repo(base, "ka9q-web")
+            git = _MultiFakeGit()
+            catalog = self._catalog()
+            origins = {"ka9q-web": "https://github.com/someone-else/ka9q-web"}
+            align_apply.repoint_origins(base, catalog, origins, run=git,
+                                        as_owner=lambda o, a: a,
+                                        owner_of=lambda p: "sigmond", say=lambda m: None)
+            self.assertEqual(origins["ka9q-web"], "https://github.com/someone-else/ka9q-web")
+            self.assertFalse(git.calls)
+            ctx = _ctx(base, git, ["ka9q-web"], catalog=catalog, origins=origins)
+            steps = align_apply.apply_plan(rel(), [align.Item("ka9q-web", "forward", "1" * 40, "2" * 40)], ctx)
+            self.assertEqual(steps[0].outcome, "refused")
+
+    def test_matching_origin_is_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _repo(base, "ka9q-web")
+            git = _MultiFakeGit()
+            origins = {"ka9q-web": "git@github.com:mijahauan/ka9q-web.git"}
+            align_apply.repoint_origins(base, self._catalog(), origins, run=git,
+                                        as_owner=lambda o, a: a,
+                                        owner_of=lambda p: "sigmond", say=lambda m: None)
+            self.assertFalse(git.calls)
+
+    def test_failed_set_url_leaves_origin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _repo(base, "ka9q-web")
+            git = _MultiFakeGit()
+            git.raise_on["remote"] = OSError("boom")
+            origins = {"ka9q-web": self.OLD}
+            said = []
+            align_apply.repoint_origins(base, self._catalog(), origins, run=git,
+                                        as_owner=lambda o, a: a,
+                                        owner_of=lambda p: "sigmond", say=said.append)
+            self.assertEqual(origins["ka9q-web"], self.OLD)
+            self.assertIn("could not repoint", said[0])

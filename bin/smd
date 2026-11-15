@@ -9052,6 +9052,17 @@ def _align_apply(args) -> int:
             return 2
 
         live, dirty, origins, errors = _align_live_state(base)
+        catalog = {}
+        try:
+            from sigmond.catalog import load_catalog
+            catalog = load_catalog()
+        except Exception:
+            catalog = {}
+        # Before the ancestry fetch: a component the catalog moved to a new
+        # repo (ka9q-web -> fork) must fetch from that repo, or its pin
+        # never arrives and classify refuses it "ancestry unknown".
+        align_apply.repoint_origins(Path(base), catalog, origins,
+                                    as_owner=_runuser, say=print)
         items = align.plan_align(rel, live, dirty, errors, local=_locally_managed())
         prefetched: dict = {}
         skipped_budget: set = set()
@@ -9093,13 +9104,6 @@ def _align_apply(args) -> int:
                              'smd install ka9q-radio')
             for it in radiod_missing]
         items = [it for it in items if it not in radiod_missing]
-
-        catalog = {}
-        try:
-            from sigmond.catalog import load_catalog
-            catalog = load_catalog()
-        except Exception:
-            catalog = {}
 
         ctx = align_apply.Ctx(
             base=Path(base), run=subprocess.run, as_owner=_runuser,

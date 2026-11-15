@@ -99,6 +99,10 @@ class CatalogEntry:
     # not hardware-gated.  Declared here so the gated set lives in config, not
     # code (harmonize._hardware_gated_registry).
     hardware_gated: Optional[str] = None
+    replaces: tuple[str, ...] = ()
+    """Repo URLs this entry's ``repo`` takes over from.  `smd align --apply`
+    repoints a checkout whose origin is one of these (align_apply.
+    repoint_origins); any other origin mismatch is still refused."""
     services: tuple[str, ...] = ()
     """systemd units the entry owns even when its kind is "library"
     (hs-uploader).  A NAMED `smd start|stop|restart` acts on them directly
@@ -221,6 +225,7 @@ def _entry_from_toml_block(name: str, cfg: dict) -> CatalogEntry:
         hardware_gated=cfg.get('hardware_gated') or None,
         pin=cfg.get('pin') or None,
         services=tuple(cfg.get('services', ())),
+        replaces=tuple(cfg.get('replaces', ())),
     )
 
 
@@ -250,6 +255,8 @@ def _entry_to_block(entry: CatalogEntry) -> dict:
         block['pin'] = entry.pin
     if entry.services:
         block['services'] = list(entry.services)
+    if entry.replaces:
+        block['replaces'] = list(entry.replaces)
     return block
 
 

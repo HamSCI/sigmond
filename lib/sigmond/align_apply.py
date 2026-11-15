@@ -275,6 +275,42 @@ def normalize_repo(url: str) -> str:
     return u
 
 
+def repoint_origins(base, catalog: dict, origins: dict, *,
+                    run: Callable = subprocess.run,
+                    as_owner: Callable = _default_as_owner,
+                    owner_of: Callable[[Path], str] = lambda p: Path(p).owner(),
+                    say: Callable[[str], None] = print) -> None:
+    """Point a checkout's origin at its catalog repo when the catalog names
+    the old origin in ``replaces``, and update ``origins`` to match.
+
+    ka9q-web moved to a fork (2026-11-15) while its audio fix waits upstream
+    as wa2n-code/ka9q-web#12; every station's clone still names wa2n as
+    origin, and the origin check below refuses any mismatch.  Only a repo
+    the catalog itself lists is followed: any other mismatch stays as it was,
+    and the origin check refuses it as before.  Runs before the ancestry
+    fetch, so the pinned fork commit arrives with that fetch."""
+    for name, origin in list(origins.items()):
+        entry = catalog.get(name)
+        new = getattr(entry, "repo", None) if entry is not None else None
+        if not origin or not new or normalize_repo(origin) == normalize_repo(new):
+            continue
+        if normalize_repo(origin) not in {normalize_repo(r) for r in getattr(entry, "replaces", ())}:
+            continue
+        repo = Path(base) / name
+        try:
+            argv = as_owner(owner_of(repo), git(repo, "remote", "set-url", "origin", new))
+            r = _run(run, argv, repo, "remote set-url", 30)
+            ok = r.returncode == 0
+            why = (r.stderr or "").strip()
+        except (ApplyError, KeyError, OSError) as e:
+            ok, why = False, str(e)
+        if ok:
+            origins[name] = new
+            say(f"{name}: origin repointed {origin} -> {new} (catalog replaces it)")
+        else:
+            say(f"{name}: could not repoint origin to {new}: {why}")
+
+
 _DIRTY_WORKTREE_NOTE = (
     '{name}: dirty working tree ({files}) — never stashed or discarded '
     '(CONTRIBUTING.md §8); commit or revert by hand, then retry{hint}')
