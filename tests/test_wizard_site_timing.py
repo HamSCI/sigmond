@@ -42,6 +42,8 @@ def _fn(name):
 def test_lan_offers_ask_only_on_a_tty():
     body = _fn('ask_lan_extras')
     assert body.index('[ -t 0 ] || return 0') < body.index('rd -r -p')
+    assert "[y/N]" in body and "[Y/n]" not in body
+    assert body.count("${_a:-n}") == 2
 
 
 def test_ask_ntp_ends_with_the_lan_offers():

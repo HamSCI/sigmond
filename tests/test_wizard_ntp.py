@@ -246,9 +246,10 @@ def _scan_py() -> str:
 ECHO = b"\xee" * 8   # stands for "the origin timestamp echoes our request"
 
 
-def _reply(stratum: int, refid: bytes, leap: int = 0, origin: bytes = ECHO) -> bytes:
+def _reply(stratum: int, refid: bytes, leap: int = 0, origin: bytes = ECHO,
+           times: bytes = b"\0" * 16) -> bytes:
     return (bytes([leap << 6 | 4 << 3 | 4, stratum]) + b"\0" * 10 + refid
-            + b"\0" * 8 + origin + b"\0" * 16)
+            + b"\0" * 8 + origin + times)
 
 
 def scan_with(replies: dict) -> list[str]:
@@ -284,7 +285,7 @@ def test_scan_keeps_only_stratum_1():
         "192.168.7.4": _reply(1, b"GPS\0"),              # LAN GPS+PPS server
         "192.168.7.5": _reply(2, bytes([192, 168, 7, 4])),
     })
-    assert found == ["192.168.7.4 1 GPS "]
+    assert found == ["192.168.7.4 1 GPS ? "]
 
 
 def test_scan_drops_an_unsynchronised_stratum_1():
@@ -308,3 +309,68 @@ def test_scan_drops_a_reply_that_does_not_echo_our_transmit_timestamp():
 def test_scan_drops_a_reply_from_an_address_it_did_not_probe():
     assert scan_with({"10.9.9.9": _reply(1, b"GPS\0")}) == []
     assert scan_with({"192.168.7.2": _reply(1, b"GPS\0")}) == []   # ourselves
+
+
+def test_scan_reports_the_measured_offset():
+    import time
+    t = time.time() + 2208988800 + 0.25           # a server 250 ms ahead
+    ts = int(t).to_bytes(4, "big") + int((t % 1) * 2**32).to_bytes(4, "big")
+    found = scan_with({"192.168.7.4": _reply(1, b"GPS\0", times=ts + ts)})
+    assert len(found) == 1
+    off = float(found[0].split()[3].rstrip("ms"))
+    assert 150 < off < 350, found
+
+
+# --- ask_lan_extras: one question per candidate, default NO ---------------------
+# Security review, 2026-11-15: a LAN reply is unauthenticated, so Enter must
+# adopt nothing.  Run under a pty: the function asks only on a tty.
+
+def _ask_lan(answers: str, scan: str, gnss: str = "", tty: bool = True) -> dict:
+    import os, pty
+    script = textwrap.dedent(f"""
+        rd(){{ read "$@" || exit 1; }}
+        NTP_LOCAL="192.168.7.4"
+        ntp_scan_lan(){{ printf '%s\\n' "# 192.168.7.0/29"; }}
+        gnss_scan_lan(){{ printf '%s' "{gnss}"; }}
+    """) + shell_func("ask_lan_extras") + textwrap.dedent(f"""
+        NTP_LAN_TRUST=""; GNSS_TRUST=""
+        ask_lan_extras "$(printf '{scan}')"
+        echo "NTP=[$NTP_LAN_TRUST] GNSS=[$GNSS_TRUST]"
+    """)
+    if tty:
+        master, slave = pty.openpty()
+        os.write(master, answers.encode())
+        p = subprocess.run(["bash", "-c", script], stdin=slave, capture_output=True,
+                           text=True, timeout=30)
+        os.close(master); os.close(slave)
+    else:
+        p = subprocess.run(["bash", "-c", script], input=answers, capture_output=True,
+                           text=True, timeout=30)
+    out = p.stdout
+    m = re.search(r"NTP=\[(.*?)\] GNSS=\[(.*?)\]", out)
+    assert m, out + p.stderr
+    return {"ntp": m.group(1), "gnss": m.group(2), "out": out}
+
+
+SCAN = "192.168.7.4 1 GPS +0.1ms gateway\\n192.168.7.5 1 PPS -0.3ms \\n192.168.7.6 1 GPS +12.0ms \\n"
+
+
+def test_enter_adopts_nothing():
+    r = _ask_lan("\n\n\n", SCAN, gnss="192.168.7.3 RTCM3")
+    assert r["ntp"] == "" and r["gnss"] == ""
+
+
+def test_each_candidate_is_asked_once_and_only_a_yes_adopts():
+    r = _ask_lan("n\ny\ny\n", SCAN, gnss="192.168.7.3 RTCM3")
+    assert r["ntp"] == "192.168.7.6"
+    assert r["gnss"] == "192.168.7.3"
+    # the chosen server (NTP_LOCAL) is not asked about; the others show
+    # address, stratum, refid and offset; the GNSS line shows its protocol
+    assert "192.168.7.4 as a further" not in r["out"]
+    assert "stratum-1 NTP at 192.168.7.5, synced to PPS, offset -0.3ms" in r["out"]
+    assert "192.168.7.3:9000 (RTCM3)" in r["out"]
+
+
+def test_unattended_run_asks_nothing_and_adopts_nothing():
+    r = _ask_lan("y\ny\ny\n", SCAN, gnss="192.168.7.3 UBX", tty=False)
+    assert r["ntp"] == "" and r["gnss"] == ""

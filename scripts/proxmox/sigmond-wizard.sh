@@ -2368,12 +2368,12 @@ s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.setblocking(False)
 # a real reply echoes as its origin timestamp (bytes 24-31)
 xmt = os.urandom(8)
 pkt = b"\x23" + b"\0" * 39 + xmt
-probed = set()
+probed = {}                         # address -> wall time the request left
 t0 = time.monotonic()
 for h in net.hosts():
     if h == me.ip: continue
     for _ in range(3):
-        try: s.sendto(pkt, (str(h), 123)); probed.add(str(h)); break
+        try: s.sendto(pkt, (str(h), 123)); probed[str(h)] = time.time(); break
         except BlockingIOError: time.sleep(0.002)
         except OSError: break
 found = {}
@@ -2383,15 +2383,27 @@ while time.monotonic() - t0 < 2.0:
     except OSError: continue
     if ip not in probed or len(data) < 48 or data[0] & 7 != 4 or data[0] >> 6 == 3 or data[1] != 1: continue
     if data[24:32] != xmt: continue    # not an answer to our request
-    found[ip] = (data[1], data[12:16].decode("ascii", "replace").strip("\0"))
+    t4 = time.time()
+    refid = "".join(c for c in data[12:16].decode("ascii", "replace").strip("\0") if c.isalnum()) or "?"
+    # offset = ((T2 - T1) + (T3 - T4)) / 2, the server's receive and transmit
+    # times (bytes 32-39, 40-47) against this host's send and receive times
+    def ntp_ts(b):
+        sec, frac = int.from_bytes(b[:4], "big"), int.from_bytes(b[4:], "big")
+        return sec - 2208988800 + frac / 2**32 if sec else None
+    t2, t3 = ntp_ts(data[32:40]), ntp_ts(data[40:48])
+    off = "?"
+    if t2 is not None and t3 is not None:
+        o = ((t2 - probed[ip]) + (t3 - t4)) / 2
+        if abs(o) < 86400: off = "%+.1fms" % (o * 1000)
+    found[ip] = (data[1], refid, off)
 print(f"# {net}")
 for ip in sorted(found, key=lambda x: (x != gw, found[x][0], ipaddress.ip_address(x))):
-    print(ip, found[ip][0], found[ip][1], "gateway" if ip == gw else "")
+    print(ip, found[ip][0], found[ip][1], found[ip][2], "gateway" if ip == gw else "")
 NTPSCANEOF
 }
 
 ask_ntp() {
-    local detected="" scan="" net="" _ip _st _ref _gw _where
+    local detected="" scan="" net="" _ip _st _ref _off _gw _where
     detected=$(ntp_from_dhcp)
     echo ""
     echo "  Time source, before this station's own timing comes up."
@@ -2408,9 +2420,9 @@ ask_ntp() {
         scan=$(printf '%s\n' "$scan" | grep -v '^#' | grep .)
         if [ -n "$scan" ]; then
             echo "  Found stratum-1 NTP on ${net:-this network}:"
-            while read -r _ip _st _ref _gw; do
+            while read -r _ip _st _ref _off _gw; do
                 _where=""; [ "$_gw" = gateway ] && _where=" — your router (default gateway)"
-                echo "    $_ip  stratum $_st, synced to $_ref$_where"
+                echo "    $_ip  stratum $_st, synced to $_ref, offset $_off$_where"
             done <<EOF
 $(printf '%s\n' "$scan" | head -5)
 EOF
@@ -2443,35 +2455,41 @@ EOF
 # ask_lan_extras <scan>: the LAN stratum-1 servers and GNSS stream the decoder
 # VM's site-timing used to wire on its own.  Since 2026-11-15 it wires only
 # what the operator trusts (/etc/sigmond/lan-trust.toml in the VM) and logs
-# the rest as offers.  The operator is here now, so offer them here: a yes is
-# recorded in the VM once site-timing is installed (lan_trust_record).
+# the rest as offers with the command that accepts them.  The operator is
+# here now, so the wizard shows each candidate and asks once for each.
+# ⛔ Default NO: a LAN reply is unauthenticated, so Enter adopts nothing
+# (security review, 2026-11-15).  Only a typed yes is recorded, in the VM,
+# once site-timing is installed (lan_trust_record).  The server the operator
+# chose or typed above (NTP_LOCAL, also `sigmond-setup --ntp`) needs no
+# question: the operator named it.
 # ⛔ Only on a tty: a prompt on piped stdin eats the next answer (the
-# 2026-08-11 nested-test hunt).  Unattended, nothing is trusted, and
+# 2026-08-11 nested-test hunt).  Unattended, nothing is adopted, and
 # site-timing logs the offers in the VM's journal.
 NTP_LAN_TRUST=""
 GNSS_TRUST=""
 ask_lan_extras() {
-    local scan="${1:-}" extra="" _ip _st _ref _gw _a _g _gp
+    local scan="${1:-}" _line _ip _st _ref _off _gw _a _g _gp
+    local -a _cands=()
     [ -t 0 ] || return 0
     [ -n "$scan" ] || scan=$(ntp_scan_lan | grep -v '^#' | grep .)
-    while read -r _ip _st _ref _gw; do
-        [ -n "$_ip" ] && [ "$_ip" != "$NTP_LOCAL" ] && extra="$extra $_ip"
-    done <<EOF
-$scan
-EOF
-    extra="${extra# }"
-    if [ -n "$extra" ]; then
-        echo "  Stratum-1 NTP also answering on this network: $extra"
-        rd -r -p "  Add them as further time sources for the station? [Y/n]: " _a
-        case "${_a:-y}" in [Yy]*) NTP_LAN_TRUST="$extra" ;; esac
-    fi
+    # Collected first, asked after: a question inside `while read ... <<EOF`
+    # would read its answer from the scan, not the operator.
+    mapfile -t _cands <<<"$scan"
+    for _line in "${_cands[@]}"; do
+        read -r _ip _st _ref _off _gw <<<"$_line"
+        [ -n "$_ip" ] && [ "$_ip" != "$NTP_LOCAL" ] || continue
+        echo "  Also answering: stratum-$_st NTP at $_ip, synced to $_ref, offset ${_off:-?} from this host."
+        rd -r -p "  Add $_ip as a further time source? It is not authenticated. [y/N]: " _a
+        case "${_a:-n}" in [Yy]*) NTP_LAN_TRUST="$NTP_LAN_TRUST $_ip" ;; esac
+    done
+    NTP_LAN_TRUST="${NTP_LAN_TRUST# }"
     echo "  Looking for a GNSS receiver streaming UBX or RTCM3 on port 9000 (~5 s)..."
     _g=$(gnss_scan_lan | head -1)
     if [ -n "$_g" ]; then
         read -r _ip _gp <<<"$_g"
-        echo "  Found a GNSS stream at $_ip:9000 ($_gp) — it feeds the ionosphere (VTEC) product."
-        rd -r -p "  Use it? [Y/n]: " _a
-        case "${_a:-y}" in [Yy]*) GNSS_TRUST="$_ip" ;; esac
+        echo "  Found a GNSS stream at $_ip:9000 ($_gp); it would feed the ionosphere (VTEC) product."
+        rd -r -p "  Use the stream at $_ip:9000 ($_gp)? It is not authenticated. [y/N]: " _a
+        case "${_a:-n}" in [Yy]*) GNSS_TRUST="$_ip" ;; esac
     fi
 }
 
