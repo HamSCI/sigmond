@@ -149,8 +149,10 @@ smd align --apply    # move to it, rebuild what needs it, restart what is stale
 `smd align` moves sigmond's components to the latest blessed release, the same release the USB
 image stations run.  On your machine it reports `host: none — a repo install on this machine; no
 Proxmox host to align`; that line is expected.  It may also offer to install
-`sigmond-site-timing` and `sigmond-location-check`, two helper scripts the image carries; take
-them.  A component you run ahead of the release stays where it is unless you add
+`sigmond-location-check`, a helper script the image carries; take it.  `sigmond-site-timing`
+lives in sigmond itself: `/usr/local/sbin/sigmond-site-timing` links to
+`/opt/git/sigmond/sigmond/bin/sigmond-site-timing`, so each update of sigmond carries it.  A plain
+copy left there by hand is kept once as `sigmond-site-timing.pre-sigmond-link`.  A component you run ahead of the release stays where it is unless you add
 `--allow-rollback`.
 
 Debian itself stays yours.  Update it as you would any machine you run; sigmond pins none of its

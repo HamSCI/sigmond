@@ -100,3 +100,82 @@ def test_default_source_is_this_checkout(tmp_path):
 def test_install_sh_runs_it():
     text = (REPO / 'install.sh').read_text()
     assert 'scripts/install/site-timing-link.sh' in text
+
+
+# --- align_apply.link_site_timing: what `smd align --apply` does with it ---
+
+from sigmond import align_apply  # noqa: E402
+
+
+def _repo(tmp, body='#!/bin/bash\necho new\n'):
+    repo = tmp / 'sigmond'
+    (repo / 'bin').mkdir(parents=True)
+    (repo / 'scripts' / 'install').mkdir(parents=True)
+    src = repo / 'bin' / 'sigmond-site-timing'
+    src.write_text(body)
+    src.chmod(0o755)
+    (repo / 'scripts' / 'install' / 'site-timing-link.sh').write_text(SCRIPT.read_text())
+    return repo, src
+
+
+def _paths(tmp):
+    dest = tmp / 'sbin' / 'sigmond-site-timing'
+    dest.parent.mkdir()
+    return dest, tmp / 'state' / 'site-timing.sha256'
+
+
+def test_align_plain_copy_that_differs_is_linked_and_refreshed(tmp_path):
+    repo, src = _repo(tmp_path)
+    dest, stamp = _paths(tmp_path)
+    dest.write_text('#!/bin/bash\necho old\n')
+    st = align_apply.link_site_timing(repo, dest=dest, stamp=stamp)
+    assert st.outcome == 'refreshed'
+    assert os.readlink(dest) == str(src)
+    # bring-up runs it, then the stamp records it: the next align is quiet
+    align_apply.record_site_timing_run(dest, stamp)
+    assert align_apply.link_site_timing(repo, dest=dest, stamp=stamp) is None
+
+
+def test_align_plain_copy_with_same_bytes_is_linked_not_rerun(tmp_path):
+    repo, src = _repo(tmp_path)
+    dest, stamp = _paths(tmp_path)
+    dest.write_text(src.read_text())
+    st = align_apply.link_site_timing(repo, dest=dest, stamp=stamp)
+    assert st.outcome == 'linked'
+    assert stamp.exists()
+
+
+def test_align_pull_that_changes_the_script_is_refreshed(tmp_path):
+    repo, src = _repo(tmp_path)
+    dest, stamp = _paths(tmp_path)
+    align_apply.link_site_timing(repo, dest=dest, stamp=stamp)
+    align_apply.record_site_timing_run(dest, stamp)
+    src.write_text('#!/bin/bash\necho newer\n')
+    st = align_apply.link_site_timing(repo, dest=dest, stamp=stamp)
+    assert st is not None and st.outcome == 'refreshed'
+
+
+def test_align_link_without_stamp_is_not_rerun_on_a_guess(tmp_path):
+    repo, src = _repo(tmp_path)
+    dest, stamp = _paths(tmp_path)
+    dest.symlink_to(src)
+    assert align_apply.link_site_timing(repo, dest=dest, stamp=stamp) is None
+    assert stamp.exists()
+
+
+def test_align_sigmond_before_the_move_reports_nothing(tmp_path):
+    dest, stamp = _paths(tmp_path)
+    dest.write_text('plain')
+    assert align_apply.link_site_timing(tmp_path / 'old', dest=dest, stamp=stamp) is None
+    assert dest.read_text() == 'plain'
+
+
+def test_align_dry_run_states(tmp_path):
+    repo, src = _repo(tmp_path)
+    dest, _ = _paths(tmp_path)
+    assert align_apply.site_timing_link_state(repo, dest)['status'] == 'absent'
+    dest.write_text('plain')
+    assert align_apply.site_timing_link_state(repo, dest)['status'] == 'differs'
+    dest.unlink()
+    dest.symlink_to(src)
+    assert align_apply.site_timing_link_state(repo, dest)['status'] == 'current'

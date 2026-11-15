@@ -274,8 +274,9 @@ def classify(items: list, is_ancestor: Callable) -> list:
 
 
 RAW_BASE = "https://raw.githubusercontent.com/HamSCI/sigmond-appliance"
+# sigmond-site-timing left this list on 2026-11-15: it lives in sigmond now,
+# and /usr/local/sbin links to the checkout (align_apply.link_site_timing).
 IMAGE_FILES = (
-    ("/usr/local/sbin/sigmond-site-timing", "sigmond-site-timing"),
     ("/usr/local/sbin/sigmond-location-check", "sigmond-location-check"),
 )
 

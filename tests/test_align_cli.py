@@ -610,7 +610,7 @@ def _quiet_live_stages():
     no test reaches the network, a child smd, systemctl or /etc."""
     return mock.patch.multiple(
         smd,
-        _align_refresh_image_files=lambda tag: [],
+        _align_refresh_image_files=lambda tag, **kw: [],
         _align_bringup=lambda **kw: [],
         # The routing step runs a child smd as root (uniform routing).
         _align_routing=lambda: align_apply.Step("admin uploader routing --apply", "ran"),
@@ -1291,9 +1291,8 @@ class AlignRefreshImageFilesTests(unittest.TestCase):
 
     def test_differs_is_refreshed_by_name_current_is_left_alone(self):
         files = [
-            {"path": "/usr/local/sbin/sigmond-site-timing", "status": "differs",
+            {"path": "/usr/local/sbin/sigmond-location-check", "status": "differs",
              "note": "differs from v3.53"},
-            {"path": "/usr/local/sbin/sigmond-location-check", "status": "current", "note": ""},
         ]
         with mock.patch("sigmond.align.image_file_drift", return_value=files), \
              mock.patch("sigmond.align_apply.refresh_image_file",
@@ -1302,7 +1301,18 @@ class AlignRefreshImageFilesTests(unittest.TestCase):
         self.assertEqual(len(steps), 1)
         self.assertEqual(steps[0].outcome, "refreshed")
         m_refresh.assert_called_once_with(
-            "v3.53", "sigmond-site-timing", Path("/usr/local/sbin/sigmond-site-timing"))
+            "v3.53", "sigmond-location-check", Path("/usr/local/sbin/sigmond-location-check"))
+
+    def test_site_timing_is_linked_not_fetched(self):
+        """Since 2026-11-15 the step on site-timing comes from linking it to
+        sigmond's checkout, never from sigmond-appliance."""
+        self.assertNotIn("/usr/local/sbin/sigmond-site-timing", dict(align.IMAGE_FILES))
+        st = align_apply.Step("/usr/local/sbin/sigmond-site-timing", "refreshed")
+        with mock.patch("sigmond.align.image_file_drift", return_value=[]), \
+             mock.patch("sigmond.align_apply.link_site_timing", return_value=st) as m_link:
+            steps = smd._align_refresh_image_files("v3.53", base="/x")
+        m_link.assert_called_once_with(Path("/x/sigmond"))
+        self.assertEqual(steps, [st])
 
     def test_absent_is_also_refreshed(self):
         files = [{"path": "/usr/local/sbin/sigmond-location-check", "status": "absent",
@@ -1316,14 +1326,14 @@ class AlignRefreshImageFilesTests(unittest.TestCase):
         self.assertEqual(steps[0].outcome, "refreshed")
 
     def test_unknown_status_is_refused_not_refreshed(self):
-        files = [{"path": "/usr/local/sbin/sigmond-site-timing", "status": "unknown",
+        files = [{"path": "/usr/local/sbin/sigmond-location-check", "status": "unknown",
                   "note": "could not reach raw.githubusercontent.com"}]
         with mock.patch("sigmond.align.image_file_drift", return_value=files), \
              mock.patch("sigmond.align_apply.refresh_image_file") as m_refresh:
             steps = smd._align_refresh_image_files("v3.53")
         m_refresh.assert_not_called()
         self.assertEqual(len(steps), 1)
-        self.assertEqual(steps[0].component, "/usr/local/sbin/sigmond-site-timing")
+        self.assertEqual(steps[0].component, "/usr/local/sbin/sigmond-location-check")
         self.assertEqual(steps[0].outcome, "refused")
         self.assertEqual(steps[0].detail, "could not compare — not refreshed")
 
@@ -2474,7 +2484,7 @@ class AlignMakeLiveApplyTests(unittest.TestCase):
             return list(restart_steps if restart_steps is not None else [])
 
         m_restart = mock.Mock(side_effect=fake_restart)
-        m_images = mock.Mock(side_effect=lambda tag: order.append("images") or list(images))
+        m_images = mock.Mock(side_effect=lambda tag, **kw: order.append("images") or list(images))
         m_bringup = mock.Mock(side_effect=lambda **kw: order.append("bringup") or list(bringup))
         m_checks = fast_checks or mock.Mock(
             side_effect=lambda *a, **k: order.append("checks") or dict(checks or _CHECKS_PASS))
@@ -2556,7 +2566,7 @@ class AlignMakeLiveApplyTests(unittest.TestCase):
 
             def drift(ref, **kw):
                 urls.append(f"{align.RAW_BASE}/{ref}/(compare)")
-                return [{"path": "/usr/local/sbin/sigmond-site-timing", "status": "differs",
+                return [{"path": "/usr/local/sbin/sigmond-location-check", "status": "differs",
                          "note": ""}]
             out = io.StringIO()
             with contextlib.ExitStack() as st:
@@ -2572,7 +2582,7 @@ class AlignMakeLiveApplyTests(unittest.TestCase):
                 smd.cmd_align(_apply_args("/opt/git/sigmond"))
         commit = APPLY_REL.appliance_commit
         self.assertEqual(urls, [f"{align.RAW_BASE}/{commit}/(compare)",
-                                f"{align.RAW_BASE}/{commit}/sigmond-site-timing"])
+                                f"{align.RAW_BASE}/{commit}/sigmond-location-check"])
         self.assertFalse(any(f"/{APPLY_REL.tag}/" in u for u in urls), urls)
 
     def test_bringup_re_runs_site_timing_only_when_this_run_refreshed_it(self):

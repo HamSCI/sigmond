@@ -805,3 +805,116 @@ def refresh_image_file(ref: str, name: str, dest: Path, *,
             pass
         return Step(str(dest), "failed", f"{dest}: {exc}")
     return Step(str(dest), "refreshed")
+
+
+# sigmond-site-timing moved into sigmond (2026-11-15).  /usr/local/sbin holds a
+# link to the checkout, made by scripts/install/site-timing-link.sh, so align
+# no longer fetches it from sigmond-appliance.  The script changes the station
+# (timestd profile, metrology channels, chrony), so align re-runs it only when
+# the bytes it would run differ from the bytes it last ran — the stamp below.
+SITE_TIMING_DEST = Path("/usr/local/sbin/sigmond-site-timing")
+SITE_TIMING_STAMP = Path("/var/lib/sigmond/site-timing.sha256")
+
+
+def _file_sha256(path: Path) -> Optional[str]:
+    import hashlib
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _read_stamp(stamp: Path) -> Optional[str]:
+    try:
+        return Path(stamp).read_text().strip() or None
+    except OSError:
+        return None
+
+
+def record_site_timing_run(dest: Path = SITE_TIMING_DEST,
+                           stamp: Path = SITE_TIMING_STAMP) -> None:
+    """Note the bytes of the site-timing that just ran.  Best effort: a
+    missing stamp only means the next align compares against nothing."""
+    sha = _file_sha256(dest)
+    if not sha:
+        return
+    try:
+        stamp = Path(stamp)
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        tmp = stamp.with_name(stamp.name + ".tmp")
+        tmp.write_text(sha + "\n")
+        os.replace(tmp, stamp)
+    except OSError:
+        pass
+
+
+def link_site_timing(repo: Path, *, dest: Path = SITE_TIMING_DEST,
+                     stamp: Path = SITE_TIMING_STAMP,
+                     run: Callable = subprocess.run) -> Optional[Step]:
+    """Link ``dest`` to ``repo``'s bin/sigmond-site-timing, and say whether
+    the script the station runs changed since align last ran it.
+
+    Returns None when there is nothing to report: a sigmond checkout that
+    predates the move (no script, no helper), or a link already current
+    whose bytes match the stamp.  Otherwise a Step on ``dest``:
+
+    * ``failed`` — the helper could not make the link (blocks bring-up,
+      like a failed image-file refresh did);
+    * ``refreshed`` — the bytes differ from the last run, so bring-up
+      re-runs site-timing (the same gate the appliance copy used);
+    * ``linked`` — the link was made or repaired, the bytes are the same.
+
+    With no stamp, a plain file being replaced is compared byte for byte
+    with the checkout's script.  A link with no stamp was made by install.sh
+    on an earlier update; nothing records which bytes last ran, and this
+    script is not one to re-run on a guess, so it counts as current and the
+    stamp is seeded."""
+    repo = Path(repo)
+    dest = Path(dest)
+    src = repo / "bin" / "sigmond-site-timing"
+    helper = repo / "scripts" / "install" / "site-timing-link.sh"
+    if not src.is_file() or not helper.is_file():
+        return None
+    was_link = dest.is_symlink()
+    before = None if was_link else _file_sha256(dest)
+    env = dict(os.environ, SITE_TIMING_SRC=str(src), SITE_TIMING_DEST=str(dest))
+    try:
+        r = run(["bash", str(helper)], env=env, capture_output=True, text=True,
+                stdin=subprocess.DEVNULL, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return Step(str(dest), "failed", f"site-timing-link.sh: {exc}")
+    lines = [ln for ln in ((r.stdout or "") + (r.stderr or "")).splitlines() if ln.strip()]
+    said = lines[-1] if lines else ""
+    if r.returncode != 0:
+        return Step(str(dest), "failed", said or f"site-timing-link.sh exit {r.returncode}")
+    now = _file_sha256(src)
+    last = _read_stamp(stamp)
+    if last is None:
+        last = now if was_link else before
+    if now != last:
+        return Step(str(dest), "refreshed",
+                    "linked to sigmond's checkout; changed since site-timing last ran")
+    if _read_stamp(stamp) is None:
+        record_site_timing_run(src, stamp)
+    if said.startswith("site-timing-link: current"):
+        return None
+    return Step(str(dest), "linked", said.removeprefix("site-timing-link: "))
+
+
+def site_timing_link_state(repo: Path, dest: Path = SITE_TIMING_DEST) -> dict:
+    """The dry run's line for site-timing, in image_file_drift's shape."""
+    src = Path(repo) / "bin" / "sigmond-site-timing"
+    dest = Path(dest)
+    if not src.is_file():
+        return {"path": str(dest), "status": "current",
+                "note": "this sigmond predates the move; left as it is"}
+    if dest.is_symlink():
+        if os.readlink(dest) == str(src):
+            return {"path": str(dest), "status": "current", "note": ""}
+        return {"path": str(dest), "status": "differs",
+                "note": "links elsewhere — --apply links it to sigmond's checkout"}
+    if dest.exists():
+        return {"path": str(dest), "status": "differs",
+                "note": "plain copy — --apply links it to sigmond's checkout"}
+    return {"path": str(dest), "status": "absent",
+            "note": "not installed — --apply links it to sigmond's checkout"}

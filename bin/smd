@@ -5195,6 +5195,24 @@ def _repair_and_recheck(d: Path, owner_uid: int, bad, chown, rescan):
     return len(bad) - len(still_bad), still_bad
 
 
+def _link_site_timing(sigmond_dir: Path) -> bool:
+    """Run scripts/install/site-timing-link.sh from ``sigmond_dir`` and
+    print what it did.  True when the link is in place."""
+    helper = Path(sigmond_dir) / 'scripts' / 'install' / 'site-timing-link.sh'
+    if not helper.is_file():
+        return False
+    r = subprocess.run(['bash', str(helper)], capture_output=True, text=True,
+                       stdin=subprocess.DEVNULL, timeout=30)
+    said = ((r.stdout or '') + (r.stderr or '')).strip().splitlines()
+    line = said[-1] if said else f'exit {r.returncode}'
+    if r.returncode == 0:
+        if 'current' not in line:
+            _ok(f'sigmond: {line}')
+        return True
+    _warn(f'sigmond: {line}')
+    return False
+
+
 def _wants_sigmond_self_update(components_filter) -> bool:
     """Whether this invocation should pull sigmond itself.
 
@@ -8802,7 +8820,7 @@ def _align_install_missing(name, sha, *, base, catalog):
     _align_chown(repo / '.git' / 'info', owner)
 
 
-def _align_refresh_image_files(ref) -> list:
+def _align_refresh_image_files(ref, base='/opt/git/sigmond') -> list:
     """The `--apply` write half of `align.image_file_drift`'s read-only
     compare: every image-carried helper script (`align.IMAGE_FILES`) found
     'differs' or 'absent' gets replaced from sigmond-appliance's copy at
@@ -8825,6 +8843,11 @@ def _align_refresh_image_files(ref) -> list:
         elif d['status'] == 'unknown':
             steps.append(align_apply.Step(path, 'refused', 'could not compare — not refreshed'))
         # 'current': nothing to do, no Step.
+    # sigmond-site-timing is sigmond's own now: link it to the checkout, and
+    # report 'refreshed' when its bytes changed since align last ran it.
+    st = align_apply.link_site_timing(Path(base) / 'sigmond')
+    if st is not None:
+        steps.append(st)
     return steps
 
 
@@ -8915,6 +8938,7 @@ def _align_bringup(*, run=subprocess.run, say=print, site_timing_refreshed: bool
             steps.append(align_apply.Step('sigmond-site-timing', 'failed', detail))
             return steps
         steps.append(align_apply.Step('sigmond-site-timing', 'ran', detail))
+        align_apply.record_site_timing_run()
     else:
         say(f'  {_ALIGN_SITE_TIMING} not executable — skipped')
 
@@ -9276,7 +9300,7 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
 
     # I7: at the verified appliance_commit, not the tag (verify_release
     # refused a release without one).
-    image_steps = _align_refresh_image_files(rel.appliance_commit)
+    image_steps = _align_refresh_image_files(rel.appliance_commit, base=base)
     _align_print_steps(image_steps)
     if any(s.outcome in ('failed', 'refused') for s in image_steps):
         print('  bring-up not re-run and nothing restarted: an image-carried file '
@@ -9618,6 +9642,8 @@ def cmd_align(args) -> int:
     if rate_limited:
         print(f'  commit distances skipped: {rate_limited}')
     files = align.image_file_drift(rel.tag)
+    from sigmond import align_apply as _aa
+    files.append(_aa.site_timing_link_state(Path(base) / 'sigmond'))
     stale = [f for f in files if f['status'] in ('differs', 'absent')]
     unverified = [f for f in files if f['status'] == 'unknown']
     print('  image-carried files:')
@@ -19120,6 +19146,11 @@ def _apply_updates(args, rows: list[dict]) -> int:
                             _ok('sigmond: catalog updated')
                     except Exception as _exc:
                         _warn(f'sigmond: could not sync catalog: {_exc}')
+                # sigmond-site-timing moved here from sigmond-appliance
+                # (2026-11-15).  This path never runs sigmond's install.sh,
+                # so it makes the /usr/local/sbin link itself; once linked,
+                # every later pull carries the script.
+                _link_site_timing(sigmond_dir)
 
     for name in sorted(catalog):
         entry = catalog[name]

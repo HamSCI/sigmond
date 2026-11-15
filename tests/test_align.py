@@ -306,14 +306,16 @@ class ProbeTests(unittest.TestCase):
 
     def test_image_file_drift(self):
         good, stale = b"#!/bin/bash\nnew\n", b"#!/bin/bash\nold\n"
-        routes = {f"{align.RAW_BASE}/v3.53/sigmond-site-timing": good,
-                  f"{align.RAW_BASE}/v3.53/sigmond-location-check": good}
-        local = {"/usr/local/sbin/sigmond-site-timing": stale,
-                 "/usr/local/sbin/sigmond-location-check": None}
+        routes = {f"{align.RAW_BASE}/v3.53/sigmond-location-check": good}
         got = {d["path"]: d["status"] for d in align.image_file_drift(
-            "v3.53", read_local=local.get, urlopen=FakeUrlopen(routes))}
-        self.assertEqual(got["/usr/local/sbin/sigmond-site-timing"], "differs")
+            "v3.53", read_local={"/usr/local/sbin/sigmond-location-check": stale}.get,
+            urlopen=FakeUrlopen(routes))}
+        self.assertEqual(got, {"/usr/local/sbin/sigmond-location-check": "differs"})
+        got = {d["path"]: d["status"] for d in align.image_file_drift(
+            "v3.53", read_local=lambda p: None, urlopen=FakeUrlopen(routes))}
         self.assertEqual(got["/usr/local/sbin/sigmond-location-check"], "absent")
+        # site-timing lives in sigmond since 2026-11-15; never fetched from the appliance
+        self.assertNotIn("/usr/local/sbin/sigmond-site-timing", got)
 
     def test_image_file_unreachable_is_unknown(self):
         got = align.image_file_drift("v3.53", read_local=lambda p: b"x", urlopen=FakeUrlopen({}))

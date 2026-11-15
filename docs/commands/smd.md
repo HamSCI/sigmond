@@ -154,8 +154,8 @@ smd align — AC0G-B4 against blessed v3.83 (dry run: nothing changes)
     …
     wspr-recorder    99f3d47               current
   image-carried files:
-    /usr/local/sbin/sigmond-site-timing      current
     /usr/local/sbin/sigmond-location-check   current
+    /usr/local/sbin/sigmond-site-timing      current
   restarts:
     none
   summary: 0 to move, 0 left ahead, 0 refused, 0 missing, 0 stray, 0 files to refresh, 0 services to restart
@@ -164,6 +164,8 @@ smd align — AC0G-B4 against blessed v3.83 (dry run: nothing changes)
 ```
 
 The real list names 26 components; this example trims the middle with `…`.
+
+`sigmond-location-check` comes from sigmond-appliance at the release's commit. `sigmond-site-timing` comes from sigmond itself: `--apply` links `/usr/local/sbin/sigmond-site-timing` to `bin/sigmond-site-timing` in sigmond's checkout. It re-runs the script only when the script's bytes differ from the ones it last ran, recorded in `/var/lib/sigmond/site-timing.sha256`.
 
 Look at the summary line. All zeros mean the station already matches the blessed release. Any non-zero count tells you what `--apply` would move, refuse or restart. Read the `restarts` block before you apply: applying can restart radiod.
 

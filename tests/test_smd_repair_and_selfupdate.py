@@ -117,3 +117,31 @@ class SigmondSelfUpdateTargetingTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SelfUpdateLinksSiteTimingTest(unittest.TestCase):
+    """`smd component update sigmond` pulls sigmond but never runs its
+    install.sh, so it links /usr/local/sbin/sigmond-site-timing itself
+    (2026-11-15: the script moved here from sigmond-appliance)."""
+
+    def test_self_update_calls_the_link_step(self):
+        src = (REPO / "bin" / "smd").read_text()
+        block = src[src.index("# --- sigmond self-update: on a bare apply"):]
+        block = block[:block.index("for name in sorted(catalog):")]
+        self.assertIn("_link_site_timing(sigmond_dir)", block)
+
+    def test_link_step_links_a_plain_copy(self):
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "sigmond-site-timing"
+            dest.write_text("#!/bin/bash\nold\n")
+            with mock.patch.dict(os.environ, {"SITE_TIMING_DEST": str(dest)}):
+                self.assertTrue(smd._link_site_timing(REPO))
+            self.assertEqual(os.readlink(dest), str(REPO / "bin" / "sigmond-site-timing"))
+            self.assertTrue(Path(str(dest) + ".pre-sigmond-link").exists())
+
+    def test_a_sigmond_without_the_helper_links_nothing(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(smd._link_site_timing(Path(tmp)))
