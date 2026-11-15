@@ -29781,8 +29781,10 @@ def cmd_secrets_status(args) -> int:
 
 
 def cmd_secrets_template(args) -> int:
-    if os.geteuid() != 0:
-        _err('secrets template must run as root (writes under /etc)')
+    # Self-elevate like every other mutating verb: an operator runs `smd`, never
+    # `sudo smd` (which the top of main refuses), so a bare root check left this
+    # verb with no way to run at all (N8UR, 2026-11-14).
+    if _need_root('admin secrets template'):
         return 1
     made = 0
     for e in _SECRETS:
@@ -29808,8 +29810,10 @@ def cmd_secrets_template(args) -> int:
 
 
 def cmd_secrets_install(args) -> int:
-    if os.geteuid() != 0:
-        _err('secrets install must run as root (writes under /etc)')
+    # Self-elevate like every other mutating verb: an operator runs `smd`, never
+    # `sudo smd` (which the top of main refuses), so a bare root check left this
+    # verb with no way to run at all (N8UR, 2026-11-14).
+    if _need_root('admin secrets install'):
         return 1
     import tempfile
     src = Path(args.source)
