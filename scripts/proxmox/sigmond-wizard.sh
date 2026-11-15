@@ -152,6 +152,33 @@ RAC_HOST_LOGIN="${SIGMOND_RAC_HOST_LOGIN:-root}"
 # Each lands inside a TOML string, so only a plain account name is taken.
 [[ "$RAC_VM_LOGIN" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || RAC_VM_LOGIN=hamsci
 [[ "$RAC_HOST_LOGIN" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || RAC_HOST_LOGIN=root
+
+rac_vm_login(){
+    # The login a vm-ssh proxy advertises.  On a Proxmox host it is the VM's
+    # hamsci.  A bare-metal station (RAC_MODE=station) has no hamsci unless its
+    # operator made one: VK5ARG (2026-11-15, converted from WsprDaemon) logs in
+    # as wsprdaemon, and the dashboard's "ssh hamsci@gw2" failed.  In order:
+    # SIGMOND_RAC_VM_LOGIN; the login this gateway's toml ($1) already carries
+    # (a hand fix survives a rerun); the account that ran sudo; hamsci if it
+    # exists; the first ordinary login account; hamsci.
+    local ok='^[a-z_][a-z0-9_-]{0,31}$' prev pw
+    if [ -n "${SIGMOND_RAC_VM_LOGIN:-}" ] || [ "${RAC_MODE:-host}" != station ]; then
+        echo "${RAC_VM_LOGIN:-${SIGMOND_RAC_VM_LOGIN:-hamsci}}"; return
+    fi
+    if [ -n "${1:-}" ] && [ -f "$1" ]; then
+        prev=$(awk '/-vm-ssh"$/ {s=1} s && /^user = / {gsub(/"/, "", $3); print $3; exit}' "$1" 2>/dev/null)
+        [[ "$prev" =~ $ok ]] && { echo "$prev"; return; }
+    fi
+    pw=$(if [ -n "${SIGMOND_RAC_PASSWD:-}" ]; then cat "$SIGMOND_RAC_PASSWD" 2>/dev/null; else getent passwd 2>/dev/null; fi)
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ] && [[ "$SUDO_USER" =~ $ok ]] \
+       && grep -q "^${SUDO_USER}:" <<<"$pw"; then
+        echo "$SUDO_USER"; return
+    fi
+    grep -q '^hamsci:' <<<"$pw" && { echo hamsci; return; }
+    prev=$(awk -F: '$3 >= 1000 && $3 < 60000 && $7 !~ /(nologin|false)$/ {print $1; exit}' <<<"$pw")
+    [[ "$prev" =~ $ok ]] && { echo "$prev"; return; }
+    echo hamsci
+}
 # Profile + DASI number stick across --reconfigure via /etc/sigmond-appliance.
 RAC_PROFILE="${SIGMOND_RAC_PROFILE:-$(cat /etc/sigmond-appliance/rac-profile 2>/dev/null || echo dasi)}"
 DASI_NUM="${SIGMOND_DASI_NUMBER:-$(cat /etc/sigmond-appliance/dasi-number 2>/dev/null)}"
@@ -559,7 +586,7 @@ rac_ladder(){
                     IFS=: read -r _n _lp _rp <<<"$_spec"
                     printf '[[proxies]]\nname = "%s-%s"\ntype = "tcp"\nlocalIP = "127.0.0.1"\nlocalPort = %s\nremotePort = %s\n' "$SITE" "$_n" "$_lp" "$_rp"
                     case "$_n" in
-                        vm-ssh)   printf '[proxies.metadatas]\nuser = "%s"\n' "${RAC_VM_LOGIN:-hamsci}" ;;
+                        vm-ssh)   printf '[proxies.metadatas]\nuser = "%s"\n' "$(rac_vm_login)" ;;
                         host-ssh) printf '[proxies.metadatas]\nuser = "%s"\n' "${RAC_HOST_LOGIN:-root}" ;;
                     esac
                 done
@@ -926,6 +953,7 @@ rac_write_config(){
         # proxy names keep the vm-* suffixes so the gateway dashboard shows
         # them in the same columns as a Proxmox station.
         # Braces in ${SITE}-vm-* keep the host's six-channel test from counting these.
+        _stn_login=$(rac_vm_login "$_toml")
         ( umask 077; cat > "$_toml.new" <<STNTOMLEOF
 # Written by sigmond-rac $(date -u +%F) — RAC #$RACN, site $SITE (station mode).
 # ONE frpc on this machine carries its channels, straight to its own services.
@@ -955,7 +983,7 @@ localIP = "127.0.0.1"
 localPort = 22
 remotePort = $P_VMSSH
 [proxies.metadatas]
-user = "${RAC_VM_LOGIN:-hamsci}"
+user = "$_stn_login"
 
 ${_stn_web}${_stn_stn}${_stn_gmag}
 STNTOMLEOF

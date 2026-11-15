@@ -502,3 +502,53 @@ def test_station_pages_come_from_smd_first(tmp_path):
     r = sh(pre(tmp_path, 1, station=True) + "rac_ka9q_webs\n", tmp_path,
            {"SIGMOND_RAC_SMD": str(fake)})
     assert r.stdout == "AC0G-B1A 8081\nAC0G-B1B 8083\n", r.stdout + r.stderr
+
+
+# ---- the ssh login a bare-metal station advertises (VK5ARG 2026-11-15: the
+# dashboard offered hamsci@ on a machine whose account is wsprdaemon)
+
+def _vm_ssh_user(toml):
+    lines = toml.splitlines()
+    i = next(n for n, ln in enumerate(lines) if ln.endswith('-vm-ssh"'))
+    return next(ln.split('"')[1] for ln in lines[i:] if ln.startswith("user = "))
+
+
+def _station_toml(tmp_path, env, pre_toml=None):
+    if pre_toml is not None:
+        (tmp_path / "frpc-host-gw2.toml").write_text(pre_toml)
+    reg = rr.Registrar(reply=STATION_REPLY)
+    try:
+        r = sh(pre(tmp_path, reg.port, station=True) + "rac_register fresh; echo rc=$?\n", tmp_path, env)
+    finally:
+        reg.close()
+    assert "rc=0" in r.stdout, r.stdout + r.stderr
+    return (tmp_path / "frpc-host-gw2.toml").read_text()
+
+
+def test_station_vm_ssh_login_is_the_sudo_user(tmp_path):
+    passwd = tmp_path / "passwd"
+    passwd.write_text("root:x:0:0::/root:/bin/bash\nwsprdaemon:x:1000:1000::/home/wsprdaemon:/bin/bash\n")
+    toml = _station_toml(tmp_path, {"SUDO_USER": "wsprdaemon", "SIGMOND_RAC_PASSWD": str(passwd)})
+    assert _vm_ssh_user(toml) == "wsprdaemon"
+
+
+def test_station_without_sudo_takes_the_first_login_account(tmp_path):
+    passwd = tmp_path / "passwd"
+    passwd.write_text("root:x:0:0::/root:/bin/bash\nnobody:x:65534:65534::/:/usr/sbin/nologin\n"
+                      "wsprdaemon:x:1000:1000::/home/wsprdaemon:/bin/bash\n")
+    toml = _station_toml(tmp_path, {"SUDO_USER": "", "SIGMOND_RAC_PASSWD": str(passwd)})
+    assert _vm_ssh_user(toml) == "wsprdaemon"
+
+
+def test_station_rerun_keeps_a_hand_set_login(tmp_path):
+    passwd = tmp_path / "passwd"
+    passwd.write_text("root:x:0:0::/root:/bin/bash\nhamsci:x:1000:1000::/home/hamsci:/bin/bash\n")
+    old = ('[[proxies]]\nname = "AC0G-SIGMA-vm-ssh"\ntype = "tcp"\nlocalPort = 22\n'
+           '[proxies.metadatas]\nuser = "wsprdaemon"\n')
+    toml = _station_toml(tmp_path, {"SUDO_USER": "", "SIGMOND_RAC_PASSWD": str(passwd)}, pre_toml=old)
+    assert _vm_ssh_user(toml) == "wsprdaemon"
+
+
+def test_explicit_env_login_wins(tmp_path):
+    toml = _station_toml(tmp_path, {"SUDO_USER": "wsprdaemon", "SIGMOND_RAC_VM_LOGIN": "op"})
+    assert _vm_ssh_user(toml) == "op"
