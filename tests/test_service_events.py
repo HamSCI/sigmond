@@ -206,3 +206,17 @@ def test_journal_filtered_at_source(tmp_path):
     for mid in (S.MSG_RESTART_SCHEDULED, S.MSG_STOPPING, S.MSG_EXITED):
         assert f"MESSAGE_ID={mid}" in a
     assert "_TRANSPORT=kernel" in a and any(x.startswith("--output-fields=") for x in a)
+
+
+def test_status_columns_fit_the_longest_unit():
+    """N8UR 2026-11-15: codar-sounder@N8UR-status.local.service (41 chars) pushed its row's columns right."""
+    long = "codar-sounder@N8UR-status.local.service"
+    doc = {"generated_at": "x", "error": None, "global_oom": [], "units": {
+        long: {"auto_restarts": 26, "manual_restarts": 6, "memcg_oom": 0, "unexpected_exits": 0,
+               "last_utc": "2026-11-14T14:36:19Z", "peak_bytes": None, "max_bytes": None, "peak_pct": None},
+        "chrony.service": {"auto_restarts": 0, "manual_restarts": 4, "memcg_oom": 0, "unexpected_exits": 0,
+                           "last_utc": "2026-11-14T23:52:47Z", "peak_bytes": None, "max_bytes": None,
+                           "peak_pct": None}}}
+    lines = S.status_lines(doc)
+    rows = [ln for ln in lines if "service" in ln and "(24 h)" not in ln]
+    assert len({ln.index("2026-11-14T") for ln in rows}) == 1, lines
