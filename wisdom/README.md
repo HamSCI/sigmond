@@ -69,4 +69,5 @@ from the right library), bundles keyed by FFTW version as well as CPU, and
 deciding which recorded conditions should force a replan.
 
 Entries:
+- `wisdomf-amd-ryzen-7-pro-5850u` — AMD Ryzen 7 PRO 5850U, **FFTW 3.3.8** (Ubuntu 22.04), planned bare metal under sigmond tuning incl. L3 CAT (VK5ARG, 2026-11-14)
 - `wisdomf-amd-ryzen-7-5825u` — AMD Ryzen 7 5825U (B4, 2026-07-23)
