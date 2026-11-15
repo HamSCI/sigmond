@@ -46,6 +46,9 @@ smd_bin = "/usr/local/sbin/smd"
 #                   `smd align --apply` install smd-cpu-freq.service); false
 #                   opts out.  Never applied on a Proxmox guest or host.
 #
+#   Defaults: radiod 3200 / others 1400 MHz; 2000 / 1600 on a Zen 3 mobile
+#   CPU (Ryzen 5x00U/H Cezanne or Barcelo: 5560U, 5825U, 5850U, ...).
+#
 # [cpu_freq]
 # enabled        = true
 # radiod_max_mhz = 3200

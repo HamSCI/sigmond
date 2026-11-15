@@ -219,7 +219,9 @@ Manual extras:
   **On by default on bare metal** (since 2026-11-12): bring-up's `smd apply`
   and `smd align --apply` apply it and install `smd-cpu-freq.service` once
   (radiod cores 3200 MHz on `performance`, the rest capped at 1400 MHz on
-  `powersave`).  Most sites want low power, long CPU life and low temperature,
+  `powersave`; on a Zen 3 mobile CPU -- Ryzen 5x00U/H, e.g. 5560U, 5825U,
+  5850U -- 2000 and 1600 MHz, since 2026-11-15: VK5ARG's 5850U drew ~30 %
+  less package power there with the FFT 70 % busy and no sample loss).  Most sites want low power, long CPU life and low temperature,
   and radiod has no use for boost: on KJ6MKI (Ryzen 5 5560U) radiod's fft ran
   at 44 % of a core uncapped (~3.8 GHz) and 49 % capped at 3.2 GHz, with zero
   sample loss.  Opt out with `[cpu_freq] enabled = false`.  Not applied on a

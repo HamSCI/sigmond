@@ -398,3 +398,15 @@ def _no_host_sink_files(tmp_path, monkeypatch):
             kw["config_file"] = str(nowhere / "sink.toml")
             kw["legacy_path"] = str(nowhere / "legacy" / "sink.db")
             monkeypatch.setattr(fn, "__kwdefaults__", kw)
+
+
+@pytest.fixture(autouse=True)
+def _cpu_freq_defaults_not_from_this_host(tmp_path, monkeypatch):
+    """topology.cpu_freq_defaults reads /proc/cpuinfo (Zen 3 mobile parts default
+    to 2000/1600).  Tests see no cpuinfo -- the 3200/1400 default -- unless they
+    point topology.CPUINFO at one of their own (the devbox is itself a 5825U)."""
+    try:
+        from sigmond import topology
+    except ImportError:
+        return
+    monkeypatch.setattr(topology, "CPUINFO", tmp_path / "no-such-cpuinfo")

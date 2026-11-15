@@ -63,6 +63,38 @@ _DEFAULT_CPU_FREQ = {
 }
 CPU_FREQ_FAST_MODES = ('radiod', 'fft-pair')
 
+# Zen 3 mobile (Cezanne and its Barcelo refresh: AMD family 25, model 80,
+# a U/H/HS/HX part -- 5560U, 5600U, 5625U, 5800U, 5825U, 5850U, 5875U, 5800H
+# ...) default lower: Rob 2026-11-15, VK5ARG (5850U, 129.6 Msps) drew ~30 %
+# less package power at radiod 2000 / others 1600 MHz with the FFT 70 % busy
+# and no sample loss.  Every other CPU keeps 3200/1400.  A station's own
+# [cpu_freq] values win either way.
+CPUINFO = Path('/proc/cpuinfo')
+_ZEN3_MOBILE_CPU_FREQ = {'radiod_max_mhz': 2000, 'other_max_mhz': 1600}
+
+
+def _is_zen3_mobile(cpuinfo: Path) -> bool:
+    import re as _re
+    try:
+        first = cpuinfo.read_text(errors='replace').split('\n\n', 1)[0]
+    except OSError:
+        return False
+    f = {}
+    for ln in first.splitlines():
+        k, _, v = ln.partition(':')
+        f[k.strip()] = v.strip()
+    return (f.get('vendor_id') == 'AuthenticAMD' and f.get('cpu family') == '25'
+            and f.get('model') == '80'
+            and bool(_re.search(r'\b\d{4}(U|H|HS|HX)\b', f.get('model name', ''))))
+
+
+def cpu_freq_defaults(cpuinfo: Optional[Path] = None) -> dict:
+    """The [cpu_freq] defaults for this machine's CPU."""
+    d = dict(_DEFAULT_CPU_FREQ)
+    if _is_zen3_mobile(CPUINFO if cpuinfo is None else cpuinfo):
+        d.update(_ZEN3_MOBILE_CPU_FREQ)
+    return d
+
 # Timing site policy.  honor_radiod_restart_request gates whether the
 # sigmond radiod watchdog acts on hf-timestd's opt-in escalation artifact
 # (/run/hf-timestd/radiod-restart-request.json, offset-judge spec §9
@@ -178,7 +210,7 @@ def load_topology(path: Path = TOPOLOGY_PATH,
         timing['honor_radiod_restart_request'] = \
             bool(tm['honor_radiod_restart_request'])
 
-    cpu_freq = dict(_DEFAULT_CPU_FREQ)
+    cpu_freq = cpu_freq_defaults()
     cf = raw.get('cpu_freq', {})
     if 'radiod_max_mhz' in cf:
         try:
