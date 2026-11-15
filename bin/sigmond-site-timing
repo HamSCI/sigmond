@@ -893,10 +893,22 @@ if [ -f "$HK" ]; then
         [ -f "$HK.pub" ] && install -o hsupload -g sigmond -m 644 "$HK.pub" /etc/hs-uploader/keys/id_ed25519.pub
         say "hs-uploader key fanned out: id_ed25519"
     fi
-    if id timestd >/dev/null 2>&1 && [ ! -f /home/timestd/.ssh/id_rsa_psws ]; then
-        install -d -o timestd -g timestd -m 700 /home/timestd/.ssh
-        install -o timestd -g timestd -m 600 "$HK" /home/timestd/.ssh/id_rsa_psws
-        say "grape PSWS key fanned out: id_rsa_psws"
+    # timestd owns ~/.ssh, so root must never follow a path there: a link at
+    # .ssh or at the key would have had root write the portal key wherever it
+    # pointed (security review, 2026-11-15).  Root opens the key; timestd
+    # writes it, and a symlink at either place is refused outright.
+    TS_SSH=/home/timestd/.ssh
+    if id timestd >/dev/null 2>&1 && [ ! -e "$TS_SSH/id_rsa_psws" ] && [ ! -L "$TS_SSH/id_rsa_psws" ]; then
+        if [ -L "$TS_SSH" ]; then
+            say "grape PSWS key NOT fanned out: $TS_SSH is a symlink - refused"
+        elif runuser -u timestd -- sh -c 'umask 077; mkdir -p "$1" && chmod 700 "$1" && [ ! -L "$1" ] && cat > "$1/.id_rsa_psws.new" && mv -f "$1/.id_rsa_psws.new" "$1/id_rsa_psws"' \
+                sh "$TS_SSH" < "$HK" 2>/dev/null; then
+            say "grape PSWS key fanned out: id_rsa_psws"
+        else
+            say "grape PSWS key NOT fanned out: could not write $TS_SSH/id_rsa_psws as timestd"
+        fi
+    elif [ -L "$TS_SSH/id_rsa_psws" ]; then
+        say "grape PSWS key NOT fanned out: $TS_SSH/id_rsa_psws is a symlink - refused"
     fi
 fi
 # timestd needs the sigmond group to write the shared hs-uploader

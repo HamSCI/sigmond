@@ -18,10 +18,10 @@ TESTS = Path(__file__).resolve().parent
 SCRIPTS = sorted(TESTS.glob('test-site-timing-*.sh'))
 
 
-def test_all_four_are_here():
-    assert [p.name for p in SCRIPTS] == [
-        'test-site-timing-meteor.sh', 'test-site-timing-metrology.sh',
-        'test-site-timing-t4.sh', 'test-site-timing-t6.sh']
+def test_every_step_test_is_here():
+    assert {'test-site-timing-meteor.sh', 'test-site-timing-metrology.sh',
+            'test-site-timing-t4.sh', 'test-site-timing-t6.sh',
+            'test-site-timing-psws-key.sh'} <= {p.name for p in SCRIPTS}
 
 
 @pytest.mark.skipif(shutil.which('bash') is None, reason='needs bash')
