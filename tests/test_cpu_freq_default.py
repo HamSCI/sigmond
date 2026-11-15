@@ -154,3 +154,25 @@ class Wiring(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BelowNominalNote(unittest.TestCase):
+    """VK5ARG 2026-11-15 (5850U, amd-pstate-epp): a capped busy core follows the
+    radiod cores at ~0.8x their clock and never drops below lowest_nonlinear;
+    the old note said the cap 'is effectively' the CPPC nominal."""
+
+    def test_names_the_coupling_and_the_real_floor(self):
+        t = smd._below_nominal_note("0-13", [1901], [1600], 1400)
+        self.assertIn("radiod", t)
+        self.assertIn("1600 MHz", t)
+        self.assertIn("radiod_max_mhz", t)
+        self.assertNotIn("effectively", t)
+
+    def test_lowest_nonlinear_read(self):
+        d = Path(tempfile.mkdtemp()) / "cpu3" / "cpufreq"
+        d.mkdir(parents=True)
+        (d / "scaling_driver").write_text("amd-pstate-epp\n")
+        (d / "amd_pstate_lowest_nonlinear_freq").write_text("1600000\n")
+        self.assertEqual(smd._cpufreq_lowest_nonlinear_khz(d), 1600000)
+        (d / "scaling_driver").write_text("intel_pstate\n")
+        self.assertEqual(smd._cpufreq_lowest_nonlinear_khz(d), 0)

@@ -16480,6 +16480,30 @@ def _cpufreq_nominal_khz(freq_dir: Path) -> int:
         return 0
 
 
+def _cpufreq_lowest_nonlinear_khz(freq_dir: Path) -> int:
+    """amd-pstate's lowest_nonlinear frequency (kHz): below it a cap is ignored
+    (VK5ARG 2026-11-15: min=max 1200 still ran 1.60 GHz).  0 on other drivers."""
+    try:
+        if not (freq_dir / 'scaling_driver').read_text().strip().startswith('amd-pstate'):
+            return 0
+        return int((freq_dir / 'amd_pstate_lowest_nonlinear_freq').read_text().strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def _below_nominal_note(cpus: str, nominal_mhz: list, lowest_mhz: list, other_max_mhz: int) -> str:
+    """What a cap under amd-pstate's CPPC nominal really does, as measured on
+    VK5ARG 2026-11-15 (Ryzen 5850U): a busy capped core runs at about 0.8x the
+    radiod cores' clock (2.37 GHz with radiod at 3.04, 1.60 with radiod at
+    2.0), never below lowest_nonlinear, so radiod_max_mhz is the real lever."""
+    floor = (f'never below {", ".join(str(f) for f in lowest_mhz)} MHz (lowest_nonlinear)'
+             if lowest_mhz else 'never far below its CPPC nominal')
+    return (f'cpus {cpus}: the {other_max_mhz} MHz cap sits under amd-pstate\'s CPPC nominal '
+            f'({", ".join(str(f) for f in nominal_mhz)} MHz), and there it is not a hard limit: '
+            f'a busy capped core follows the radiod cores at about 0.8x their clock, {floor}. '
+            f'Lowering radiod_max_mhz is what brings these cores down; the cap still stops boost.')
+
+
 def _read_settled_khz(path: Path, want: int, tries: int = 10, wait_s: float = 0.1) -> int:
     """Read a cpufreq kHz value, re-reading briefly until it equals ``want``
     (or the tries run out); return the last value read."""
@@ -16652,6 +16676,7 @@ def cmd_diag_cpu_freq(args) -> int:
     changes = 0
     errors  = 0
     below_nominal: list = []     # [(cpu, nominal kHz)] where the cap sits under it
+    lowest_nonlinear: set = set()  # MHz, for those cpus
     # Per-core boost (cpb) is the HARD lever on acpi-cpufreq AMD hosts: their
     # P-state table is discrete and everything above the top P-state is turbo,
     # which scaling_max_freq cannot cap — but cpb=0 pins a core at its top
@@ -16721,6 +16746,9 @@ def cmd_diag_cpu_freq(args) -> int:
         floor_khz = _cpufreq_nominal_khz(freq_dir)
         if floor_khz and applied_khz < floor_khz:
             below_nominal.append((cpu, floor_khz))
+            ln = _cpufreq_lowest_nonlinear_khz(freq_dir)
+            if ln:
+                lowest_nonlinear.add(ln // 1000)
 
         if do_apply:
             # Governor FIRST: a cap is INERT under 'performance' (that
@@ -16790,10 +16818,7 @@ def cmd_diag_cpu_freq(args) -> int:
     if below_nominal:
         floors = sorted({k // 1000 for _, k in below_nominal})
         cpus = _cpu_list_str({c for c, _ in below_nominal})
-        _info(f'cpus {cpus}: the driver will not hold a busy core below its CPPC '
-              f'nominal ({", ".join(str(f) for f in floors)} MHz), so the '
-              f'{other_max_mhz} MHz cap is effectively that floor -- it still '
-              f'stops boost')
+        _info(_below_nominal_note(cpus, floors, sorted(lowest_nonlinear), other_max_mhz))
     if do_apply:
         if n_cpb:
             _info(f'acpi-cpufreq host: per-core boost (cpb) set on {n_cpb} cpu(s) — '
