@@ -887,29 +887,79 @@ id hsupload >/dev/null 2>&1 && chown -R hsupload:sigmond /etc/hs-uploader/keys 2
 # but the wizard mints (and the portal registers) keys/id_ed25519_host —
 # fan the registered key out to the expected paths (2026-08-05 B4 fix)
 HK=/etc/hs-uploader/keys/id_ed25519_host
-if [ -f "$HK" ]; then
-    if [ ! -f /etc/hs-uploader/keys/id_ed25519 ]; then
-        install -o hsupload -g sigmond -m 600 "$HK" /etc/hs-uploader/keys/id_ed25519
-        [ -f "$HK.pub" ] && install -o hsupload -g sigmond -m 644 "$HK.pub" /etc/hs-uploader/keys/id_ed25519.pub
-        say "hs-uploader key fanned out: id_ed25519"
-    fi
-    # timestd owns ~/.ssh, so root must never follow a path there: a link at
-    # .ssh or at the key would have had root write the portal key wherever it
-    # pointed (security review, 2026-11-15).  Root opens the key; timestd
-    # writes it, and a symlink at either place is refused outright.
-    TS_SSH=/home/timestd/.ssh
-    if id timestd >/dev/null 2>&1 && [ ! -e "$TS_SSH/id_rsa_psws" ] && [ ! -L "$TS_SSH/id_rsa_psws" ]; then
-        if [ -L "$TS_SSH" ]; then
-            say "grape PSWS key NOT fanned out: $TS_SSH is a symlink - refused"
-        elif runuser -u timestd -- sh -c 'umask 077; mkdir -p "$1" && chmod 700 "$1" && [ ! -L "$1" ] && cat > "$1/.id_rsa_psws.new" && mv -f "$1/.id_rsa_psws.new" "$1/id_rsa_psws"' \
-                sh "$TS_SSH" < "$HK" 2>/dev/null; then
-            say "grape PSWS key fanned out: id_rsa_psws"
-        else
-            say "grape PSWS key NOT fanned out: could not write $TS_SSH/id_rsa_psws as timestd"
+# ⛔ hsupload can write /etc/hs-uploader/keys, so root must not follow a link
+# there either (security review, 2026-11-15).  Root reads the source only as
+# a regular file, opened with O_NOFOLLOW, owned by root or hsupload; every
+# copy is written by the account that owns its destination, through runuser.
+st_read_key() {   # st_read_key <path>: its bytes on stdout, or a reason on stderr
+    python3 - "$1" <<'PYEOF'
+import os, pwd, stat, sys
+p = sys.argv[1]
+owners = {0}
+try:
+    owners.add(pwd.getpwnam('hsupload').pw_uid)
+except KeyError:
+    pass
+try:
+    fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+except OSError as e:
+    sys.exit('%s: not opened without following links (%s)' % (p, e.strerror))
+st = os.fstat(fd)
+if not stat.S_ISREG(st.st_mode):
+    sys.exit('%s: not a regular file' % p)
+if st.st_uid not in owners:
+    sys.exit('%s: owned by uid %d, not root or hsupload' % (p, st.st_uid))
+with os.fdopen(fd, 'rb') as f:
+    sys.stdout.buffer.write(f.read())
+PYEOF
+}
+# st_write_as <user> <mode> <dest> < bytes: written as <user>, beside <dest>
+# and renamed over it; refused when <dest> exists or is a link.
+st_write_as() {
+    runuser -u "$1" -- sh -c 'umask 077; [ ! -e "$2" ] && [ ! -L "$2" ] || exit 1
+        cat > "$2.new" && chmod "$1" "$2.new" && mv -f "$2.new" "$2"' sh "$2" "$3" 2>/dev/null
+}
+if [ -L "$HK" ]; then
+    say "PSWS key NOT fanned out: $HK is a symlink - refused"
+elif [ -f "$HK" ]; then
+    KTMP=$(mktemp) || KTMP=""
+    if [ -z "$KTMP" ]; then
+        say "PSWS key NOT fanned out: no temp file"
+    elif ! KWHY=$(st_read_key "$HK" 2>&1 >"$KTMP"); then
+        say "PSWS key NOT fanned out: $KWHY - refused"
+    else
+        if id hsupload >/dev/null 2>&1 && [ ! -e /etc/hs-uploader/keys/id_ed25519 ] && [ ! -L /etc/hs-uploader/keys/id_ed25519 ]; then
+            if st_write_as hsupload 600 /etc/hs-uploader/keys/id_ed25519 < "$KTMP"; then
+                runuser -u hsupload -- chgrp sigmond /etc/hs-uploader/keys/id_ed25519 2>/dev/null
+                if [ -f "$HK.pub" ] && st_read_key "$HK.pub" 2>/dev/null \
+                        | st_write_as hsupload 644 /etc/hs-uploader/keys/id_ed25519.pub; then
+                    runuser -u hsupload -- chgrp sigmond /etc/hs-uploader/keys/id_ed25519.pub 2>/dev/null
+                fi
+                say "hs-uploader key fanned out: id_ed25519"
+            else
+                say "hs-uploader key NOT fanned out: could not write /etc/hs-uploader/keys/id_ed25519 as hsupload"
+            fi
+        elif [ -L /etc/hs-uploader/keys/id_ed25519 ]; then
+            say "hs-uploader key NOT fanned out: /etc/hs-uploader/keys/id_ed25519 is a symlink - refused"
         fi
-    elif [ -L "$TS_SSH/id_rsa_psws" ]; then
-        say "grape PSWS key NOT fanned out: $TS_SSH/id_rsa_psws is a symlink - refused"
+        # timestd owns ~/.ssh, so root must never follow a path there: a link
+        # at .ssh or at the key would have had root write the portal key
+        # wherever it pointed.  timestd writes it; a symlink is refused.
+        TS_SSH=/home/timestd/.ssh
+        if id timestd >/dev/null 2>&1 && [ ! -e "$TS_SSH/id_rsa_psws" ] && [ ! -L "$TS_SSH/id_rsa_psws" ]; then
+            if [ -L "$TS_SSH" ]; then
+                say "grape PSWS key NOT fanned out: $TS_SSH is a symlink - refused"
+            elif runuser -u timestd -- sh -c 'umask 077; mkdir -p "$1" && chmod 700 "$1" && [ ! -L "$1" ] && cat > "$1/.id_rsa_psws.new" && mv -f "$1/.id_rsa_psws.new" "$1/id_rsa_psws"' \
+                    sh "$TS_SSH" < "$KTMP" 2>/dev/null; then
+                say "grape PSWS key fanned out: id_rsa_psws"
+            else
+                say "grape PSWS key NOT fanned out: could not write $TS_SSH/id_rsa_psws as timestd"
+            fi
+        elif [ -L "$TS_SSH/id_rsa_psws" ]; then
+            say "grape PSWS key NOT fanned out: $TS_SSH/id_rsa_psws is a symlink - refused"
+        fi
     fi
+    [ -n "$KTMP" ] && rm -f "$KTMP"
 fi
 # timestd needs the sigmond group to write the shared hs-uploader
 # watermark DB from CLI paths (grape upload readonly-database, 2026-08-05)
