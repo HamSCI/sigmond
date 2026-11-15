@@ -891,10 +891,10 @@ HK=/etc/hs-uploader/keys/id_ed25519_host
 # there either (security review, 2026-11-15).  Root reads the source only as
 # a regular file, opened with O_NOFOLLOW, owned by root or hsupload; every
 # copy is written by the account that owns its destination, through runuser.
-st_read_key() {   # st_read_key <path>: its bytes on stdout, or a reason on stderr
-    python3 - "$1" <<'PYEOF'
+st_read_key() {   # st_read_key <path> private|public: its bytes on stdout, or a reason on stderr
+    python3 - "$1" "${2:-private}" <<'PYEOF'
 import os, pwd, stat, sys
-p = sys.argv[1]
+p, kind = sys.argv[1], sys.argv[2]
 owners = {0}
 try:
     owners.add(pwd.getpwnam('hsupload').pw_uid)
@@ -909,8 +909,25 @@ if not stat.S_ISREG(st.st_mode):
     sys.exit('%s: not a regular file' % p)
 if st.st_uid not in owners:
     sys.exit('%s: owned by uid %d, not root or hsupload' % (p, st.st_uid))
+# A hard link passes O_NOFOLLOW and the owner check.  Debian's
+# fs.protected_hardlinks=1 already stops hsupload linking a file it cannot
+# read; this is defence in depth.
+if st.st_nlink != 1:
+    sys.exit('%s: has %d hard links' % (p, st.st_nlink))
+if st.st_size > 16384:
+    sys.exit('%s: %d bytes, too large for a key' % (p, st.st_size))
 with os.fdopen(fd, 'rb') as f:
-    sys.stdout.buffer.write(f.read())
+    data = f.read(16385)
+if kind == 'private':
+    body = data.strip()
+    ok = (body.startswith(b'-----BEGIN OPENSSH PRIVATE KEY-----\n')
+          and body.endswith(b'\n-----END OPENSSH PRIVATE KEY-----')
+          and body.count(b'-----BEGIN') == 1)
+else:
+    ok = data.startswith(b'ssh-') and data.rstrip(b'\n').count(b'\n') == 0
+if not ok:
+    sys.exit('%s: not an OpenSSH %s key' % (p, kind))
+sys.stdout.buffer.write(data)
 PYEOF
 }
 # st_write_as <user> <mode> <dest> < bytes: written as <user>, beside <dest>
@@ -931,7 +948,7 @@ elif [ -f "$HK" ]; then
         if id hsupload >/dev/null 2>&1 && [ ! -e /etc/hs-uploader/keys/id_ed25519 ] && [ ! -L /etc/hs-uploader/keys/id_ed25519 ]; then
             if st_write_as hsupload 600 /etc/hs-uploader/keys/id_ed25519 < "$KTMP"; then
                 runuser -u hsupload -- chgrp sigmond /etc/hs-uploader/keys/id_ed25519 2>/dev/null
-                if [ -f "$HK.pub" ] && st_read_key "$HK.pub" 2>/dev/null \
+                if [ -f "$HK.pub" ] && st_read_key "$HK.pub" public 2>/dev/null \
                         | st_write_as hsupload 644 /etc/hs-uploader/keys/id_ed25519.pub; then
                     runuser -u hsupload -- chgrp sigmond /etc/hs-uploader/keys/id_ed25519.pub 2>/dev/null
                 fi

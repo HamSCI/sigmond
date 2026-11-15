@@ -22,11 +22,14 @@ for c in install chown usermod getent; do printf '#!/bin/bash\necho "%s $*" >> %
 printf '#!/bin/bash\necho "runuser $2" >> %s/calls.log\nshift 3\nexec "$@"\n' "$T" > "$T/bin/runuser"
 chmod +x "$T/bin/"*
 
+KEY='-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+-----END OPENSSH PRIVATE KEY-----'
 reset() {
     rm -rf "$T/keys" "$T/home" "$T/outside" "$T/calls.log" "$T/say.log"
     mkdir -p "$T/keys" "$T/home" "$T/outside"
-    printf 'PORTAL-KEY\n' > "$T/keys/id_ed25519_host"
-    printf 'PORTAL-PUB\n' > "$T/keys/id_ed25519_host.pub"
+    printf '%s\n' "$KEY" > "$T/keys/id_ed25519_host"
+    printf 'ssh-ed25519 AAAAC3Nz test@b4\n' > "$T/keys/id_ed25519_host.pub"
 }
 run() { PATH="$T/bin:$PATH" bash -c "say(){ echo \"\$*\" >> $T/say.log; }; source $T/step.sh"; }
 check() {  # check <name> <condition...>
@@ -36,7 +39,7 @@ check() {  # check <name> <condition...>
 
 reset; run
 check "fresh: key written, mode 600, dir 700" \
-    bash -c "[ \"\$(cat $T/home/.ssh/id_rsa_psws)\" = PORTAL-KEY ] && [ \$(stat -c %a $T/home/.ssh/id_rsa_psws) = 600 ] && [ \$(stat -c %a $T/home/.ssh) = 700 ]"
+    bash -c "cmp -s $T/keys/id_ed25519_host $T/home/.ssh/id_rsa_psws && [ \$(stat -c %a $T/home/.ssh/id_rsa_psws) = 600 ] && [ \$(stat -c %a $T/home/.ssh) = 700 ]"
 check "fresh: written through runuser as timestd, never root install" \
     bash -c "grep -q 'runuser timestd' $T/calls.log && ! grep -q 'install.*id_rsa_psws' $T/calls.log"
 
@@ -58,7 +61,7 @@ check "existing key: left as it is" bash -c "[ \"\$(cat $T/home/.ssh/id_rsa_psws
 # --- the source side: /etc/hs-uploader/keys is hsupload-writable ---
 reset; run
 check "fresh: hs-uploader copy written, 600, pub 644" \
-    bash -c "[ \"\$(cat $T/keys/id_ed25519)\" = PORTAL-KEY ] && [ \$(stat -c %a $T/keys/id_ed25519) = 600 ] && [ \$(stat -c %a $T/keys/id_ed25519.pub) = 644 ] && grep -q 'runuser hsupload' $T/calls.log"
+    bash -c "cmp -s $T/keys/id_ed25519_host $T/keys/id_ed25519 && [ \$(stat -c %a $T/keys/id_ed25519) = 600 ] && [ \$(stat -c %a $T/keys/id_ed25519.pub) = 644 ] && grep -q 'runuser hsupload' $T/calls.log"
 
 reset; printf 'SECRET\n' > "$T/outside/secret"; rm "$T/keys/id_ed25519_host"; ln -s "$T/outside/secret" "$T/keys/id_ed25519_host"; run
 check "symlinked source: refused, nothing copied anywhere" \
@@ -67,6 +70,14 @@ check "symlinked source: refused, nothing copied anywhere" \
 reset; ln -s "$T/outside/planted" "$T/keys/id_ed25519"; run
 check "symlinked hs-uploader destination: refused, nothing written outside" \
     bash -c "[ ! -e $T/outside/planted ] && grep -q 'keys/id_ed25519 is a symlink - refused' $T/say.log"
+
+reset; ln "$T/keys/id_ed25519_host" "$T/outside/hardlink"; run
+check "hard-linked source: refused, nothing copied" \
+    bash -c "[ ! -e $T/keys/id_ed25519 ] && [ ! -e $T/home/.ssh/id_rsa_psws ] && grep -q 'hard links - refused' $T/say.log"
+
+reset; printf 'root:x:0:0::/root:/bin/bash\n' > "$T/keys/id_ed25519_host"; run
+check "source that is not an OpenSSH private key: refused, nothing copied" \
+    bash -c "[ ! -e $T/keys/id_ed25519 ] && [ ! -e $T/home/.ssh/id_rsa_psws ] && grep -q 'not an OpenSSH private key - refused' $T/say.log"
 
 # A source owned by neither root nor hsupload (here: by the test user, with
 # only root allowed) is refused.
