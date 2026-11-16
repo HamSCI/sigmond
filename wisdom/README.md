@@ -30,5 +30,44 @@ To add a new CPU model: on a machine of that model whose wisdom is fully
 planned, copy `/etc/fftw/wisdomf` here as `wisdomf-<slug>` and write its
 `model name` line to `wisdomf-<slug>.cpu`.
 
+## FFTW version, radiod's slot, and whose plans count
+
+FFTW refuses wisdom made by another FFTW version: the version is part of the
+header it expects (`(fftw-3.3.8 fftwf_wisdom #x... ...`), and a mismatched
+file imports nothing.  The bundles here are FFTW **3.3.10** (Debian 13);
+Ubuntu 22.04 ships **3.3.8**; KA9Q runs a hand-built **3.3.11**.  So:
+
+- **Seeding checks the version.**  A bundle whose header names a different
+  FFTW than the library radiod links (`ldd` on radiod, then that library's
+  `fftwf_version`) is not offered, and an installed wisdom file from another
+  version is judged `fresh`, never `current`.
+- **radiod's version-named slot.**  radiod imports, in order and merging,
+  `/etc/fftw/wisdomf`, `/var/lib/ka9q-radio/wisdom`, and
+  `/var/lib/ka9q-radio/wisdom-<fftwf_version>-threaded` (KA9Q's naming,
+  e.g. `wisdom-fftw-3.3.8-sse2-avx-threaded`; `fftwf_version` carries the
+  SIMD build flags).  Only the build that made the slot can read it, so two
+  FFTW builds on one host keep two slots and never clobber each other.
+  After every plan or seed, sigmond also publishes its wisdom into the slot
+  for radiod's library, with a sidecar (`<slot>.cpu`, `made_by=sigmond`).
+- **Plans are timings, and sigmond's are taken under its tuning:** radiod's
+  own FFT core, movable IRQs off it, `isolcpus`/`nohz_full`, the L3 CAT
+  slice, the pinned clock.  The same hardware without that tuning is a
+  different machine to FFTW.  So:
+  - where ka9q-radio is **locally managed** (an operator owns radiod, as
+    KA9Q does on the KFS hosts), sigmond plans, seeds and publishes nothing
+    and calls the operator's wisdom current;
+  - on a host sigmond owns, a slot without sigmond's sidecar is **foreign**:
+    it is renamed `<slot>.foreign-<epoch>` (kept, never deleted) and
+    sigmond's own plans take its place;
+  - bundles hold only plans made under sigmond's tuning.  The slot sidecar
+    records the conditions (`radiod_cpus`, `radiod_max_khz`,
+    `radiod_cat_l3`, `isolcpus`); nothing compares them yet.
+
+Not yet (stage 2): planning with ka9q-radio's `fft-gen -f` (built against
+radiod's own FFTW, so a host whose radiod uses a non-distro FFTW gets plans
+from the right library), bundles keyed by FFTW version as well as CPU, and
+deciding which recorded conditions should force a replan.
+
 Entries:
+- `wisdomf-amd-ryzen-7-pro-5850u` — AMD Ryzen 7 PRO 5850U, **FFTW 3.3.8** (Ubuntu 22.04), planned bare metal under sigmond tuning incl. L3 CAT (VK5ARG, 2026-11-14)
 - `wisdomf-amd-ryzen-7-5825u` — AMD Ryzen 7 5825U (B4, 2026-07-23)

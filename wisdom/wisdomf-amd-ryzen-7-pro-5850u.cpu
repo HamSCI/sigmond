@@ -1,0 +1,41 @@
+model=AMD Ryzen 7 PRO 5850U with Radeon Graphics
+fftw_version=fftw-3.3.8-sse2-avx
+threaded=yes
+l3_bytes=16777216
+l3_ways=16
+mem_total_kb=12165744
+radiod_core_type=uniform
+radiod_l3_bytes=16777216
+radiod_cat_l3_bytes=10485760
+radiod_cpus=14,15
+radiod_max_khz=3200000
+radiod_cat_l3=L3:0=03ff
+isolcpus=14-15
+samprate=129600000
+codelets=925
+bytes=89596
+made_by=sigmond
+planned_profiles=cob15,cob45,cob85,cob160,cob200,cob205,cob300,cob320,cob400,cob405,cob480,cob600,cob800,cob810,cob960,cob1200,cob1600,cob1620,cob1920,cob3200,cob3240,cob4800,cob4860,cob6930,cob8100,cob9600,cob16200,cob32400,cob40500,cob81000,cob162000,cif300,cif512,cif600,cif2400,cof512,cob512,cob2400,cof1625,cof1638,cof1650,cof1664,cif1650,cif2080,cif3250,cif4095,cif8125,cob1650,cob2080,cob3250,cob4095,cob8125,rof3240,rof6480,rof12960,rof16200,rof25920,rof32400,rof64800,rof129600,rof162000,rof259200,rof324000,cdb15,cdb45,cdb85,cdb160,cdb200,cdb205,cdb300,cdb320,cdb400,cdb405,cdb480,cdb512,cdb600,cdb800,cdb810,cdb960,cdb1200,cdb1600,cdb1620,cdb1650,cdb1920,cdb2080,cdb2400,cdb3200,cdb3240,cdb3250,cdb4095,cdb4800,cdb4860,cdb6930,cdb8100,cdb8125,cdb9600,cdb16200,cdb32400,cdb40500,cdb81000,cdb162000,cob55,cob100,cob175,cob220,cob350,cob420,cob825,cob2000,cob2048,cob2500,cob4000,cob5500,cdb55,cdb100,cdb175,cdb220,cdb350,cdb420,cdb825,cdb2000,cdb2048,cdb2500,cdb4000,cdb5500,cif55,cif100,cif175,cif200,cif220,cif350,cif400,cif420,cif825,cif1600,cif2000,cif2048,cif2500,cif3200,cif4000,cif4800,cif5500,cif6930,cof1680,cof1750,cof1760,cof2000,cof2048,cof2200,rof1620000,rof3240000,cif40500,cof1620,cif81000,cif162000,cob810000,cif810000,cof32400,cif32400,cob16250,cif16250,cob4875,cif4875,rof81000,rof8100,rof21600
+# FFTW 3.3.8 (Ubuntu 22.04 libfftw3-single3 3.3.8-2ubuntu8): only a host whose
+# radiod links fftw-3.3.8 can import it; find_bundle skips it elsewhere (#114).
+#
+# Planned ON a 5850U, bare metal (VK5ARG, RAC 137, koch-wsprdaemon, Ubuntu
+# 22.04.5), with sigmond's tuning in place: radiod's FFT core (CPU 14) under
+# isolcpus/nohz_full/rcu_nocbs=14-15, every movable IRQ herded to CPUs 0-1,
+# L3 CAT 10 of 16 ways (03ff = 10 MB) for CPUs 14-15 via sigmond-l3-cat
+# (#111), radiod cores capped at 3.2 GHz (turbostat: 100 % busy at 3093 MHz),
+# the station suspended (smd admin wisdom suspend).  Made with
+# 'smd admin wisdom plan --fresh' (fftwf-wisdom -n -T 1, pinned to CPU 14):
+# all 166 transforms measured here, nothing imported.
+# Run time 2 h 46 m 20 s (2026-11-14 20:50:56Z - 23:37:18Z); rof3240000
+# alone ~70 min (22:27:03 - 23:37:18).
+#
+# radiod_l3_bytes is the sysfs L3 (16 MB), exactly what radiod_placement()
+# reports on a 5850U, because wisdom_verdict() compares the two: any other
+# value would make every seeded 5850U replan from scratch.  radiod's real
+# share under CAT is radiod_cat_l3_bytes (10 MB), which nothing compares yet
+# (#111 open question).
+#
+# Converged: radiod (ka9q-radio aa52698c) imported it at the 2026-11-15
+# 00:32Z boot and /var/lib/ka9q-radio/fft.log stayed UNMODIFIED for the
+# following 50+ minutes of decoding (WSPR 15-19 spots/cycle, ~370 FT8/FT4).

@@ -6720,6 +6720,8 @@ _PRELOAD_MODULES = {
                          # the checkouts on disk
                          'sigmond.installer', 'sigmond.lan_order'),
     'update': ('sigmond.cpu', 'sigmond.doctor', 'sigmond.wisdom', 'sigmond.update',
+               # wisdom.find_bundle's FFTW-version check
+               'sigmond.wisdom_slot',
                'sigmond.build_preflight',
                'sigmond.catalog', 'sigmond.discover', 'sigmond.provenance',
                'sigmond.installer_args', 'sigmond.sink_state',
@@ -11129,7 +11131,7 @@ def _bringup_wait_wisdom(wisdom_file, timeout_s: int = 3600, poll_s: int = 15) -
     # operator must be told immediately, by name — the silent version of
     # this looks exactly like a hung bring-up.
     from sigmond.wisdom import identify_cpu
-    verdict = identify_cpu(_WISDOM_BUNDLE_DIRS)
+    verdict = identify_cpu(_WISDOM_BUNDLE_DIRS, None, _radiod_fftw_version())
     _info(f'FFT wisdom: this host is {verdict["model"]}')
     if verdict['have_wisdom']:
         _seed_bundled_wisdom()
@@ -14750,6 +14752,58 @@ _WISDOM_BUNDLE_DIRS = [
 ]
 
 
+_RADIOD_FFTW_VERSION = None
+
+
+def _radiod_fftw_version() -> str:
+    """fftwf_version of the libfftw3f radiod loads ('' when unknown), cached:
+    the bring-up wisdom wait asks every 15 s."""
+    global _RADIOD_FFTW_VERSION
+    if _RADIOD_FFTW_VERSION is None:
+        try:
+            from sigmond.wisdom_slot import radiod_fftw_version
+            _RADIOD_FFTW_VERSION = radiod_fftw_version()
+        except Exception:                                  # noqa: BLE001
+            _RADIOD_FFTW_VERSION = ''
+    return _RADIOD_FFTW_VERSION
+
+
+def _wisdom_hands_off() -> bool:
+    """True where an operator owns radiod (ka9q-radio locally managed, e.g.
+    KA9Q on the KFS hosts): their wisdom was planned in their environment,
+    and sigmond neither replaces nor judges it."""
+    try:
+        return 'ka9q-radio' in _locally_managed()
+    except Exception:                                      # noqa: BLE001
+        return False
+
+
+def _wisdom_publish_slot(pin=None) -> None:
+    """Copy the installed wisdom into radiod's FFTW-version slot
+    (/var/lib/ka9q-radio/wisdom-<fftwf_version>-threaded), which radiod
+    imports last.  Sigmond-owned hosts only; a foreign slot is moved aside,
+    never deleted.  Best-effort: never fails a plan or a seed."""
+    if _wisdom_hands_off():
+        return
+    from sigmond import wisdom as _w
+    from sigmond import wisdom_slot as _s
+    ver = _radiod_fftw_version()
+    try:
+        slot, action, moved = _s.publish(
+            Path(_w.WISDOM_FILE), Path(_w.WISDOM_SIDECAR), ver,
+            extra=_s.conditions(pin) if pin else None)
+    except OSError as exc:
+        _warn(f'FFT wisdom: not published to radiod\'s FFTW-version slot: {exc}')
+        return
+    if moved:
+        _warn(f'FFT wisdom: radiod\'s slot held wisdom sigmond did not plan; '
+              f'kept it as {moved}')
+    if action == 'published':
+        _ok(f'FFT wisdom: published to radiod\'s {ver} slot {slot}')
+    elif action.startswith('skipped'):
+        _warn(f'FFT wisdom: not published to radiod\'s slot ({action[9:]})')
+
+
 def _seed_bundled_wisdom() -> None:
     """Seed /etc/fftw/wisdomf from a CPU-matched fork bundle, if any.
 
@@ -14760,12 +14814,14 @@ def _seed_bundled_wisdom() -> None:
     """
     if _WISDOM_FILE.exists() and _WISDOM_FILE.stat().st_size > 0:
         return
+    if _wisdom_hands_off():
+        return
     from sigmond import wisdom as _w
     model = _w.cpu_model()
     # find_bundle reads v1 and v2 sidecars.  The raw-text compare this
     # replaced never matched a v2 (key=value) sidecar, so a repo install
     # seeded nothing (sigma, 2026-11-05).
-    bundle = _w.find_bundle(_WISDOM_BUNDLE_DIRS, model)
+    bundle = _w.find_bundle(_WISDOM_BUNDLE_DIRS, model, _radiod_fftw_version())
     if bundle is None:
         return
     _WISDOM_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -14779,6 +14835,7 @@ def _seed_bundled_wisdom() -> None:
     _ok(f'FFT wisdom: seeded {_WISDOM_FILE} from bundle '
         f'{bundle.name} (CPU match: {model}) — planner will '
         f'verify instead of re-planning')
+    _wisdom_publish_slot()
 
 
 def _ensure_fft_wisdom(radiod_units: list, all_units: list) -> bool:
@@ -20558,7 +20615,16 @@ def _wisdom_verdict(wisdom_file=None) -> str:
     'current', 'top-up' or 'fresh'."""
     from sigmond import wisdom as _w
     from sigmond.provenance import is_appliance_install
+    if _wisdom_hands_off():
+        return 'current'             # an operator's radiod: theirs to judge
     wf = Path(wisdom_file or _w.WISDOM_FILE)
+    # FFTW refuses wisdom made by another version.  A file whose header names
+    # a different FFTW than radiod loads is worth nothing to radiod, however
+    # current its sidecar looks (an OS upgrade, or a bundle from 3.3.10 on a
+    # 3.3.8 host).
+    from sigmond.wisdom_slot import compatible as _w_compatible
+    if wf.is_file() and not _w_compatible(wf, _radiod_fftw_version()):
+        return 'fresh'
     # A wisdomf with no sidecar: the image bakes one, and every station that
     # predates the sidecar has one.  Judge it as legacy, not as stale.  Not
     # adopted (sigma's June file): its plans were timed somewhere else.
@@ -20816,8 +20882,10 @@ def _wisdom_install_cpu_bundle() -> bool:
     """Install sigmond's bundled wisdom for this CPU over /etc/fftw/wisdomf,
     with the bundle's sidecar.  False when there is no bundle for this CPU
     or the copy fails; the installed wisdom is then left as it was."""
+    if _wisdom_hands_off():
+        return False
     from sigmond import wisdom as _w
-    verdict = _w.identify_cpu(_WISDOM_BUNDLE_DIRS, _w.CPUINFO)
+    verdict = _w.identify_cpu(_WISDOM_BUNDLE_DIRS, _w.CPUINFO, _radiod_fftw_version())
     bundle = verdict.get('bundle')
     if not bundle:
         return False
@@ -20837,6 +20905,7 @@ def _wisdom_install_cpu_bundle() -> bool:
         return False
     _info(f'auto: installed the {bundle.name} bundle (measured on this CPU) '
           f'instead of a fresh plan; only what it lacks will be measured')
+    _wisdom_publish_slot()
     return True
 
 
@@ -20862,6 +20931,11 @@ def cmd_wisdom_plan(args) -> int:
         WISDOM_SIDECAR, cpu_model, radiod_placement, write_sidecar,
         read_sidecar, topup_misses, FFT_MISS_LOG,
     )
+
+    if getattr(args, 'auto', False) and _wisdom_hands_off():
+        _info('auto: ka9q-radio is locally managed here; its operator owns '
+              'radiod\'s FFT wisdom, so sigmond plans nothing')
+        return 0
 
     fftwf = shutil.which('fftwf-wisdom')
     if fftwf is None:
@@ -21209,6 +21283,7 @@ def cmd_wisdom_plan(args) -> int:
                 radiod_placement(pin, get_performance_cpus()) if pin else None)
     except OSError as exc:
         _warn(f'could not write {WISDOM_SIDECAR}: {exc} — the next check will replan')
+    _wisdom_publish_slot(pin)
     _info('Now: smd start')
     return 0
 

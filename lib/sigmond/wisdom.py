@@ -265,13 +265,20 @@ def read_sidecar(path: Path) -> dict:
     return out
 
 
-def find_bundle(dirs, model: str) -> Path | None:
+def find_bundle(dirs, model: str, fftw_version: str = '') -> Path | None:
     """The bundled wisdom whose sidecar names exactly this CPU model.
 
     Exact match only.  Wisdom from a different CPU still *works* — FFTW
     falls back to planning anything it cannot find — but it defeats the
     purpose, because every plan in it was timed on the wrong machine.
+
+    With ``fftw_version`` (radiod's ``fftwf_version``), a bundle made by
+    another FFTW version is skipped: FFTW refuses to import it, so seeding
+    it would leave radiod on FFTW_ESTIMATE behind a sidecar that calls the
+    wisdom current (the repo's bundles are FFTW 3.3.10 from Debian 13;
+    Ubuntu 22.04 ships 3.3.8).
     """
+    from sigmond.wisdom_slot import compatible
     if not model:
         return None
     for d in dirs:
@@ -282,12 +289,13 @@ def find_bundle(dirs, model: str) -> Path | None:
             if read_sidecar(sidecar).get('model') != model:
                 continue
             bundle = sidecar.with_suffix('')
-            if bundle.is_file() and bundle.stat().st_size > 0:
+            if bundle.is_file() and bundle.stat().st_size > 0 \
+                    and compatible(bundle, fftw_version):
                 return bundle
     return None
 
 
-def identify_cpu(dirs, cpuinfo: Path | None = None) -> dict:
+def identify_cpu(dirs, cpuinfo: Path | None = None, fftw_version: str = '') -> dict:
     """What this host is, and whether we have wisdom for it.
 
     Returns a verdict dict the caller prints verbatim — never None, never
@@ -295,7 +303,7 @@ def identify_cpu(dirs, cpuinfo: Path | None = None) -> dict:
     """
     cpuinfo = CPUINFO if cpuinfo is None else cpuinfo
     model = cpu_model(cpuinfo)
-    bundle = find_bundle(dirs, model)
+    bundle = find_bundle(dirs, model, fftw_version)
     return {
         'model': model or 'unknown',
         'slug': cpu_slug(model) if model else '',

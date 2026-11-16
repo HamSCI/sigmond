@@ -40,6 +40,14 @@ def _cpuinfo(tmp_path, model=B4):
     return p
 
 
+@pytest.fixture(autouse=True)
+def _radiod_fftw_unknown(monkeypatch):
+    """These tests are about CPUs and sidecars, not FFTW versions: never let
+    the test machine's own radiod (its libfftw3f) decide whether a bundle
+    seeds.  tests/test_wisdom_slot.py covers the version check."""
+    monkeypatch.setattr(smd, '_radiod_fftw_version', lambda: '')
+
+
 def _host(tmp_path, *, model=B4, sidecar=None, miss='', wisdom_text='(w)'):
     """A fake host: returns kwargs for wisdom_is_current()."""
     w = tmp_path / 'wisdomf'
