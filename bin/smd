@@ -16660,6 +16660,31 @@ def _read_settled_khz(path: Path, want: int, tries: int = 10, wait_s: float = 0.
     return val
 
 
+ZEN3_FIT_MAX_SPS = 64_800_000
+
+
+def _zen3_default_fits(nominals: list) -> bool:
+    """The Zen 3 laptop default (radiod 2000 / others 1600 MHz) fits one radiod at any rate, or
+    several that all run at <= 64.8 Msps (a conf with no samprate runs radiod's 64.8 default).
+    Rob 2026-11-16, from KX4AZ-T: three radiods at 129.6 Msps would put each FFT near 70-90 %."""
+    if len(nominals) <= 1:
+        return True
+    return all((n.get('samprate') or ZEN3_FIT_MAX_SPS) <= ZEN3_FIT_MAX_SPS for n in nominals)
+
+
+def _cpu_freq_limits(cfg: dict, nominals: list) -> tuple:
+    """`(radiod_max_mhz, other_max_mhz, why)`: the [cpu_freq] values, except that a Zen 3
+    default that does not fit this host's radiods falls back to 3200/1400 (`why` says so)."""
+    r = cfg.get('radiod_max_mhz', 3200)
+    o = cfg.get('other_max_mhz', 1400)
+    if cfg.get('zen3_default') and not _zen3_default_fits(nominals):
+        rates = ', '.join(f"{(n.get('samprate') or ZEN3_FIT_MAX_SPS) / 1e6:g}" for n in nominals)
+        return 3200, 1400, (f'{len(nominals)} radiods ({rates} Msps): the Zen 3 laptop default '
+                            f'(2000/1600 MHz) is for one radiod or radiods at <= 64.8 Msps, so this '
+                            f'host keeps 3200/1400 (set [cpu_freq] in topology.toml to override)')
+    return r, o, ''
+
+
 def cmd_diag_cpu_freq(args) -> int:
     """Show and optionally apply per-CPU scaling_max_freq based on radiod CPU assignment."""
     # --apply writes /sys scaling_max_freq — needs root.  Auto-elevate up
@@ -16669,12 +16694,13 @@ def cmd_diag_cpu_freq(args) -> int:
     topology  = getattr(args, '_topology_override', None) or \
                 _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
     cfg       = topology.get('cpu_freq', {})
-    radiod_max_mhz = cfg.get('radiod_max_mhz', 3200)
-    other_max_mhz  = cfg.get('other_max_mhz',  1400)
+    radiod_max_mhz, other_max_mhz, zen3_why = _cpu_freq_limits(cfg, _radiod_rx888_nominals())
     fast_mode = cfg.get('fast_mode', 'radiod')
     do_apply  = getattr(args, 'apply', False)
 
     _heading('diag: CPU frequencies')
+    if zen3_why:
+        _info(zen3_why)
 
     # root already ensured at the top via _need_root auto-elevation
     radiod_by_unit = _get_radiod_cpus_by_unit()

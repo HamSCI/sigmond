@@ -42,3 +42,22 @@ def test_station_values_still_win(tmp_path, monkeypatch):
     topo.write_text("[cpu_freq]\nradiod_max_mhz = 2400\n")
     cf = T.load_topology(topo).cpu_freq
     assert (cf["radiod_max_mhz"], cf["other_max_mhz"]) == (2400, 1600)
+
+
+# ---- narrowed 2026-11-16 (Rob): 2000/1600 only for a single radiod or radiods all <= 64.8 Msps.
+# KX4AZ-T's measurement: three radiods at 129.6 Msps would put each FFT at ~70-90 % at 2.0 GHz.
+
+def test_default_is_marked_when_it_came_from_the_zen3_rule(tmp_path, monkeypatch):
+    monkeypatch.setattr(T, "CPUINFO", _cpuinfo(tmp_path, "AMD Ryzen 7 5825U with Radeon Graphics"))
+    topo = tmp_path / "topology.toml"
+    topo.write_text("")
+    assert T.load_topology(topo).cpu_freq.get("zen3_default") is True
+    topo.write_text("[cpu_freq]\nradiod_max_mhz = 2000\n")
+    assert not T.load_topology(topo).cpu_freq.get("zen3_default")
+
+
+def test_not_marked_off_zen3(tmp_path, monkeypatch):
+    monkeypatch.setattr(T, "CPUINFO", _cpuinfo(tmp_path, "Intel(R) Core(TM) i5-6500T", 6, 94, "GenuineIntel"))
+    topo = tmp_path / "topology.toml"
+    topo.write_text("")
+    assert not T.load_topology(topo).cpu_freq.get("zen3_default")

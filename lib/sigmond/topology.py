@@ -212,6 +212,11 @@ def load_topology(path: Path = TOPOLOGY_PATH,
 
     cpu_freq = cpu_freq_defaults()
     cf = raw.get('cpu_freq', {})
+    # Rob 2026-11-16: the Zen 3 values hold only where they fit (one radiod, or every radiod at
+    # <= 64.8 Msps); smd's cpu-freq decides that from the radiod confs, so mark where they came from.
+    if (cpu_freq['radiod_max_mhz'], cpu_freq['other_max_mhz']) == tuple(_ZEN3_MOBILE_CPU_FREQ.values()) \
+            and 'radiod_max_mhz' not in cf and 'other_max_mhz' not in cf:
+        cpu_freq['zen3_default'] = True
     if 'radiod_max_mhz' in cf:
         try:
             cpu_freq['radiod_max_mhz'] = int(cf['radiod_max_mhz'])
