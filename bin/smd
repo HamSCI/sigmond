@@ -10858,11 +10858,19 @@ def _enable_units_for_boot(component: str) -> list:
         units = [u for u in resolve_units([component], [component]) if not u.orphaned]
     except Exception:                                          # noqa: BLE001
         return []
+    from sigmond.installer import unit_not_ready
     done = []
     for u in units:
         state = (_run(['systemctl', 'is-enabled', u.unit]).stdout or '').strip()
         if state in ('enabled', 'static', 'masked', 'alias', 'indirect', 'generated'):
             continue          # already persistent, or not ours to change
+        # WWV-2, 2026-11-16: a unit enabled before its service user or venv
+        # exists crash-loops 217/USER or 203/EXEC from the next boot on.
+        missing = unit_not_ready(u.unit, run=lambda argv: _run(argv))
+        if missing:
+            _warn(f'{_display_unit(u.unit)}: not enabled at boot — '
+                  f'{"; ".join(missing)}')
+            continue
         r = _run(['systemctl', 'enable', u.unit], sudo=True)
         if r.returncode == 0:
             done.append(u.unit)
@@ -15873,8 +15881,9 @@ def _cmd_start_enabled(args) -> int:
         # boots dark (radiod@<inst> running-but-disabled; VM101 image
         # first-boot, 2026-07-25).  Enable BEFORE the already-running skip
         # so units started by earlier bringup steps get persisted too.
-        if _run(['systemctl', 'is-enabled', '--quiet', unit.unit]).returncode != 0:
-            _run(['systemctl', 'enable', unit.unit], sudo=True)
+        if not _enable_unit_for_start(unit.unit):
+            rc = 1
+            continue
         # No-op on already-active units.  `systemctl start` is a no-op for a
         # plain long-running service, but some units re-trigger work on start
         # (hf-timestd's templated metrology instances re-derive and restart,
@@ -15891,6 +15900,23 @@ def _cmd_start_enabled(args) -> int:
             _err(f'{_display_unit(unit.unit)}: {r.stderr.strip()}')
             rc = 1
     return rc
+
+
+def _enable_unit_for_start(unit: str) -> bool:
+    """`smd start`'s enable-for-boot step.  False, with the reason, when the
+    unit is not enabled yet and its service user or executable does not
+    exist: enabling and starting it would only crash-loop 217/USER or
+    203/EXEC, and keep doing so at every boot (WWV-2, 2026-11-16)."""
+    if _run(['systemctl', 'is-enabled', '--quiet', unit]).returncode == 0:
+        return True
+    from sigmond.installer import unit_not_ready
+    missing = unit_not_ready(unit, run=lambda argv: _run(argv))
+    if missing:
+        _err(f'{_display_unit(unit)}: not enabled or started — '
+             f'{"; ".join(missing)}')
+        return False
+    _run(['systemctl', 'enable', unit], sudo=True)
+    return True
 
 
 def cmd_stop(args) -> int:

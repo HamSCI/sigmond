@@ -127,7 +127,7 @@ class EnableAtConfigInitNotInstall(unittest.TestCase):
     def test_successful_init_enables_the_clients_units(self):
         got, en, repo = self._init(0)
         self.assertEqual(got, 0)
-        en.assert_called_once_with(repo)
+        en.assert_called_once_with(repo, client="hamsci-physics")
 
     def test_failed_init_enables_nothing(self):
         got, en, _ = self._init(3)

@@ -441,6 +441,103 @@ def run_install_script(
     return r.returncode == 0
 
 
+def _user_exists(name: str) -> bool:
+    import pwd
+    try:
+        pwd.getpwnam(name)
+        return True
+    except KeyError:
+        return False
+
+
+def _path_exists(path: str) -> bool:
+    # exists() follows links: a /usr/local/bin link into a venv that was
+    # never built reads as missing, which is the point.
+    return Path(path).exists()
+
+
+def unit_prereqs_missing(unit_text: str) -> list[str]:
+    """What a unit needs before it can run and does not have yet, read from
+    its `systemctl cat` text: the service user (User=) and the executable
+    (ExecStart=).  Empty when nothing is missing or nothing can be judged.
+
+    WWV-2, 2026-11-16: station-web.service enabled with no `stationweb`
+    user and no venv crash-looped 217/USER then 203/EXEC; mag-recorder
+    enabled on a host whose install created no `magrec` user, 217/USER.
+
+    Values with a specifier (%i, %h) or a variable are not judged, nor is
+    User= under DynamicUser=yes; only absolute ExecStart paths are checked.
+    A drop-in's empty `ExecStart=` resets the list, as systemd does."""
+    user, dynamic, execs = '', False, []
+    section = ''
+    for raw in unit_text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(('#', ';')):
+            continue
+        if line.startswith('[') and line.endswith(']'):
+            section = line
+            continue
+        if section != '[Service]' or '=' not in line:
+            continue
+        key, _, val = line.partition('=')
+        key, val = key.strip(), val.strip()
+        if key == 'User':
+            user = val
+        elif key == 'DynamicUser':
+            dynamic = val.lower() in ('yes', 'true', '1', 'on')
+        elif key == 'ExecStart':
+            if not val:
+                execs = []
+            else:
+                execs.append(val)
+    missing = []
+    if user and not dynamic and '%' not in user and '$' not in user \
+            and not user.isdigit() and not _user_exists(user):
+        missing.append(f'user {user} does not exist yet')
+    for val in execs:
+        path = val.lstrip('@-:+!|').split(None, 1)[0] if val.lstrip('@-:+!|') else ''
+        if not path.startswith('/') or '%' in path or '$' in path:
+            continue
+        if not _path_exists(path):
+            missing.append(f'{path} is not there yet')
+    return missing
+
+
+def _timer_service(timer_text: str, timer: str) -> str:
+    """The unit a timer triggers: [Timer] Unit=, else <name>.service."""
+    section = ''
+    for raw in timer_text.splitlines():
+        line = raw.strip()
+        if line.startswith('[') and line.endswith(']'):
+            section = line
+        elif section == '[Timer]' and line.startswith('Unit='):
+            return line.partition('=')[2].strip()
+    return timer[:-len('.timer')] + '.service'
+
+
+def unit_not_ready(unit: str, run=None, unit_text: Optional[str] = None) -> list[str]:
+    """unit_prereqs_missing for a unit by name; for a timer, for the service
+    it triggers.  ``run`` takes an argv and returns a CompletedProcess-like
+    object (smd passes its _run).  A unit systemctl cannot show is not
+    judged: enabling it fails or no-ops on its own terms."""
+    if run is None:
+        def run(argv):
+            return subprocess.run(argv, capture_output=True, text=True, check=False)
+    if unit_text is None:
+        r = run(['systemctl', 'cat', unit])
+        if getattr(r, 'returncode', 1) != 0:
+            return []
+        unit_text = getattr(r, 'stdout', '') or ''
+    missing = unit_prereqs_missing(unit_text)
+    if unit.endswith('.timer'):
+        svc = _timer_service(unit_text, unit)
+        r = run(['systemctl', 'cat', svc])
+        if getattr(r, 'returncode', 1) == 0:
+            missing += [f'{svc}: {m}' for m in
+                        unit_prereqs_missing(getattr(r, 'stdout', '') or '')]
+    return missing
+
+
 def apply_systemd_enables(repo_dir: Path, dry_run: bool = False,
                           *, start_timers: bool = True,
                           elevate=None) -> list[str]:
@@ -472,6 +569,9 @@ def apply_systemd_enables(repo_dir: Path, dry_run: bool = False,
 
     ``elevate`` wraps the mutating ``systemctl`` calls (enable, start) for
     a caller that is not root, e.g. ``smd config init``'s sudo wrapper.
+
+    A unit whose service user or executable does not exist yet is not
+    enabled, and says why (unit_not_ready; WWV-2, 2026-11-16).
     """
     elevate = elevate or (lambda argv: argv)
     deploy_toml = repo_dir / 'deploy.toml'
@@ -529,6 +629,15 @@ def apply_systemd_enables(repo_dir: Path, dry_run: bool = False,
                     break
             if not install_section:
                 continue  # no [Install] keys → can't be enabled, skip silently
+            missing = unit_not_ready(
+                unit, unit_text=cat.stdout,
+                run=lambda argv: subprocess.run(argv, capture_output=True,
+                                                text=True, check=False))
+            if missing:
+                msgs.append(f"  warning: {unit} not enabled — "
+                            f"{'; '.join(missing)} (its install or setup "
+                            f"creates it; enable runs again at smd apply)")
+                continue
         if dry_run:
             msgs.append(f"  (dry-run) would enable {unit} (was: {state})")
             continue

@@ -22,6 +22,7 @@ from typing import Optional
 from ..coordination import Coordination, load_coordination, station_identity_env
 from ..environment import load_environment
 from ..lifecycle import _find_deploy_toml
+from ..paths import TOPOLOGY_PATH
 from ..ui import err, heading, info, ok, warn
 
 
@@ -177,11 +178,23 @@ def _run_client_entrypoint(client: str, deploy_path: Path,
         err(f"failed to invoke {exe}: {e}")
         return 1
     if proc.returncode == 0 and verb == "init":
-        _enable_configured_units(repo_root)
+        _enable_configured_units(repo_root, client=client)
     return proc.returncode
 
 
-def _enable_configured_units(repo_root: Path) -> None:
+def _topology_turned_off(client: str) -> bool:
+    """topology.toml lists `client` with enabled = false.  A client the file
+    does not list, or no file at all, is not turned off."""
+    try:
+        with open(TOPOLOGY_PATH, 'rb') as f:
+            raw = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+    comp = (raw.get('component') or {}).get(client)
+    return isinstance(comp, dict) and comp.get('enabled') is False
+
+
+def _enable_configured_units(repo_root: Path, *, client: str = '') -> None:
     """Enable the client's declared units, and start its timers, now that
     its config exists.
 
@@ -190,8 +203,16 @@ def _enable_configured_units(repo_root: Path) -> None:
     (v3.91 nested test, 2026-11-13).  Doing it here still closes KJ6MKI
     (2026-11-12), where grape-daily.timer stayed linked and inactive after
     `smd install hamsci-physics`.  Never fails the init.
+
+    A client topology has turned off (`smd disable`, or bring-up's dormant
+    mag-recorder) gets nothing enabled (WWV-2, 2026-11-16).
     """
     from ..installer import apply_systemd_enables
+    client = client or repo_root.name
+    if _topology_turned_off(client):
+        info(f"{client}: turned off in topology — its units are not enabled "
+             f"(smd enable {client} turns it on)")
+        return
     try:
         msgs = apply_systemd_enables(repo_root, elevate=_maybe_elevate)
     except Exception as e:  # noqa: BLE001 — the config is written; say so and go on

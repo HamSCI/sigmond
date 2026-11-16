@@ -1360,6 +1360,18 @@ Give the timing products about ten minutes afterwards before you judge them; see
 It fails again after one restart. One restart is your whole budget here; a
 second one just hides the evidence.
 
+**A unit "not enabled" because its user or program is missing.** sigmond
+does not enable a unit whose service user or program does not exist yet
+(WWV-2, 2026-11-16: `station-web` before its `stationweb` user and venv,
+`mag-recorder` on a host with no magnetometer and no `magrec` user — each
+crash-looped with `217/USER` or `203/EXEC`). `smd apply`, `smd enable` and
+`smd start` then print a line such as
+`station-web.service not enabled — user stationweb does not exist yet`.
+That is not a fault to restart: the client's install or setup has not run
+yet. Run it (for station-web, its setup; for a magnetometer, plug the sensor
+in and `smd enable mag-recorder`), then `smd apply`. `smd config init` also
+enables nothing for a client that `topology.toml` has turned off.
+
 ---
 
 ### Two RX888s, and the antennas may be swapped
