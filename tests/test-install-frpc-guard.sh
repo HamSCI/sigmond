@@ -9,7 +9,7 @@
 # would strand the box.  So install.sh skips the whole RAC step, saying why,
 # when an frpc it did not start is running, a foreign frpc/RAC unit is
 # active, activating or failed, a wd-rac.service on disk is not sigmond-rac's,
-# /usr/local/sbin/frpc stands with no /etc/sigmond/frpc*.toml, or frp config
+# /usr/local/sbin/frpc stands with none of sigmond-rac's files, or frp config
 # it did not write exists; and always under SIGMOND_SKIP_RAC=1.  sigmond-rac's own pieces
 # (/etc/sigmond/frpc*.toml, wd-rac.service running /etc/sigmond/frpc.toml,
 # sigmond-rac-*.service) do not count.
@@ -30,7 +30,7 @@ TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 python3 - "$IS" "$TMP/rac.sh" <<'PYX'
 import re, sys, pathlib
 s = pathlib.Path(sys.argv[1]).read_text()
-f = re.search(r"^_foreign_frpc\(\) \{\n.*?^\}\n", s, re.S | re.M)
+f = re.search(r"^_sigmond_rac_footprint\(\) \{\n.*?^\}\n\n_foreign_frpc\(\) \{\n.*?^\}\n", s, re.S | re.M)
 b = re.search(r"^# ─── RAC — admin remote-access.*?(?=^# ─── done)", s, re.S | re.M)
 if not f or not b:
     raise SystemExit("could not extract _foreign_frpc() and the RAC block")
@@ -134,6 +134,23 @@ else bad "SIGMOND_SKIP_RAC=1 ignored" "$(cat "$TMP/out")"; fi
 reset; echo "ssh.service loaded active running x" > "$TMP/units"
 ( export SIGMOND_SKIP_RAC=0; run )
 [ -e "$TMP/rac-ran" ] && ok "SIGMOND_SKIP_RAC=0: RAC installed" || bad "SIGMOND_SKIP_RAC=0 skipped" "$(cat "$TMP/out")"
+
+echo "── sigmond-rac's own UNCONFIGURED install (no frpc.toml yet) ──────"
+# What sigmond-rac/install.sh leaves before the operator activates RAC:
+# frpc, the template, the CA, the station key, an inert wd-rac.service.
+reset; mkdir -p "$TMP/root/usr/local/sbin" "$TMP/root/etc/systemd/system"
+touch "$TMP/root/usr/local/sbin/frpc" "$TMP/root/etc/sigmond/frpc.toml.template" \
+      "$TMP/root/etc/sigmond/frps-ca.crt" "$TMP/root/etc/sigmond/frpc_id_rsa"
+printf '[Service]\nExecStart=/usr/local/sbin/frpc -c /etc/sigmond/frpc.toml\n' > "$TMP/root/etc/systemd/system/wd-rac.service"
+echo "ssh.service loaded active running x" > "$TMP/units"; run
+[ -e "$TMP/rac-ran" ] && ok "unconfigured sigmond-rac install: RAC re-run, not skipped" || bad "own unconfigured install read as foreign" "$(cat "$TMP/out")"
+for f in frpc.toml.template frps-ca.crt frpc_id_rsa; do
+    reset; mkdir -p "$TMP/root/usr/local/sbin"; touch "$TMP/root/usr/local/sbin/frpc" "$TMP/root/etc/sigmond/$f"; run
+    [ -e "$TMP/rac-ran" ] && ok "/usr/local/sbin/frpc beside /etc/sigmond/$f alone: ours" || bad "$f not counted as sigmond-rac's" "$(cat "$TMP/out")"
+done
+reset; mkdir -p "$TMP/root/usr/local/sbin" "$TMP/root/etc/systemd/system"; touch "$TMP/root/usr/local/sbin/frpc"
+printf '[Service]\nExecStart=/usr/local/sbin/frpc -c /etc/sigmond/frpc.toml\n' > "$TMP/root/etc/systemd/system/wd-rac.service"; run
+[ -e "$TMP/rac-ran" ] && ok "/usr/local/sbin/frpc beside sigmond-rac's wd-rac.service alone: ours" || bad "own unit not counted" "$(cat "$TMP/out")"
 
 echo "── sigmond-rac's own pieces do not block a re-install ─────────────"
 reset

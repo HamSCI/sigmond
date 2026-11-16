@@ -1450,12 +1450,26 @@ done
 # Foreign: an frpc process not run with /etc/sigmond/frpc*; an frpc/RAC unit
 # that is active, activating or failed (a tunnel restarting or down is still
 # the box's tunnel); a /etc/systemd/system/wd-rac.service whose ExecStart does
-# not use /etc/sigmond/frpc, whatever its state; /usr/local/sbin/frpc with no
-# /etc/sigmond/frpc*.toml beside it; frp config under /etc.
+# not use /etc/sigmond/frpc, whatever its state; /usr/local/sbin/frpc with
+# none of sigmond-rac's files (_sigmond_rac_footprint); frp config under /etc.
 # sigmond-rac's own pieces never count: an frpc run with /etc/sigmond/frpc*,
 # sigmond-rac*.service, and wd-rac.service when its unit runs
 # /etc/sigmond/frpc.toml (sigmond-rac ships its unit under that name).
 # SIGMOND_ETC_ROOT prefixes / for tests/test-install-frpc-guard.sh only.
+# _sigmond_rac_footprint ETC: true when sigmond-rac has installed here, so an
+# /usr/local/sbin/frpc is its own.  An UNCONFIGURED sigmond-rac install has
+# frpc, frpc.toml.template, frps-ca.crt, frpc_id_rsa and a wd-rac.service
+# running /etc/sigmond/frpc.toml, but no frpc.toml yet; any one of them counts.
+_sigmond_rac_footprint() {
+    local etc="$1" p
+    for p in "$etc"/sigmond/frpc*.toml "$etc/sigmond/frpc.toml.template" \
+             "$etc/sigmond/frps-ca.crt" "$etc/sigmond/frpc_id_rsa"; do
+        [[ -e "$p" ]] && return 0
+    done
+    p="$etc/systemd/system/wd-rac.service"
+    [[ -e "$p" ]] && grep -qE '^[[:space:]]*ExecStart=.*/etc/sigmond/frpc' "$p" 2>/dev/null
+}
+
 _foreign_frpc() {
     local root="${SIGMOND_ETC_ROOT:-}" etc="${SIGMOND_ETC_ROOT:-}/etc" line unit state p
     while IFS= read -r line; do
@@ -1466,8 +1480,8 @@ _foreign_frpc() {
     if [[ -e "$p" ]] && ! grep -qE '^[[:space:]]*ExecStart=.*/etc/sigmond/frpc' "$p" 2>/dev/null; then
         echo "/etc/systemd/system/wd-rac.service exists and does not run /etc/sigmond/frpc"; return 0
     fi
-    if [[ -e "$root/usr/local/sbin/frpc" ]] && ! compgen -G "$etc/sigmond/frpc*.toml" >/dev/null; then
-        echo "/usr/local/sbin/frpc exists with no /etc/sigmond/frpc*.toml"; return 0
+    if [[ -e "$root/usr/local/sbin/frpc" ]] && ! _sigmond_rac_footprint "$etc"; then
+        echo "/usr/local/sbin/frpc exists with none of sigmond-rac's files in /etc/sigmond"; return 0
     fi
     while read -r unit _ state _; do
         case "$unit" in
