@@ -44,6 +44,12 @@ from pathlib import Path
 from typing import Callable, Optional
 
 RELEASES_API = "https://api.github.com/repos/HamSCI/sigmond-appliance/releases"
+# github.com's own release pages, read when the API refuses for its rate limit
+# (60 calls/h per address; a shared site address can spend it -- N8UR, 2026-11-15).
+RELEASES_WEB = "https://github.com/HamSCI/sigmond-appliance/releases"
+_MANIFEST_HREF = re.compile(
+    r'href="(/HamSCI/sigmond-appliance/releases/download/([^"/]+)/[^"/]+\.manifest\.txt)"')
+_RELEASE_TAG = re.compile(r"^v\d+\.\d+(\.\d+)?$")
 RAW = "https://raw.githubusercontent.com/HamSCI"
 PROXMOX_FILES = ("pm-heartbeat.py", "pm-heartbeat.service", "pm-heartbeat.timer",
                  "pm-heartbeat-setup.sh", "pm-align.py",
@@ -143,11 +149,34 @@ def _get(url: str, urlopen: Callable) -> bytes:
     except urllib.error.HTTPError as exc:
         err = PmAlignError(f"GET {url}: {exc}")
         err.status = exc.code
+        err.rate_limited = exc.code in (403, 429) and _says_rate_limit(exc)
         raise err from exc
     except Exception as exc:
         err = PmAlignError(f"GET {url}: {exc}")
         err.status = None
         raise err from exc
+
+
+def _says_rate_limit(exc) -> bool:
+    if (exc.headers or {}).get("X-RateLimit-Remaining") == "0":
+        return True
+    try:
+        body = exc.read(1 << 16) or b""
+    except Exception:  # reading the error body is best-effort
+        body = b""
+    return b"rate limit" in body.lower()
+
+
+def _final_url(url: str, urlopen: Callable) -> str:
+    """Where ``url`` lands after its redirects."""
+    req = urllib.request.Request(url, headers={"User-Agent": "pm-align"})
+    try:
+        with urlopen(req, timeout=_TIMEOUT) as r:
+            return r.geturl()
+    except PmAlignError:
+        raise
+    except Exception as exc:
+        raise PmAlignError(f"GET {url}: {exc}") from exc
 
 
 def _preamble(text: str) -> dict:
@@ -160,17 +189,17 @@ def _preamble(text: str) -> dict:
 
 
 def fetch_release(tag: Optional[str] = None, *, urlopen: Callable = urllib.request.urlopen) -> Release:
-    """The blessed release ``tag`` (default: the latest) and its manifest preamble."""
-    url = f"{RELEASES_API}/tags/{tag}" if tag else f"{RELEASES_API}/latest"
-    meta = json.loads(_get(url, urlopen))
-    if meta.get("draft") or meta.get("prerelease"):
-        raise PmAlignError(f"release {meta.get('tag_name')} is a draft or prerelease")
-    tag_name = meta.get("tag_name") or ""
-    asset = next((a for a in meta.get("assets", [])
-                  if a.get("name", "").endswith(".manifest.txt")), None)
-    if asset is None:
-        raise PmAlignError(f"release {tag_name} publishes no manifest asset")
-    text = _get(asset["browser_download_url"], urlopen).decode("utf-8", "replace")
+    """The blessed release ``tag`` (default: the latest) and its manifest preamble.
+
+    Asks the GitHub API first; when the API refuses for its rate limit,
+    reads the same release from github.com's pages instead."""
+    try:
+        tag_name, manifest_url = _release_from_api(tag, urlopen)
+    except PmAlignError as exc:
+        if not getattr(exc, "rate_limited", False):
+            raise
+        tag_name, manifest_url = _release_from_web(tag, urlopen, str(exc))
+    text = _get(manifest_url, urlopen).decode("utf-8", "replace")
     pre = _preamble(text)
     if pre.get("image_version") != tag_name:
         raise PmAlignError(f"release {tag_name}: manifest says image_version "
@@ -187,6 +216,43 @@ def fetch_release(tag: Optional[str] = None, *, urlopen: Callable = urllib.reque
     return Release(tag_name, pre["appliance_commit"], pre["wizard_commit"],
                    pre["firstboot_sha256"], text, pre.get("vm6proxy_sha256"),
                    pre.get("vm4relay_sha256"))
+
+
+def _release_from_api(tag: Optional[str], urlopen: Callable) -> tuple:
+    """(tag, manifest URL) from the GitHub API's release record."""
+    url = f"{RELEASES_API}/tags/{tag}" if tag else f"{RELEASES_API}/latest"
+    meta = json.loads(_get(url, urlopen))
+    if meta.get("draft") or meta.get("prerelease"):
+        raise PmAlignError(f"release {meta.get('tag_name')} is a draft or prerelease")
+    tag_name = meta.get("tag_name") or ""
+    asset = next((a for a in meta.get("assets", [])
+                  if a.get("name", "").endswith(".manifest.txt")), None)
+    if asset is None:
+        raise PmAlignError(f"release {tag_name} publishes no manifest asset")
+    return tag_name, asset["browser_download_url"]
+
+
+def _release_from_web(tag: Optional[str], urlopen: Callable, why: str) -> tuple:
+    """(tag, manifest URL) from github.com's pages, for when the API is rate-limited.
+
+    /releases/latest redirects to the newest release that is neither draft
+    nor prerelease, so it proves the latest blessed.  Nothing on these pages
+    proves a named older tag is no prerelease, so a named tag must be the
+    latest; any other waits for the API."""
+    landed = _final_url(f"{RELEASES_WEB}/latest", urlopen)
+    prefix = f"{RELEASES_WEB}/tag/"
+    latest = landed[len(prefix):] if landed.startswith(prefix) else ""
+    if not _RELEASE_TAG.match(latest):
+        raise PmAlignError(f"{why}; {RELEASES_WEB}/latest led to {landed!r}, not a release")
+    if tag is not None and tag != latest:
+        raise PmAlignError(f"{why}; without the API only the latest release ({latest}) can "
+                           f"be read, not {tag} -- try again after the reset")
+    page = _get(f"{RELEASES_WEB}/expanded_assets/{latest}", urlopen).decode("utf-8", "replace")
+    links = sorted({href for href, t in _MANIFEST_HREF.findall(page) if t == latest})
+    if len(links) != 1:
+        raise PmAlignError(f"{why}; release {latest}'s asset list names "
+                           f"{len(links)} manifests, not one")
+    return latest, "https://github.com" + links[0]
 
 
 def render_wizard(text: str, vmid: int) -> str:

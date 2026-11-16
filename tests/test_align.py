@@ -122,6 +122,104 @@ class FetchReleaseTests(unittest.TestCase):
         self.assertIn("v9.99", str(cm.exception))
 
 
+class _Page(io.BytesIO):
+    """A response whose final URL differs from the one asked for (a redirect)."""
+    def __init__(self, body, final_url):
+        super().__init__(body)
+        self._final = final_url
+
+    def geturl(self):
+        return self._final
+
+
+def _api_rate_limited(url, timeout=None):
+    import email.message
+    hdrs = email.message.Message()
+    hdrs["X-RateLimit-Remaining"] = "0"
+    raise urllib.error.HTTPError(url, 403, "Forbidden", hdrs, io.BytesIO(b"API rate limit exceeded"))
+
+
+def _assets_html(*tags_and_names):
+    return "".join(
+        f'<a href="/HamSCI/sigmond-appliance/releases/download/{t}/{n}" rel="nofollow">'
+        for t, n in tags_and_names).encode()
+
+
+class WebFallbackTests(unittest.TestCase):
+    """When the API refuses for its rate limit, align reads the release from
+    github.com's own pages: the /releases/latest redirect names the tag, and
+    the release's asset list names the manifest (N8UR, 2026-11-15)."""
+    WEB = "https://github.com/HamSCI/sigmond-appliance/releases"
+    DL = "https://github.com/HamSCI/sigmond-appliance/releases/download/v3.53/"
+
+    def opener(self, latest="v3.53", assets=None, api=_api_rate_limited, manifest=MANIFEST):
+        seen = []
+        if assets is None:
+            assets = _assets_html(("v3.53", "sigmond-appliance-v3.53-20260924-release.sha256"),
+                                  ("v3.53", "sigmond-appliance-v3.53-20260924-release.manifest.txt"))
+
+        def op(url, timeout=None):
+            seen.append(url)
+            if url.startswith(align.RELEASES_API):
+                return api(url, timeout)
+            if url == self.WEB + "/latest":
+                return _Page(b"<html>", f"{self.WEB}/tag/{latest}")
+            if url == f"{self.WEB}/expanded_assets/{latest}":
+                return _Page(assets, url)
+            if url == self.DL + "sigmond-appliance-v3.53-20260924-release.manifest.txt":
+                return _Page(manifest.encode(), url)
+            raise OSError(f"no route for {url}")
+        op.seen = seen
+        return op
+
+    def test_rate_limited_api_falls_back_to_the_release_pages(self):
+        op = self.opener()
+        rel = align.fetch_release(urlopen=op)
+        self.assertEqual(rel.tag, "v3.53")
+        self.assertEqual(rel.components["hf-timestd"], "5c8196d")
+        self.assertIn(self.WEB + "/latest", op.seen)
+
+    def test_other_api_failures_do_not_fall_back(self):
+        def api_500(url, timeout=None):
+            raise urllib.error.HTTPError(url, 500, "Internal Server Error", {}, io.BytesIO(b""))
+        op = self.opener(api=api_500)
+        with self.assertRaises(align.LookupError_) as cm:
+            align.fetch_release(urlopen=op)
+        self.assertIn("HTTP 500", str(cm.exception))
+        self.assertFalse([u for u in op.seen if u.startswith(self.WEB)])
+
+    def test_a_named_tag_must_be_the_latest_without_the_api(self):
+        # Only /latest proves a release is neither draft nor prerelease.
+        with self.assertRaises(align.LookupError_) as cm:
+            align.fetch_release("v3.51", urlopen=self.opener())
+        self.assertIn("rate limit", str(cm.exception))
+        self.assertIn("v3.51", str(cm.exception))
+
+    def test_a_named_tag_equal_to_the_latest_works(self):
+        self.assertEqual(align.fetch_release("v3.53", urlopen=self.opener()).tag, "v3.53")
+
+    def test_redirect_to_no_release_tag_refuses(self):
+        with self.assertRaises(align.LookupError_) as cm:
+            align.fetch_release(urlopen=self.opener(latest="v3.53/../x"))
+        self.assertIn("rate limit", str(cm.exception))
+        self.assertIn("not a release", str(cm.exception))
+
+    def test_asset_list_must_name_exactly_one_manifest(self):
+        none = _assets_html(("v3.53", "sigmond-appliance-v3.53-20260924-release.sha256"))
+        two = _assets_html(("v3.53", "a.manifest.txt"), ("v3.53", "b.manifest.txt"))
+        other_tag = _assets_html(("v3.52", "sigmond-appliance-v3.52-release.manifest.txt"))
+        for assets in (none, two, other_tag):
+            with self.assertRaises(align.LookupError_) as cm:
+                align.fetch_release(urlopen=self.opener(assets=assets))
+            self.assertIn("manifests, not one", str(cm.exception))
+
+    def test_the_fallback_keeps_the_manifest_checks(self):
+        bad = MANIFEST.replace("appliance_tag: v3.53", "appliance_tag: v9.99")
+        with self.assertRaises(align.LookupError_) as cm:
+            align.fetch_release(urlopen=self.opener(manifest=bad))
+        self.assertIn("v9.99", str(cm.exception))
+
+
 class GetErrorTests(unittest.TestCase):
     """align._get narrows what it catches, and names rate limits and HTTP
     status codes instead of flattening everything to 'could not reach'."""

@@ -20,11 +20,20 @@ from typing import Callable, Optional
 from sigmond.doctor import _parse_manifest_components, _sha_equal
 
 RELEASES_API = "https://api.github.com/repos/HamSCI/sigmond-appliance/releases"
+# github.com's own release pages: no API rate limit (60 calls/h per address,
+# which a shared site address can spend before align runs -- N8UR, 2026-11-15).
+RELEASES_WEB = "https://github.com/HamSCI/sigmond-appliance/releases"
+_MANIFEST_HREF = re.compile(
+    r'href="(/HamSCI/sigmond-appliance/releases/download/([^"/]+)/[^"/]+\.manifest\.txt)"')
 _MAX_BODY = 1 << 20          # no reply we read is anywhere near 1 MiB
 
 
 class LookupError_(RuntimeError):
     """The target could not be established; align must not guess one."""
+
+
+class RateLimited(LookupError_):
+    """The GitHub API refused for its rate limit."""
 
 
 def _default_urlopen(url: str, timeout: float):
@@ -57,7 +66,7 @@ def _get(url: str, urlopen, timeout: float) -> bytes:
         body_text = body.decode("utf-8", "replace") if body else ""
         remaining = headers.get("X-RateLimit-Remaining") if headers else None
         if exc.code in (403, 429) and (remaining == "0" or "rate limit" in body_text.lower()):
-            raise LookupError_(
+            raise RateLimited(
                 f"GitHub API rate limit reached{_rate_limit_reset(headers)}") from exc
         if exc.code == 404 and "/releases/tags/" in url:
             raise LookupError_(f"no such release: {url.rsplit('/', 1)[-1]}") from exc
@@ -95,10 +104,37 @@ RELEASE_TAG_RE = re.compile(r"^v\d+\.\d+(\.\d+)?$")
 
 def fetch_release(tag: Optional[str] = None, urlopen: Optional[Callable] = None,
                   timeout: float = 20.0) -> Release:
-    """The blessed release ``tag`` (default: the latest) and its manifest."""
+    """The blessed release ``tag`` (default: the latest) and its manifest.
+
+    Asks the GitHub API first; when the API refuses for its rate limit,
+    reads the same release from github.com's pages instead."""
     if tag is not None and not RELEASE_TAG_RE.match(tag):
         raise LookupError_(f"not a release tag: {tag}")
     urlopen = urlopen or _default_urlopen
+    try:
+        tag_name, manifest_url = _release_from_api(tag, urlopen, timeout)
+    except RateLimited as exc:
+        tag_name, manifest_url = _release_from_web(tag, urlopen, timeout, str(exc))
+    text = _get(manifest_url, urlopen, timeout).decode("utf-8", "replace")
+    components = _parse_manifest_components(text)
+    if components is None:
+        raise LookupError_(f"release {tag_name}: manifest is missing or truncated")
+    for name, sha in components.items():
+        if not COMPONENT_NAME_RE.match(name) or not SHA_RE.match(sha):
+            raise LookupError_(
+                f"release {tag_name}: manifest entry {name!r} {sha!r} is malformed")
+    preamble_tag = _preamble(text, "appliance_tag") or _preamble(text, "image_version")
+    if preamble_tag is not None and preamble_tag != tag_name:
+        raise LookupError_(
+            f"release {tag_name}: manifest preamble tag {preamble_tag!r} does not "
+            f"match the release tag {tag_name!r}")
+    return Release(tag=tag_name, manifest_text=text,
+                   appliance_commit=_preamble(text, "appliance_commit"),
+                   components=components)
+
+
+def _release_from_api(tag: Optional[str], urlopen, timeout: float) -> tuple:
+    """(tag, manifest URL) from the GitHub API's release record."""
     url = f"{RELEASES_API}/tags/{tag}" if tag else f"{RELEASES_API}/latest"
     try:
         meta = json.loads(_get(url, urlopen, timeout))
@@ -114,24 +150,42 @@ def fetch_release(tag: Optional[str] = None, urlopen: Optional[Callable] = None,
                   if a.get("name", "").endswith(".manifest.txt")), None)
     if asset is None:
         raise LookupError_(f"release {meta.get('tag_name')} publishes no manifest asset")
-    text = _get(asset["browser_download_url"], urlopen, timeout).decode("utf-8", "replace")
-    components = _parse_manifest_components(text)
-    if components is None:
-        raise LookupError_(f"release {meta.get('tag_name')}: manifest is missing or truncated")
-    tag_name = meta.get("tag_name") or (tag or "?")
-    for name, sha in components.items():
-        if not COMPONENT_NAME_RE.match(name) or not SHA_RE.match(sha):
-            raise LookupError_(
-                f"release {tag_name}: manifest entry {name!r} {sha!r} is malformed")
-    preamble_tag = _preamble(text, "appliance_tag") or _preamble(text, "image_version")
-    if preamble_tag is not None and preamble_tag != tag_name:
-        raise LookupError_(
-            f"release {tag_name}: manifest preamble tag {preamble_tag!r} does not "
-            f"match the release tag {tag_name!r}")
-    return Release(tag=tag_name, manifest_text=text,
-                   appliance_commit=_preamble(text, "appliance_commit"),
-                   components=components,
-                   draft=bool(meta.get("draft")), prerelease=bool(meta.get("prerelease")))
+    return meta.get("tag_name") or (tag or "?"), asset["browser_download_url"]
+
+
+def _final_url(url: str, urlopen, timeout: float) -> str:
+    """Where ``url`` lands after its redirects."""
+    try:
+        with urlopen(url, timeout=timeout) as resp:
+            return resp.geturl()
+    except urllib.error.HTTPError as exc:
+        raise LookupError_(f"HTTP {exc.code} from {url}") from exc
+    except (urllib.error.URLError, OSError, http.client.HTTPException, TimeoutError) as exc:
+        raise LookupError_(f"could not reach {url}: {exc}") from exc
+
+
+def _release_from_web(tag: Optional[str], urlopen, timeout: float, why: str) -> tuple:
+    """(tag, manifest URL) from github.com's pages, for when the API is rate-limited.
+
+    /releases/latest redirects to the newest release that is neither draft
+    nor prerelease, so it proves the latest blessed.  Nothing on these pages
+    proves a named older tag is no prerelease, so a named tag must be the
+    latest; any other waits for the API."""
+    landed = _final_url(f"{RELEASES_WEB}/latest", urlopen, timeout)
+    prefix = f"{RELEASES_WEB}/tag/"
+    latest = landed[len(prefix):] if landed.startswith(prefix) else ""
+    if not RELEASE_TAG_RE.match(latest):
+        raise LookupError_(f"{why}; {RELEASES_WEB}/latest led to {landed!r}, not a release")
+    if tag is not None and tag != latest:
+        raise LookupError_(f"{why}; without the API only the latest release ({latest}) can "
+                           f"be read, not {tag} — try again after the reset")
+    page = _get(f"{RELEASES_WEB}/expanded_assets/{latest}", urlopen, timeout)
+    links = sorted({href for href, t in _MANIFEST_HREF.findall(page.decode("utf-8", "replace"))
+                    if t == latest})
+    if len(links) != 1:
+        raise LookupError_(f"{why}; release {latest}'s asset list names "
+                           f"{len(links)} manifests, not one")
+    return latest, "https://github.com" + links[0]
 
 
 RADIOD = "ka9q-radio"

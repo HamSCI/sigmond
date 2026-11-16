@@ -87,6 +87,87 @@ def test_fetch_release_refuses_a_short_commit():
         pm_align.fetch_release(urlopen=_urlopen(routes))
 
 
+WEB = "https://github.com/HamSCI/sigmond-appliance/releases"
+
+
+class _Landed(_Resp):
+    def __init__(self, body, final_url):
+        super().__init__(body)
+        self._final = final_url
+
+    def geturl(self):
+        return self._final
+
+
+def _web_urlopen(latest="v3.53", assets=None, api=None, manifest=None):
+    """The API refuses for its rate limit (or ``api`` raises); github.com's
+    pages answer: /releases/latest lands on the tag, expanded_assets lists the
+    release's files."""
+    import email.message
+    if assets is None:
+        assets = (f'<a href="/HamSCI/sigmond-appliance/releases/download/{latest}/'
+                  f'sigmond-appliance-{latest}-20260924-release.manifest.txt">')
+    hdrs = email.message.Message()
+    hdrs["X-RateLimit-Remaining"] = "0"
+    seen = []
+
+    def op(req, timeout=None):
+        url = req if isinstance(req, str) else req.full_url
+        seen.append(url)
+        if url.startswith(pm_align.RELEASES_API):
+            raise api or urllib.error.HTTPError(url, 403, "rate limit exceeded", hdrs,
+                                                io.BytesIO(b"API rate limit exceeded"))
+        if url == WEB + "/latest":
+            return _Landed(b"<html>", f"{WEB}/tag/{latest}")
+        if url == f"{WEB}/expanded_assets/{latest}":
+            return _Landed(assets.encode(), url)
+        if url.endswith("-release.manifest.txt") and "/releases/download/v3.53/" in url:
+            return _Landed((manifest or _manifest()).encode(), url)
+        raise urllib.error.URLError(f"no route for {url}")
+    op.seen = seen
+    return op
+
+
+def test_fetch_release_falls_back_to_the_release_pages_when_rate_limited():
+    op = _web_urlopen()
+    rel = pm_align.fetch_release(urlopen=op)
+    assert (rel.tag, rel.appliance_commit, rel.wizard_commit) == ("v3.53", "a" * 40, "d" * 40)
+    assert WEB + "/latest" in op.seen
+
+
+def test_fetch_release_does_not_fall_back_on_other_failures():
+    op = _web_urlopen(api=urllib.error.HTTPError("x", 500, "boom", {}, io.BytesIO(b"")))
+    with pytest.raises(pm_align.PmAlignError):
+        pm_align.fetch_release(urlopen=op)
+    assert not [u for u in op.seen if u.startswith(WEB)]
+
+
+def test_fallback_reads_a_named_tag_only_when_it_is_the_latest():
+    with pytest.raises(pm_align.PmAlignError, match="v3.51"):
+        pm_align.fetch_release("v3.51", urlopen=_web_urlopen())
+    assert pm_align.fetch_release("v3.53", urlopen=_web_urlopen()).tag == "v3.53"
+
+
+def test_fallback_refuses_a_redirect_to_no_release():
+    with pytest.raises(pm_align.PmAlignError, match="not a release"):
+        pm_align.fetch_release(urlopen=_web_urlopen(latest="v3.53/../x"))
+
+
+def test_fallback_needs_exactly_one_manifest_of_that_release():
+    two = ('<a href="/HamSCI/sigmond-appliance/releases/download/v3.53/a.manifest.txt">'
+           '<a href="/HamSCI/sigmond-appliance/releases/download/v3.53/b.manifest.txt">')
+    other = '<a href="/HamSCI/sigmond-appliance/releases/download/v3.52/x.manifest.txt">'
+    for assets in ("", two, other):
+        with pytest.raises(pm_align.PmAlignError, match="manifests, not one"):
+            pm_align.fetch_release(urlopen=_web_urlopen(assets=assets))
+
+
+def test_fallback_keeps_the_manifest_checks():
+    bad = _manifest().replace("image_version: v3.53", "image_version: v3.52")
+    with pytest.raises(pm_align.PmAlignError, match="image_version"):
+        pm_align.fetch_release(urlopen=_web_urlopen(manifest=bad))
+
+
 def _source_routes(fb=FB, wizard='VMID="${SIGMOND_VMID:-120}"\n'):
     r = _release_routes()
     r["sigmond-appliance/" + "a" * 40 + "/firstboot-v3.sh"] = fb
