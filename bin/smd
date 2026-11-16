@@ -32401,6 +32401,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument('--reconfig', action='store_true',
                    help='overwrite the existing radiod@<id>.conf instead '
                         'of erroring out.')
+    p.add_argument('--ttl', type=int, choices=(0, 1), default=None,
+                   help='radiod only: multicast TTL (0 = this box only, 1 = '
+                        'publish on the LAN).  Default: 1 on a radiod-only '
+                        'host, else 0.')
+    p.add_argument('--samprate', type=int, default=None,
+                   help='radiod only: rx888 sample rate in Hz (64800000 or '
+                        '129600000).')
     p.add_argument('--siggen', action='store_true',
                    help='radiod only: render a synthetic sig_gen instance for '
                         'hardware-free testing (no USB SDR required).  Generates '

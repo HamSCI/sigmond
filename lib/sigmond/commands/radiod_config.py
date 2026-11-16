@@ -57,7 +57,7 @@ from pathlib import Path
 from string import Template
 from typing import Optional
 
-from .. import cpu_profiles, sdr_map
+from .. import cpu_profiles, sdr_map, station_role
 from ..coordination import load_coordination, render_env
 from ..discovery import usb_sdr
 from ..environment import Environment
@@ -285,6 +285,13 @@ def _choose_rx888_samprates(plans: list[dict], profile,
     from_profile: list[str] = []
     for plan in rx_plans:
         ordinal = order.index(plan["instance_id"])
+        explicit = plan.get("samprate_explicit")
+        if explicit is not None:
+            # `--samprate` names the rate outright; _collect_per_sdr_values
+            # already wrote it into frontend_defaults.
+            rates[plan["instance_id"]] = explicit
+            plan["samprate_hz"] = explicit
+            continue
         kept = kept_raw = None
         if plan["target"].exists():
             try:
@@ -446,6 +453,7 @@ def _bootstrap_dfu_sdrs(dfu_sdrs: list, iface: str) -> list:
             "description":       "bootstrap — transient firmware upload",
             "serial_line":       "# (serial omitted: bind to first matching DFU device)",
             "frontend_defaults": profile["defaults"].rstrip(),
+            "ttl":               0,
         }
         try:
             stub_path.parent.mkdir(parents=True, exist_ok=True)
@@ -524,6 +532,7 @@ def _init_siggen(args) -> int:
         "iface":             _suggest_iface(),
         "target":            target,
         "sdr_type":          "sig_gen",
+        "ttl":               0,   # synthetic loopback radiod: never published
     }
 
     if _refuse_overwrite(target, args):
@@ -638,7 +647,15 @@ class UnpinnedMultiCard(Exception):
 
 def cmd_radiod_init(args) -> int:
     heading("config init radiod")
+    samprate = getattr(args, "samprate", None)
+    if samprate is not None and samprate not in _RX888_SAMPRATES:
+        err(f"--samprate must be one of {_RX888_SAMPRATES[0]} or "
+            f"{_RX888_SAMPRATES[1]} (got {samprate})")
+        return 2
     if getattr(args, "siggen", False):
+        if samprate is not None:
+            err("--samprate applies only to rx888 instances, not --siggen")
+            return 2
         return _init_siggen(args)
     sdrs = _discover_sdrs()
     if not sdrs:
@@ -789,7 +806,7 @@ def cmd_radiod_init(args) -> int:
                 f"then re-run.")
             return 1
         if plan is None:
-            return 2  # operator aborted
+            return 2  # operator aborted (or --samprate refused)
         # Each newly-named id joins known_ids so subsequent SDRs in the same
         # run get a non-colliding default suggestion.
         known_ids.add(plan["instance_id"])
@@ -1095,12 +1112,26 @@ def _collect_per_sdr_values(sdr, args, hostname_short: str,
 
     target = RADIOD_CONFIG_DIR / f"radiod@{instance_id}.conf"
 
+    frontend_defaults = profile["defaults"].rstrip()
+    samprate = getattr(args, "samprate", None)
+    if samprate is not None:
+        if profile["section"] != "rx888":
+            err(f"--samprate applies only to rx888 instances; "
+                f"{sdr_type or 'this SDR'} is not one")
+            return None
+        frontend_defaults = re.sub(r"samprate    = \d+",
+                                   f"samprate    = {samprate}",
+                                   frontend_defaults, count=1)
+
     return {
         "instance_id": instance_id,
         "status_dns":  status_dns,
         "description": description,
         "frontend":    profile["section"],
-        "frontend_defaults": profile["defaults"].rstrip(),
+        "frontend_defaults": frontend_defaults,
+        # --samprate: the operator's rate; _choose_rx888_samprates keeps it.
+        "samprate_explicit": samprate,
+        "ttl":         _resolve_ttl(args),
         "serial":      serial,
         "serial_line": serial_line,
         "iface":       iface,
@@ -1211,6 +1242,19 @@ def _pick_target(targets: list[Path]) -> Optional[Path]:
 # Rendering
 # ---------------------------------------------------------------------------
 
+_RX888_SAMPRATES = (64800000, 129600000)
+
+
+def _resolve_ttl(args) -> int:
+    """Explicit --ttl wins; otherwise a radiod-only host publishes (1) and
+    every other host keeps multicast on the box (0)."""
+    ttl = getattr(args, "ttl", None)
+    if ttl is not None:
+        return int(ttl)
+    role = station_role.role(station_role.ROLE_PATH)
+    return 1 if role == station_role.RADIOD_ONLY else 0
+
+
 def _render(plan: dict) -> str:
     tpl = Template(TEMPLATE_PATH.read_text())
     return tpl.substitute(
@@ -1218,6 +1262,7 @@ def _render(plan: dict) -> str:
         FRONTEND=plan["frontend"],
         STATUS_DNS=plan["status_dns"],
         IFACE=plan["iface"],
+        TTL=plan.get("ttl", 0),
         DESCRIPTION=plan["description"],
         SERIAL_LINE=plan["serial_line"],
         FRONTEND_DEFAULTS=plan["frontend_defaults"],

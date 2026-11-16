@@ -955,3 +955,111 @@ class FullRateRadiodChoiceTests(unittest.TestCase):
         new = [t for n, t in confs.items() if n != "radiod@omni.conf"]
         self.assertEqual(self._rate(new[0]), 64_800_000)
         self.assertNotIn("bus order", out)
+
+
+# ---------------------------------------------------------------------------
+# --ttl / --samprate / radiod-only role
+# ---------------------------------------------------------------------------
+
+class TtlSamprateTests(unittest.TestCase):
+    def _plan(self, **kw):
+        return RenderTests._plan(self, **kw)
+
+    def test_render_ttl_default_zero(self):
+        self.assertIn("ttl       = 0", radiod_config._render(self._plan()))
+
+    def test_render_ttl_one(self):
+        self.assertIn("ttl       = 1",
+                      radiod_config._render(self._plan(ttl=1)))
+
+    def _init(self, role=None, sdrs=None, cpu_profile=None, **ns):
+        import contextlib
+        import io
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as d:
+            radio_dir = Path(d) / "radio"
+            radio_dir.mkdir()
+            role_path = Path(d) / "role"
+            if role:
+                role_path.write_text(role + "\n")
+            with mock.patch("sigmond.station_role.ROLE_PATH", role_path), \
+                 mock.patch.object(radiod_config, "_discover_sdrs",
+                                   return_value=sdrs or [_sdr("RX-888", "AAA")]), \
+                 mock.patch.object(radiod_config, "RADIOD_CONFIG_DIR", radio_dir), \
+                 mock.patch.object(radiod_config, "COORDINATION_PATH",
+                                   Path(d) / "coordination.toml"), \
+                 mock.patch.object(radiod_config, "COORDINATION_ENV",
+                                   Path(d) / "coordination.env"), \
+                 mock.patch.object(radiod_config, "_suggest_iface",
+                                   return_value="eth0"), \
+                 mock.patch.object(radiod_config,
+                                   "_apply_fragments_for_new_instances"), \
+                 mock.patch.object(radiod_config, "_held_serials",
+                                   return_value={}), \
+                 mock.patch.object(radiod_config, "_host_cpu_profile",
+                                   return_value=cpu_profile), \
+                 mock.patch.object(radiod_config, "HF_TIMESTD_CONF",
+                                   Path(d) / "timestd-config.toml"), \
+                 mock.patch("socket.gethostname", return_value="host"), \
+                 contextlib.redirect_stdout(out), \
+                 contextlib.redirect_stderr(out):
+                rc = radiod_config.cmd_radiod_init(_ns(**ns))
+            confs = [p.read_text() for p in radio_dir.glob("radiod@*.conf")]
+        return rc, confs
+
+    def test_default_init_ttl_zero(self):
+        rc, confs = self._init()
+        self.assertEqual(rc, 0)
+        self.assertIn("ttl       = 0", confs[0])
+
+    def test_radiod_only_role_defaults_ttl_one(self):
+        rc, confs = self._init(role="radiod-only")
+        self.assertEqual(rc, 0)
+        self.assertIn("ttl       = 1", confs[0])
+
+    def test_explicit_ttl_beats_role(self):
+        rc, confs = self._init(role="radiod-only", ttl=0)
+        self.assertIn("ttl       = 0", confs[0])
+
+    def test_explicit_ttl_one_without_role(self):
+        rc, confs = self._init(ttl=1)
+        self.assertIn("ttl       = 1", confs[0])
+
+    def test_siggen_always_ttl_zero(self):
+        rc, confs = self._init(role="radiod-only", siggen=True)
+        self.assertEqual(rc, 0)
+        self.assertIn("ttl       = 0", confs[0])
+
+    def test_samprate_64_8(self):
+        rc, confs = self._init(samprate=64800000)
+        self.assertEqual(rc, 0)
+        self.assertIn("samprate    = 64800000", confs[0])
+        self.assertNotIn("129600000", confs[0])
+
+    def test_samprate_rejects_other_values(self):
+        rc, confs = self._init(samprate=100)
+        self.assertEqual(rc, 2)
+        self.assertEqual(confs, [])
+
+    def test_samprate_rejected_for_non_rx888(self):
+        rc, confs = self._init(sdrs=[_sdr("Airspy", "AAA")], samprate=64800000)
+        self.assertEqual(rc, 2)
+        self.assertEqual(confs, [])
+
+    def test_samprate_rejected_for_siggen(self):
+        rc, confs = self._init(siggen=True, samprate=64800000)
+        self.assertEqual(rc, 2)
+
+
+    def test_samprate_beats_the_cpu_profile(self):
+        # --samprate is the operator's rate: the CPU profile's choice for a
+        # second card on a 5560U must not replace it.
+        from sigmond import cpu_profiles
+        prof = cpu_profiles.profile_for("AMD Ryzen 5 5560U with Radeon Graphics")
+        sdrs = [_sdr("RX-888 Mk2", serial="AAA", index=0, device="005"),
+                _sdr("RX-888 Mk2", serial="BBB", index=1, device="006")]
+        rc, confs = self._init(sdrs=sdrs, samprate=129600000, cpu_profile=prof)
+        self.assertEqual(rc, 0)
+        from sigmond import sdr_map
+        self.assertEqual([sdr_map.conf_samprate_hz(t) for t in confs],
+                         [129_600_000, 129_600_000])

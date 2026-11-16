@@ -18,7 +18,7 @@ samprate  = 12000              # default channel output sample rate (Hz) — WSP
                                # recorders request 12000; a 24000 default makes every
                                # channel fail "not verified" under the bring-up burst.
 mode      = usb                # default demod mode for unspecified channels
-ttl       = 0                  # 0 = loopback-only (single-host default,
+ttl       = ${TTL}             # 0 = loopback-only (single-host default,
                                # safe on every network).  Set to 1 to
                                # publish on the LAN — only safe when an
                                # IGMP-aware switch (with a v2 querier or
