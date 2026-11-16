@@ -44,7 +44,9 @@ def test_split_layout_maps_through_the_table():
 
 
 def test_unit_passes_resctrl_args_with_decoders_only_when_capped():
-    assert "ExecStart=/usr/local/sbin/sigmond-host-resctrl.sh ${RESCTRL_ARGS}" in TEXT
+    # install_host_herding writes the unit with the main body's RESCTRL_ARGS.
+    assert "sigmond-host-resctrl.sh ${resctrl_args}" in TEXT
+    assert 'install_host_herding "$VMID" "$HERD_CPUS" "$RADIOD_PCPUS" "$RESCTRL_ARGS"' in TEXT
     assert ('RESCTRL_ARGS+=" ${DECODER_PCPUS} ${DECODER_MB_GBPS}"') in TEXT
     assert 'DECODER_PCPUS="$(vcpus_to_pcpus "${WORKER_CPUS}" "${VCPU_TO_PCPU}")"' in TEXT
     assert ': "${DECODER_MB_GBPS:=}"' in TEXT

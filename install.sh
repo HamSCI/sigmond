@@ -1441,14 +1441,52 @@ for _repo in /opt/git/sigmond/*/; do
         || $SUDO git config --system --add safe.directory "$_repo"
 done
 
+# _foreign_frpc: prints why and returns 0 when another frpc / RAC already
+# serves this box, so sigmond-rac must not be installed over it.  A box that
+# runs wsprdaemon (KFS-NW's Beelink) may be reachable ONLY through
+# wsprdaemon's own tunnel (wd-rac-client: frpc processes,
+# wd-remote-access@<gw>.service, /etc/wd-remote-access); sigmond-rac would
+# replace /usr/local/sbin/frpc and could strand it.
+# sigmond-rac's own pieces never count: an frpc run with /etc/sigmond/frpc*,
+# sigmond-rac*.service, and wd-rac.service when its unit runs
+# /etc/sigmond/frpc.toml (sigmond-rac ships its unit under that name).
+# SIGMOND_ETC_ROOT prefixes /etc for tests/test-install-frpc-guard.sh only.
+_foreign_frpc() {
+    local etc="${SIGMOND_ETC_ROOT:-}/etc" line unit p
+    while IFS= read -r line; do
+        [[ -n "$line" && "$line" != *"/etc/sigmond/frpc"* ]] || continue
+        echo "an frpc process is running (${line})"; return 0
+    done < <(pgrep -a -x frpc 2>/dev/null)
+    while read -r unit _; do
+        case "$unit" in
+            sigmond-rac*) continue ;;
+            *frpc*|wd-rac*|*rac*|*remote-access*|*remote_access*) ;;
+            *) continue ;;
+        esac
+        if [[ "$unit" == wd-rac.service ]] \
+           && grep -q '/etc/sigmond/frpc' <<< "$(systemctl cat wd-rac.service 2>/dev/null)"; then
+            continue
+        fi
+        echo "${unit} is active"; return 0
+    done < <(systemctl list-units --type=service --state=active --no-legend --plain 2>/dev/null)
+    for p in "$etc/frp" "$etc"/frpc* "$etc/wd-remote-access"; do
+        [[ -e "$p" ]] && { echo "${p#"${SIGMOND_ETC_ROOT:-}"} exists"; return 0; }
+    done
+    return 1
+}
+
 # ─── RAC — admin remote-access infra on every sigmond host ────────────────────
 # Provisions frpc + wd-rac.service (enabled, but INERT until configured with the
 # gw2 assignment from the WsprDaemon admin).  Belongs on every install so a
 # NAT'd station is reachable for support even before the station clients come up.
-[[ -f /etc/sigmond/coordination.env ]] && source /etc/sigmond/coordination.env
-if [[ -x /opt/git/sigmond/sigmond-rac/install.sh ]]; then
+# Never on a box another frpc already serves (_foreign_frpc above).
+_rac_install="${SIGMOND_RAC_INSTALL:-/opt/git/sigmond/sigmond-rac/install.sh}"
+[[ -f "${SIGMOND_ETC_ROOT:-}/etc/sigmond/coordination.env" ]] && source "${SIGMOND_ETC_ROOT:-}/etc/sigmond/coordination.env"
+if _rac_why="$(_foreign_frpc)"; then
+    info "RAC skipped: ${_rac_why} — this box already has its own frpc/RAC tunnel, and sigmond-rac would replace it"
+elif [[ -x "$_rac_install" ]]; then
     info "Installing RAC (remote access channel)…"
-    if $SUDO env STATION_CALL="${STATION_CALL:-}" SIGMOND_INSTANCE="${SIGMOND_INSTANCE:-}"             bash /opt/git/sigmond/sigmond-rac/install.sh; then
+    if $SUDO env STATION_CALL="${STATION_CALL:-}" SIGMOND_INSTANCE="${SIGMOND_INSTANCE:-}"             bash "$_rac_install"; then
         ok "  RAC installed (inert until configured with the gw2 assignment)"
     else
         warn "  RAC install failed (non-fatal)"

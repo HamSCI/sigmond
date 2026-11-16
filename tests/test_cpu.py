@@ -1141,3 +1141,88 @@ class GuestIsolationSmallVmTests(unittest.TestCase):
             changed, path, _ = self._run(4, {2, 3}, tmp)
             self.assertTrue(changed)
             self.assertTrue(path.exists())
+
+
+# ── reserve_host_pairs=0: a radiod-only host shares the VM's worker pair ─────
+# Ryzen 5 5560U (and the Beelinks on it): 6 cores / 12 threads, split HT —
+# cpu0's sibling is cpu6.
+FIVE560U_PAIRS = [[i, i + 6] for i in range(6)]
+SIX_PAIRS = FIVE560U_PAIRS
+
+
+def test_layout_reserve_zero_three_radiods_on_six_pairs():
+    lay = compute_host_cpu_layout(SIX_PAIRS, local_radiod_count=3,
+                                  reserve_host_pairs=0)
+    assert len(lay["radiod_pairs"]) == 3 and len(lay["worker_pairs"]) >= 1
+    assert set(lay["isolcpus"]) >= set(lay["radiod_cpus"])
+    # every host pair is the VM's; radiod takes the top three
+    assert lay["vm_pairs"] == SIX_PAIRS
+    assert lay["radiod_pairs"] == [[3, 9], [4, 10], [5, 11]]
+    assert lay["worker_pairs"] == [[0, 6], [1, 7], [2, 8]]
+    # the worker pairs stay with the host scheduler: only radiod is isolated
+    assert lay["isolcpus"] == [3, 4, 5, 9, 10, 11]
+    assert lay["vcpu_to_pcpu"] == [0, 6, 1, 7, 2, 8, 3, 9, 4, 10, 5, 11]
+    assert lay["vm_cores"] == 6 and lay["vm_vcpu_count"] == 12
+
+
+def test_layout_reserve_zero_shell_vars():
+    out = layout_shell_vars(compute_host_cpu_layout(
+        SIX_PAIRS, local_radiod_count=3, reserve_host_pairs=0))
+    assert 'ISOLCPUS_RANGE="3-5,9-11"' in out
+    assert 'WORKER_CPUS="0 6 1 7 2 8"' in out
+    assert 'VCPU_TO_PCPU="0 6 1 7 2 8 3 9 4 10 5 11"' in out
+
+
+def test_layout_reserve_zero_sequential_isolates_only_radiod():
+    lay = compute_host_cpu_layout(_seq_pairs(12), local_radiod_count=1,
+                                  reserve_host_pairs=0)
+    assert lay["radiod_cpus"] == [10, 11]
+    assert lay["isolcpus"] == [10, 11]
+    assert lay["vcpu_to_pcpu"] == list(range(12))
+
+
+def test_layout_reserve_zero_still_needs_a_worker_pair():
+    # 3 pairs, 3 radiods, nothing reserved -> no worker pair -> refused
+    import pytest
+    with pytest.raises(ValueError):
+        compute_host_cpu_layout(SIX_PAIRS[:3], local_radiod_count=3,
+                                reserve_host_pairs=0)
+    # 4 pairs is enough
+    compute_host_cpu_layout(SIX_PAIRS[:4], local_radiod_count=3,
+                            reserve_host_pairs=0)
+
+
+def test_layout_rejects_negative_reserve():
+    import pytest
+    with pytest.raises(ValueError):
+        compute_host_cpu_layout(SIX_PAIRS, local_radiod_count=1,
+                                reserve_host_pairs=-1)
+
+
+def test_layout_reserve_one_unchanged():   # today's values for the 5560U, verbatim
+    lay = compute_host_cpu_layout(FIVE560U_PAIRS, local_radiod_count=1)
+    assert lay == {
+        'vm_pairs': [[0, 6], [1, 7], [2, 8], [3, 9], [4, 10]],
+        'radiod_pairs': [[4, 10]],
+        'worker_pairs': [[0, 6], [1, 7], [2, 8], [3, 9]],
+        'radiod_cpus': [4, 10],
+        'worker_cpus': [0, 6, 1, 7, 2, 8, 3, 9],
+        'vcpu_to_pcpu': [0, 6, 1, 7, 2, 8, 3, 9, 4, 10],
+        'isolcpus': [0, 1, 2, 3, 4, 6, 7, 8, 9, 10],
+        'vm_cores': 5, 'vm_threads': 2, 'vm_vcpu_count': 10,
+    }
+    assert compute_host_cpu_layout(FIVE560U_PAIRS, local_radiod_count=1,
+                                   reserve_host_pairs=1) == lay
+    assert layout_shell_vars(lay) == "\n".join([
+        'RADIOD_CPUS="4 10"',
+        'WORKER_CPUS="0 6 1 7 2 8 3 9"',
+        'VCPU_TO_PCPU="0 6 1 7 2 8 3 9 4 10"',
+        'ISOLCPUS_RANGE="0-4,6-10"',
+        'VM_CORES="5"',
+        'VM_THREADS="2"',
+        'VM_VCPU_COUNT="10"',
+    ])
+    two = compute_host_cpu_layout(FIVE560U_PAIRS, local_radiod_count=2)
+    assert two['radiod_pairs'] == [[3, 9], [4, 10]]
+    assert two['worker_cpus'] == [0, 6, 1, 7, 2, 8]
+    assert two['isolcpus'] == [0, 1, 2, 3, 4, 6, 7, 8, 9, 10]

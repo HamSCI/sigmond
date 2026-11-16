@@ -220,7 +220,19 @@ phase_pre_host() {
         info "Using ${radiod_count} radiod(s), the operator's value"
     fi
 
-    ok "VMID=${vmid} USB=${usb_vid_did} (addrs:${usb_addrs}) host_cpus=${host_cpu_count} HT=${ht_pattern} pairs='${ht_pairs}' local_radiods=${radiod_count} CPU=${cpu_vendor}"
+    # Physical cores kept for the host alone: HOST_RESERVE_PAIRS, else what
+    # phase 1 saved in the host's host-layout.env, else 0 when the host
+    # records the radiod-only station role (the host shares the VM's worker
+    # pair), else 1.
+    local reserve_pairs reserve_src
+    # shellcheck source=radiod-count.sh
+    . "$SCRIPT_DIR/radiod-count.sh"
+    IFS='|' read -r reserve_pairs reserve_src < <(choose_host_reserve_pairs \
+        "${HOST_RESERVE_PAIRS:-}" "${KV[HOST_LAYOUT_RESERVE_PAIRS]:-}" "${KV[STATION_ROLE]:-}") \
+        || die "HOST_RESERVE_PAIRS='${HOST_RESERVE_PAIRS:-}' is not a whole number >= 0"
+    info "Keeping ${reserve_pairs} core(s) for the host alone, from ${reserve_src}"
+
+    ok "VMID=${vmid} USB=${usb_vid_did} (addrs:${usb_addrs}) host_cpus=${host_cpu_count} HT=${ht_pattern} pairs='${ht_pairs}' local_radiods=${radiod_count} host_pairs=${reserve_pairs} CPU=${cpu_vendor}"
 
     # ─── compute CPU layout ───────────────────────────────────────────────────
     # Topology-aware: place each local radiod on a real host HT sibling pair
@@ -237,10 +249,11 @@ phase_pre_host() {
 import sys
 from sigmond.cpu import parse_ht_pairs, compute_host_cpu_layout, layout_shell_vars
 pairs = parse_ht_pairs(sys.argv[1])
-lay = compute_host_cpu_layout(pairs, local_radiod_count=int(sys.argv[2]))
+lay = compute_host_cpu_layout(pairs, local_radiod_count=int(sys.argv[2]),
+                              reserve_host_pairs=int(sys.argv[3]))
 print(layout_shell_vars(lay))
-' "$ht_pairs" "$radiod_count")" \
-        || die "CPU layout computation failed (HT_PAIRS='$ht_pairs' local_radiods=$radiod_count). Non-SMT/asymmetric host or too few cores — configure manually per docs/proxmox/wsprdaemon-proxmox-cpu-clock-tuning.md."
+' "$ht_pairs" "$radiod_count" "$reserve_pairs")" \
+        || die "CPU layout computation failed (HT_PAIRS='$ht_pairs' local_radiods=$radiod_count host_pairs=$reserve_pairs). Non-SMT/asymmetric host or too few cores — configure manually per docs/proxmox/wsprdaemon-proxmox-cpu-clock-tuning.md."
     eval "$layout_vars"
 
     # Decoder DRAM-bandwidth cap (AMD MBA) for the host's resctrl unit, from

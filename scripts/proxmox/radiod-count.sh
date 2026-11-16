@@ -38,3 +38,25 @@ rx888_visible() {
     done
     printf '%s' "$n"
 }
+
+# choose_host_reserve_pairs ENV SAVED ROLE
+# Physical cores kept for the Proxmox host alone (compute_host_cpu_layout's
+# reserve_host_pairs).  Prints "N|source": HOST_RESERVE_PAIRS from the
+# environment when set; else the value phase 1 saved in host-layout.env (so
+# a re-run keeps the layout, as the radiod count does); else 0 when the host
+# records the radiod-only station role (/etc/sigmond-appliance/station-role:
+# the host shares the VM's worker pair, leaving room for one more radiod);
+# else 1.  A non-numeric or negative HOST_RESERVE_PAIRS is refused (return 1).
+choose_host_reserve_pairs() {
+    local env="${1:-}" saved="${2:-}" role="${3:-}"
+    if [[ -n "$env" ]]; then
+        [[ "$env" =~ ^[0-9]+$ ]] || return 1
+        printf '%s|HOST_RESERVE_PAIRS\n' "$((10#$env))"
+    elif [[ "$saved" =~ ^[0-9]+$ ]]; then
+        printf '%s|host-layout.env (phase 1)\n' "$((10#$saved))"
+    elif [[ "$role" == radiod-only ]]; then
+        printf '0|the radiod-only station role\n'
+    else
+        printf '1|the default\n'
+    fi
+}

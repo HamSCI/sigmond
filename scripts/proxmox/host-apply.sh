@@ -78,6 +78,119 @@ backup_once() {
     log "backup: $src → $dst"
 }
 
+# cpus_to_range "0 6 1 7" -> "0-1,6-7": a CPU list (any order, space or
+# comma separated) as a compact kernel range string, the same form
+# sigmond.cpu._cpus_to_range_str gives ISOLCPUS_RANGE.
+cpus_to_range() {
+    local out="" lo="" prev="" c
+    for c in $(printf '%s\n' ${1//,/ } | sort -n -u); do
+        if [ -n "$prev" ] && [ "$c" -eq $((prev + 1)) ]; then prev=$c; continue; fi
+        [ -n "$lo" ] && { [ "$lo" = "$prev" ] && out+="${out:+,}$lo" || out+="${out:+,}$lo-$prev"; }
+        lo=$c; prev=$c
+    done
+    [ -n "$lo" ] && { [ "$lo" = "$prev" ] && out+="${out:+,}$lo" || out+="${out:+,}$lo-$prev"; }
+    printf '%s' "$out"
+}
+
+# fence_cpus VM_AFFINITY HOST_CPUS -> "lo-hi", the host CPUs above the VM's
+# highest pCPU (the host-only pair), or "" when the VM reaches the last CPU
+# (HOST_RESERVE_PAIRS=0: the host shares the VM's worker pair).
+fence_cpus() {
+    local hi
+    hi=$(printf '%s\n' ${1//[,-]/ } | sort -n | tail -n 1)
+    [ $((hi + 1)) -le $(($2 - 1)) ] && printf '%s' "$((hi + 1))-$(($2 - 1))"
+    return 0
+}
+
+# herd_cpus FENCE_CPUS WORKER_CPUS -> where host IRQs and QEMU's non-vCPU
+# threads go: the host's own pair when it kept one, otherwise the VM's worker
+# pCPUs, which the host shares.  Never radiod's.
+herd_cpus() {
+    if [ -n "$1" ]; then printf '%s' "$1"; else cpus_to_range "$2"; fi
+}
+
+# install_host_herding VMID HERD_CPUS RADIOD_PCPUS RESCTRL_ARGS WHY
+# Installs radiod-vm-fence (QEMU's non-vCPU threads -> HERD_CPUS, KSM held
+# off), sigmond-host-irq-affinity (host IRQs -> HERD_CPUS) and
+# sigmond-host-resctrl (radiod's L3 slice; RESCTRL_ARGS are its arguments:
+# radiod pCPUs, other pCPUs, L3 fraction[, decoder pCPUs, MBA GB/s]).  Paths are overridable for
+# tests/test-host-apply-no-fence.sh only.
+install_host_herding() {
+    local vmid="$1" herd="$2" radiod_pcpus="$3" resctrl_args="$4" why="$5"
+    local units="${SIGMOND_HOST_UNITS:-/etc/systemd/system}"
+    local sbin="${SIGMOND_HOST_SBIN:-/usr/local/sbin}"
+    local src="${SIGMOND_HOST_SRC:-$(dirname "$0")}" _s
+    mkdir -p "$units" "$sbin"
+    for _s in radiod-vm-fence.sh sigmond-host-irq-affinity.sh sigmond-host-resctrl.sh; do
+        install -m 755 "$src/${_s}" "$sbin/${_s}"
+    done
+
+    cat > "$units/radiod-vm-fence.service" <<FENCE
+[Unit]
+Description=Keep qemu non-vCPU threads off radiod's isolated CPUs, hold KSM off
+After=qemu.slice
+
+[Service]
+Type=simple
+ExecStart=${sbin}/radiod-vm-fence.sh ${vmid} ${herd} 30
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+FENCE
+
+    cat > "$units/sigmond-host-irq-affinity.service" <<UNIT
+[Unit]
+Description=Pin host IRQs off VM ${vmid} isolated pCPUs
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=${sbin}/sigmond-host-irq-affinity.sh ${herd}
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+    cat > "$units/sigmond-host-resctrl.service" <<UNIT
+[Unit]
+Description=L3 CAT partition for guest radiod pCPUs (VM ${vmid})
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=${sbin}/sigmond-host-resctrl.sh ${resctrl_args}
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+    systemctl daemon-reload
+    systemctl enable --now radiod-vm-fence.service >/dev/null 2>&1 \
+        && log "radiod-vm-fence armed (VM ${vmid} non-vCPU threads -> ${herd}, ${why}; KSM held off)" \
+        || log "WARNING: radiod-vm-fence failed to start"
+    # ksmtuned would turn KSM back on behind the fence's back.
+    systemctl disable --now ksmtuned >/dev/null 2>&1 || true
+    systemctl enable --now sigmond-host-irq-affinity.service >/dev/null 2>&1 \
+        && log "host IRQs herded -> cpus ${herd}, ${why} (persistent)" \
+        || log "WARNING: sigmond-host-irq-affinity failed to start"
+    # Never restart an active resctrl unit: on 2026-11-06 a live restart
+    # stepped both guests' clocks ~2 s and lost a WSPR cycle on every
+    # reporter (sigmond-host-resctrl.sh header).  `enable --now` would not
+    # restart it either, so say plainly that the new arguments wait.
+    if systemctl is-active --quiet sigmond-host-resctrl.service 2>/dev/null; then
+        systemctl enable sigmond-host-resctrl.service >/dev/null 2>&1 || true
+        log "L3 CAT: sigmond-host-resctrl already active; left running. The partition (${resctrl_args}) applies at the next host boot -- a live restart steps the guests' clocks ~2 s"
+    else
+        systemctl enable --now sigmond-host-resctrl.service >/dev/null 2>&1 \
+            && log "L3 CAT: radiod pCPUs ${radiod_pcpus} get an exclusive slice (persistent; no-op without cat_l3)" \
+            || log "WARNING: sigmond-host-resctrl failed to start"
+    fi
+}
+
 # ─── sigmond-vm-guard: autostart only once the passthrough has proven safe ────
 # Writes /usr/local/sbin/sigmond-vm-guard plus a boot service and a check
 # timer.  `boot` (once per boot): if onboot is already 1 there is nothing to do;
@@ -242,16 +355,19 @@ fi
 
 mkdir -p /var/lib/vz/snippets
 
-# The fence pair = every pCPU outside the VM's affinity.  Derived here rather
+# The VM's affinity is every pCPU its vCPUs map to.  With a host-only pair
+# that equals ISOLCPUS_RANGE; with HOST_RESERVE_PAIRS=0 isolcpus covers only
+# radiod's pairs (the host shares the worker pair), so it must not be the
+# affinity — that would shut the VM's worker vCPUs out of their own pCPUs.
+VM_AFFINITY="$(cpus_to_range "$VCPU_TO_PCPU")"
+# The fence pair = every pCPU above the VM's affinity.  Derived here rather
 # than hardcoded, and hoisted above the render because the hookscript now caps
 # it too; the radiod-vm-fence / IRQ-herding block further down reuses these.
-FENCE_HI="${ISOLCPUS_RANGE##*-}"
-FENCE_LO=$((FENCE_HI + 1))
 HOST_CPUS="$(nproc)"
+FENCE_CPUS="$(fence_cpus "$VM_AFFINITY" "$HOST_CPUS")"
 HOUSEKEEPING_CPUS=""
-if [ "$FENCE_LO" -le $((HOST_CPUS - 1)) ]; then
-    FENCE_CPUS="${FENCE_LO}-$((HOST_CPUS - 1))"
-    HOUSEKEEPING_CPUS="$(seq -s' ' "$FENCE_LO" $((HOST_CPUS - 1)))"
+if [ -n "$FENCE_CPUS" ]; then
+    HOUSEKEEPING_CPUS="$(seq -s' ' "${FENCE_CPUS%-*}" "${FENCE_CPUS#*-}")"
 fi
 
 # Render the hookscript by parameter substitution. The template uses sentinel
@@ -338,7 +454,7 @@ qm set "$VMID" --boot order=scsi0
 qm set "$VMID" --onboot 0
 install_vm_guard "$VMID"
 qm set "$VMID" --hookscript "local:snippets/cpu-pin-${VMID}.sh"
-qm set "$VMID" --affinity "$ISOLCPUS_RANGE"
+qm set "$VMID" --affinity "$VM_AFFINITY"
 qm set "$VMID" --cores "$VM_CORES" --sockets 1
 # -cpu flags beyond topoext (tuning doc Part 12, each one measured):
 #   host-cache-info=on — without it QEMU advertises a FICTIONAL cache topology
@@ -351,7 +467,7 @@ qm set "$VMID" --cores "$VM_CORES" --sockets 1
 qm set "$VMID" --args "-smp ${VM_VCPU_COUNT},sockets=1,cores=${VM_CORES},threads=${VM_THREADS},maxcpus=${VM_VCPU_COUNT} -cpu host,host-cache-info=on,topoext=on,+kvm_pv_eoi,+kvm_pv_unhalt,-svm"
 log "qm set complete"
 
-# ─── radiod VM fence + KSM hold ───────────────────────────────────────────────
+# ─── radiod VM fence + KSM hold, host IRQ herding + L3 CAT partition ─────────
 # qemu's NON-vCPU threads (io_uring iou-wrk, the main loop) inherit the VM-wide
 # affinity and land on the very CPU pair radiod's threads are isolated onto.
 # io_uring spawns those threads at RUNTIME, so a one-shot fence decays — hence a
@@ -361,36 +477,7 @@ log "qm set complete"
 # Measured on AC0G-B4: the pair is worth ~3x on sample loss (30 s/day/channel
 # -> ~8 s/day/channel).  It was hand-applied there on 2026-08-14 and was NOT in
 # the image — so every DASI unit has been running without it.
-# Target = the CPUs OUTSIDE the VM's affinity, derived rather than hardcoded.
-# FENCE_LO / FENCE_CPUS / HOST_CPUS were derived above the hookscript render.
-if [ -n "${FENCE_CPUS:-}" ]; then
-    install -m 755 "$(dirname "$0")/radiod-vm-fence.sh" \
-        /usr/local/sbin/radiod-vm-fence.sh
-    cat > /etc/systemd/system/radiod-vm-fence.service <<FENCE
-[Unit]
-Description=Keep qemu non-vCPU threads off radiod's isolated CPUs, hold KSM off
-After=qemu.slice
-
-[Service]
-Type=simple
-ExecStart=/usr/local/sbin/radiod-vm-fence.sh ${VMID} ${FENCE_CPUS} 30
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-FENCE
-    systemctl daemon-reload
-    systemctl enable --now radiod-vm-fence.service >/dev/null 2>&1 \
-        && log "radiod-vm-fence armed (VM ${VMID} non-vCPU threads -> ${FENCE_CPUS}, KSM held off)" \
-        || log "WARNING: radiod-vm-fence failed to start"
-    # ksmtuned would turn KSM back on behind the fence's back.
-    systemctl disable --now ksmtuned >/dev/null 2>&1 || true
-else
-    log "radiod-vm-fence SKIPPED: VM affinity ${ISOLCPUS_RANGE} leaves no spare CPU on a ${HOST_CPUS}-CPU host"
-fi
-
-# ─── host IRQ herding + L3 CAT partition ─────────────────────────────────────
+#
 # Two more things isolcpus does NOT do (both observed on AI6VN-PM, 2026-08-26):
 #   1. Interrupts: the vfio-msix vectors for the passed-through USB controllers
 #      kept a wide mask and fired on isolated vCPU pCPUs — every RX888 URB
@@ -401,77 +488,40 @@ fi
 #      exclusive L3 slice for radiod's pCPUs protects the guest's radiod with
 #      no guest-side support.
 # Both are boot-volatile, hence oneshot units.
+#
+# Target: the host-only pair above the VM's affinity when there is one.  A
+# radiod-only host laid out with HOST_RESERVE_PAIRS=0 has none — the host
+# shares the VM's worker pair — so the target is the VM's worker pCPUs.  Left
+# unherded, those IRQs and threads could land on radiod's cores.
 if [ -n "${FENCE_CPUS:-}" ]; then
-    RADIOD_PCPUS="$(vcpus_to_pcpus "${RADIOD_CPUS}" "${VCPU_TO_PCPU}")"
-    # The decoders' pCPUs: a group of their own only when a cap is given
-    # (and the script finds AMD MBA); otherwise they stay in `others`.
-    DECODER_PCPUS=""
-    if [[ -n "${DECODER_MB_GBPS}" ]]; then
-        DECODER_PCPUS="$(vcpus_to_pcpus "${WORKER_CPUS}" "${VCPU_TO_PCPU}")"
-    fi
-    _others=()
-    for (( _c=0; _c<HOST_CPUS; _c++ )); do
-        case ",${RADIOD_PCPUS}," in *",${_c},"*) ;; *) _others+=("$_c");; esac
-    done
-    OTHER_PCPUS="$(printf '%s\n' "${_others[@]}" | paste -sd, -)"
-    RESCTRL_ARGS="${RADIOD_PCPUS} ${OTHER_PCPUS} ${RADIOD_L3_FRACTION}"
-    if [[ -n "${DECODER_PCPUS}" ]]; then
-        RESCTRL_ARGS+=" ${DECODER_PCPUS} ${DECODER_MB_GBPS}"
-    fi
-
-    for _s in sigmond-host-irq-affinity.sh sigmond-host-resctrl.sh; do
-        install -m 755 "$(dirname "$0")/${_s}" "/usr/local/sbin/${_s}"
-    done
-
-    cat > /etc/systemd/system/sigmond-host-irq-affinity.service <<UNIT
-[Unit]
-Description=Pin host IRQs off VM ${VMID} isolated pCPUs
-After=local-fs.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/usr/local/sbin/sigmond-host-irq-affinity.sh ${FENCE_CPUS}
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-    cat > /etc/systemd/system/sigmond-host-resctrl.service <<UNIT
-[Unit]
-Description=L3 CAT partition for guest radiod pCPUs (VM ${VMID})
-After=local-fs.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/usr/local/sbin/sigmond-host-resctrl.sh ${RESCTRL_ARGS}
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-    systemctl daemon-reload
-    systemctl enable --now sigmond-host-irq-affinity.service >/dev/null 2>&1 \
-        && log "host IRQs herded -> cpus ${FENCE_CPUS} (persistent)" \
-        || log "WARNING: sigmond-host-irq-affinity failed to start"
-    # Never restart an active resctrl unit: on 2026-11-06 a live restart
-    # stepped both guests' clocks ~2 s and lost a WSPR cycle on every
-    # reporter (sigmond-host-resctrl.sh header).  `enable --now` would not
-    # restart it either, so say plainly that the new arguments wait.
-    if systemctl is-active --quiet sigmond-host-resctrl.service 2>/dev/null; then
-        systemctl enable sigmond-host-resctrl.service >/dev/null 2>&1 || true
-        log "L3 CAT: sigmond-host-resctrl already active; left running. The partition (${RESCTRL_ARGS}) applies at the next host boot -- a live restart steps the guests' clocks ~2 s"
-    else
-        systemctl enable --now sigmond-host-resctrl.service >/dev/null 2>&1 \
-            && log "L3 CAT: radiod pCPUs ${RADIOD_PCPUS} get an exclusive slice (persistent; no-op without cat_l3)" \
-            || log "WARNING: sigmond-host-resctrl failed to start"
-    fi
+    HERD_WHY="the host's own pair"
+else
+    HERD_WHY="the VM's worker pCPUs (no host-only pair; the host shares them)"
+fi
+HERD_CPUS="$(herd_cpus "${FENCE_CPUS:-}" "$WORKER_CPUS")"
+RADIOD_PCPUS="$(vcpus_to_pcpus "${RADIOD_CPUS}" "${VCPU_TO_PCPU}")"
+# The decoders' pCPUs: a group of their own only when a cap is given
+# (and the script finds AMD MBA); otherwise they stay in `others`.
+DECODER_PCPUS=""
+if [[ -n "${DECODER_MB_GBPS}" ]]; then
+    DECODER_PCPUS="$(vcpus_to_pcpus "${WORKER_CPUS}" "${VCPU_TO_PCPU}")"
+fi
+_others=()
+for (( _c=0; _c<HOST_CPUS; _c++ )); do
+    case ",${RADIOD_PCPUS}," in *",${_c},"*) ;; *) _others+=("$_c");; esac
+done
+OTHER_PCPUS="$(printf '%s\n' "${_others[@]}" | paste -sd, -)"
+RESCTRL_ARGS="${RADIOD_PCPUS} ${OTHER_PCPUS} ${RADIOD_L3_FRACTION}"
+if [[ -n "${DECODER_PCPUS}" ]]; then
+    RESCTRL_ARGS+=" ${DECODER_PCPUS} ${DECODER_MB_GBPS}"
+fi
+if [ -n "$HERD_CPUS" ]; then
+    install_host_herding "$VMID" "$HERD_CPUS" "$RADIOD_PCPUS" "$RESCTRL_ARGS" "$HERD_WHY"
     if [[ -n "${DECODER_PCPUS}" ]]; then
         log "MBA: decoder pCPUs ${DECODER_PCPUS} -> ${DECODER_MB_GBPS} GB/s cap requested (applied on AMD MBA only; the unit's journal says which)"
     fi
 else
-    log "host IRQ/L3 tuning SKIPPED: no housekeeping CPUs outside VM affinity"
+    log "WARNING: radiod-vm-fence and host IRQ herding SKIPPED: no fence pair and no WORKER_CPUS"
 fi
 
 # Snapshot the working configuration alongside the originals.

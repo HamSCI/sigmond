@@ -438,7 +438,11 @@ def compute_host_cpu_layout(
     ``[[0,8],[1,9],…]``.
 
     The last ``reserve_host_pairs`` physical cores stay with the Proxmox
-    host; the rest become the VM's vCPUs.  The first
+    host; the rest become the VM's vCPUs.  ``reserve_host_pairs=0`` (a
+    radiod-only host) gives the VM every core and the host shares the VM's
+    worker pairs: ``isolcpus`` then covers only the radiod pairs, so the
+    host's own threads and IRQs have the worker CPUs to run on, and
+    host-apply.sh herds them there.  The first
     ``local_radiod_count`` of the VM's pairs are radiod cores (kept at
     full clock); the remainder are decode/worker cores (clock-capped).
 
@@ -454,12 +458,16 @@ def compute_host_cpu_layout(
 
     Returns a dict: ``vm_pairs, radiod_pairs, worker_pairs`` (lists of
     pairs), ``radiod_cpus, worker_cpus, vcpu_to_pcpu`` (flat host-CPU
-    lists in pair order), ``isolcpus`` (sorted host CPUs the VM owns),
+    lists in pair order), ``isolcpus`` (sorted host CPUs to
+    isolate: all the VM's, or only radiod's when ``reserve_host_pairs`` is
+    0, so then it is NOT the VM's affinity — that is ``vcpu_to_pcpu``),
     ``vm_cores, vm_threads, vm_vcpu_count``.
     """
     pairs = [sorted(p) for p in pairs]
     if local_radiod_count < 1:
         raise ValueError("local_radiod_count must be >= 1")
+    if reserve_host_pairs < 0:
+        raise ValueError("reserve_host_pairs must be >= 0")
     widths = {len(p) for p in pairs}
     # ⛔ NON-SMT HOSTS ARE NORMAL, NOT EXOTIC.  This used to demand 2-way
     # pairs, so a 4-core i5-6500T (no Hyper-Threading) fell to the appliance's
@@ -505,7 +513,10 @@ def compute_host_cpu_layout(
         "radiod_cpus": flat(radiod_pairs),
         "worker_cpus": flat(worker_pairs),
         "vcpu_to_pcpu": vcpu_to_pcpu,
-        "isolcpus": sorted(vcpu_to_pcpu),
+        # With a host-only pair the VM's whole set is isolated; without one
+        # the worker pairs are the host's housekeeping CPUs and stay out.
+        "isolcpus": sorted(vcpu_to_pcpu if reserve_host_pairs
+                           else flat(radiod_pairs)),
         "vm_cores": len(vm_pairs),
         "vm_threads": threads,
         "vm_vcpu_count": len(vcpu_to_pcpu),

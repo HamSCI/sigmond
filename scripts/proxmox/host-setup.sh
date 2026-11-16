@@ -163,15 +163,26 @@ if [[ "$DO_TUNING" == 1 ]]; then
         info "Using ${RADIOD_COUNT} radiod(s), the operator's value"
     fi
 
-    info "USB=${KV[USB_VID_DID]} cpus=${KV[HOST_CPU_COUNT]} HT=${KV[HT_PATTERN]} pairs='${KV[HT_PAIRS]}' local_radiods=${RADIOD_COUNT}"
+    # Physical cores kept for the host alone: HOST_RESERVE_PAIRS, else the
+    # value saved by an earlier run, else 0 on a radiod-only station (the
+    # host shares the VM's worker pair), else 1.
+    # shellcheck source=radiod-count.sh
+    . "$SCRIPT_DIR/radiod-count.sh"
+    IFS='|' read -r RESERVE_PAIRS reserve_src < <(choose_host_reserve_pairs \
+        "${HOST_RESERVE_PAIRS:-}" "${KV[HOST_LAYOUT_RESERVE_PAIRS]:-}" "${KV[STATION_ROLE]:-}") \
+        || die "HOST_RESERVE_PAIRS='${HOST_RESERVE_PAIRS:-}' is not a whole number >= 0"
+    info "Keeping ${RESERVE_PAIRS} core(s) for the host alone, from ${reserve_src}"
+
+    info "USB=${KV[USB_VID_DID]} cpus=${KV[HOST_CPU_COUNT]} HT=${KV[HT_PATTERN]} pairs='${KV[HT_PAIRS]}' local_radiods=${RADIOD_COUNT} host_pairs=${RESERVE_PAIRS}"
 
     layout_vars="$(PYTHONPATH="$SIGMOND_REPO/lib" python3 -c '
 import sys
 from sigmond.cpu import parse_ht_pairs, compute_host_cpu_layout, layout_shell_vars
 pairs = parse_ht_pairs(sys.argv[1])
-lay = compute_host_cpu_layout(pairs, local_radiod_count=int(sys.argv[2]))
+lay = compute_host_cpu_layout(pairs, local_radiod_count=int(sys.argv[2]),
+                              reserve_host_pairs=int(sys.argv[3]))
 print(layout_shell_vars(lay))
-' "${KV[HT_PAIRS]}" "$RADIOD_COUNT")" \
+' "${KV[HT_PAIRS]}" "$RADIOD_COUNT" "$RESERVE_PAIRS")" \
         || die "CPU layout computation failed — non-SMT/asymmetric host; configure manually per docs/proxmox/wsprdaemon-proxmox-cpu-clock-tuning.md"
     eval "$layout_vars"
 
@@ -190,6 +201,10 @@ print(layout_shell_vars(lay))
     {
         echo "# written by sigmond host-setup.sh $(date -Iseconds)"
         echo "LOCAL_RADIOD_COUNT=$RADIOD_COUNT"
+        # Only a value someone chose (HOST_RESERVE_PAIRS, the role, or an
+        # earlier save) sticks: phase 1 usually runs before the wizard
+        # records the role, and a saved default would outvote it later.
+        [[ "$reserve_src" == "the default" ]] || echo "HOST_RESERVE_PAIRS=$RESERVE_PAIRS"
         echo "$layout_vars"
     } > /etc/sigmond/host-layout.env
     ok "layout saved to /etc/sigmond/host-layout.env"

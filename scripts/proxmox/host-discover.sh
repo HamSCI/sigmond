@@ -212,6 +212,14 @@ RX888_COUNT="$RX888_VISIBLE"
 HOST_LAYOUT_ENV="${SIGMOND_HOST_LAYOUT_ENV:-/etc/sigmond/host-layout.env}"
 HOST_LAYOUT_RADIOD_COUNT="$(sed -n 's/^LOCAL_RADIOD_COUNT=\([0-9][0-9]*\)[[:space:]]*$/\1/p' \
     "$HOST_LAYOUT_ENV" 2>/dev/null | tail -n 1 || true)"
+# The host-only core count phase 1 saved, read the same way.
+HOST_LAYOUT_RESERVE_PAIRS="$(sed -n 's/^HOST_RESERVE_PAIRS=\([0-9][0-9]*\)[[:space:]]*$/\1/p' \
+    "$HOST_LAYOUT_ENV" 2>/dev/null | tail -n 1 || true)"
+# The station role the wizard recorded on this host (full or radiod-only);
+# empty when there is none or it says anything else.
+STATION_ROLE="$(head -n 1 "${SIGMOND_STATION_ROLE_FILE:-/etc/sigmond-appliance/station-role}" 2>/dev/null \
+    | tr -d '[:space:]' || true)"
+case "$STATION_ROLE" in full|radiod-only) ;; *) STATION_ROLE="" ;; esac
 
 # ─── emit ─────────────────────────────────────────────────────────────────────
 emit DISCOVERY_RESULT "ok"
@@ -228,3 +236,5 @@ emit CPU_MODEL "$CPU_MODEL"
 emit RX888_COUNT "$RX888_COUNT"
 emit RX888_VISIBLE "$RX888_VISIBLE"
 emit HOST_LAYOUT_RADIOD_COUNT "$HOST_LAYOUT_RADIOD_COUNT"
+emit HOST_LAYOUT_RESERVE_PAIRS "$HOST_LAYOUT_RESERVE_PAIRS"
+emit STATION_ROLE "$STATION_ROLE"

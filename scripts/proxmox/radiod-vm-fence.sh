@@ -6,6 +6,15 @@ set -u
 VMID=${1:-100}; TARGET=${2:-14-15}; IVAL=${3:-30}
 log(){ echo "$(date -u +%FT%TZ) $*"; }
 log "fencing VM $VMID non-vCPU threads -> $TARGET every ${IVAL}s"
+# TARGET as a bit mask.  A thread is (re-)fenced when it can reach any CPU
+# outside it.  The old test (can it reach cpu0/cpu1?) held only while the
+# target was the host's own pair; on a host with no host-only pair the target
+# is the VM's worker pCPUs, which hold cpu0, and every thread would be
+# re-fenced every interval.
+TMASK=0
+for _part in ${TARGET//,/ }; do
+  for (( _c=${_part%%-*}; _c<=${_part##*-}; _c++ )); do TMASK=$(( TMASK | (1 << _c) )); done
+done
 while true; do
   P=$(qm list 2>/dev/null | awk -v v="$VMID" '$1==v{print $6}')
   if [ -n "${P:-}" ] && [ -d "/proc/$P" ]; then
@@ -14,10 +23,10 @@ while true; do
       t=$(basename "$d")
       nm=$(grep '^Name:' "$d/status" 2>/dev/null | cut -f2)
       case "$nm" in "CPU "*) continue;; esac        # leave pinned vCPUs alone
-      cur=$(taskset -p "$t" 2>/dev/null | sed 's/.*: //')
+      cur=$(taskset -p "$t" 2>/dev/null | sed 's/.*: //; s/,//g')
       [ -z "$cur" ] && continue
-      # only touch threads that can still reach cpu0/cpu1 (mask bits 0,1)
-      if [ $(( 16#$cur & 3 )) -ne 0 ]; then
+      # only touch threads that can still reach a CPU outside the target
+      if [ $(( 16#$cur & ~TMASK )) -ne 0 ]; then
         taskset -pc "$TARGET" "$t" >/dev/null 2>&1 && n=$((n+1))
       fi
     done
