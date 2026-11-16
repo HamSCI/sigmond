@@ -122,6 +122,15 @@ before installing.  A build that does not match is not installed, and
 shape of the failure: a wrong decoder does not crash, it decodes slightly
 differently, and the station keeps uploading for as long as nobody looks.
 
+The one exception is the operator's: `[decoders] operator_override = true`
+in `coordination.toml` (WWV-2, 2026-11-16, whose operator chose an ubersdr
+build whose parity check had failed).  Then `_select_decoders` selects the
+chosen build with a warning that names its parity state, `_build_decoders`
+never falls back while the chosen binaries are on disk, an absent
+`implementation` means "the build that is live now", and `smd check`'s
+WSPR line and `smd admin decoders` say the build is held
+(`sigmond.decoder_choice`).
+
 ⛔ **No `-march=native` on the UberSDR build**, deliberately — the inverse
 of the `-fbounds-check` rule for the WSJT-X build, and the same cause.
 Upstream sets `-ffp-contract=off` on every decoder source so each multiply

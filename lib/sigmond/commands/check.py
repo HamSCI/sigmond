@@ -161,6 +161,8 @@ class Env:
     bringup_marker: Path = Path('/var/lib/sigmond/.firstrun-bringup-done')  # residual R3
     mag_psws_id: Callable[[], str] = None                              # residual R2
     drift: Callable[[], Any] = None                                    # topology drift
+    # the decoder build the operator holds (decoder_choice.override_note)
+    decoder_note: Callable[[], Optional[str]] = None                   # WWV-2 override
 
 
 def _installed(name: str) -> bool:
@@ -181,7 +183,13 @@ def default_env() -> Env:
                timestd_config=lambda: read_timestd_config(reader),
                coordination=_coordination, coordination_age_s=_switch_age_s,
                backlog=read_backlog, http=http_status, bringup=bringup_state,
-               mag_psws_id=lambda: read_mag_psws_id(reader), drift=_drift)
+               mag_psws_id=lambda: read_mag_psws_id(reader), drift=_drift,
+               decoder_note=_decoder_note)
+
+
+def _decoder_note() -> Optional[str]:
+    from ..decoder_choice import override_note
+    return override_note()
 
 
 def guarded(label: str, fn: Callable[[Env], Optional[Line]], env: Env) -> Optional[Line]:
@@ -612,7 +620,25 @@ def psk_line(env: Env, log_dir: Path = PSK_LOG_DIR) -> Line:
     return Line(FAIL, label, f'no FT8 or FT4 spot in 15 min.  {no_signal(env)}')
 
 
+def with_decoder_note(env: Env, line: Line) -> Line:
+    """Add the operator's decoder hold to a decode line, ahead of any Fix
+    (WWV-2, 2026-11-16): a station decoding with a build whose parity check
+    failed says so wherever its spots are judged."""
+    note = env.decoder_note() if env.decoder_note else None
+    if not note:
+        return line
+    head, sep, fix = line.text.partition(FIX_SEP)
+    return Line(line.mark, line.label, f'{head}; {note}{sep}{fix}')
+
+
 def wspr_line(env: Env) -> Line:
+    line = _wspr_line(env)
+    if line.mark == ABSENT:
+        return line
+    return with_decoder_note(env, line)
+
+
+def _wspr_line(env: Env) -> Line:
     label = 'WSPR'
     if not env.installed('wspr-recorder'):
         return Line(ABSENT, label, 'not on this station')

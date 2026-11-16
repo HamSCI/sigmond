@@ -356,6 +356,8 @@ class CombinedBuild(unittest.TestCase):
     def setUp(self):
         self.p = [mock.patch.object(_SMD, "_adopt_legacy_decoders",
                                     lambda: None),
+                  # Hermetic: never read this machine's coordination.toml.
+                  mock.patch.object(_SMD, "_decoder_override", lambda: False),
                   mock.patch.object(_SMD, "_warn"),
                   mock.patch.object(_SMD, "_ok"), mock.patch.object(_SMD, "_err")]
         for q in self.p:

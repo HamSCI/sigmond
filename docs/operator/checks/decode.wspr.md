@@ -45,6 +45,13 @@ The service crashes or does not exist. Tell the fleet admin.
 **`...; it starts once the SDR is plugged in`**
 See the bring-up check page. Wait, or plug the SDR in.
 
+**`...; decoders: ubersdr held by operator override, parity FAILED; sigmond will not switch it`**
+Added to any of the lines above when `/etc/sigmond/coordination.toml` sets
+`[decoders] operator_override = true`. Your site chose this decoder build by
+hand; sigmond keeps it. The parity part appears only when the build's check
+against WSJT-X did not pass. Nothing to do unless that choice was not yours
+([day-2.md, "Holding a decoder build by hand"](../day-2.md#holding-a-decoder-build-by-hand)).
+
 ## What to do
 
 Follow the line.

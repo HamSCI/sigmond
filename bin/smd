@@ -1443,6 +1443,8 @@ _DECODER_DIR     = Path('/usr/local/libexec/sigmond/decoders')
 _DECODER_IMPLS   = ('ubersdr', 'wsjtx')
 _DECODER_DEFAULT = 'ubersdr'
 _DECODER_BINS    = ('wsprd', 'jt9')
+# Where [decoders] (implementation, operator_override) is read from.
+_COORDINATION_TOML = Path('/etc/sigmond/coordination.toml')
 
 # Build provenance for upstream C projects sigmond builds itself (the
 # upstream-built analogue of native-binaries.md's committed .provenance
@@ -2900,7 +2902,8 @@ def _adopt_legacy_decoders() -> None:
         _run(['cp', str(old), str(dest / '.provenance')], sudo=True)
 
 
-def _select_decoders(impl: str = _DECODER_DEFAULT) -> bool:
+def _select_decoders(impl: str = _DECODER_DEFAULT, *,
+                     waive_parity: bool = False) -> bool:
     """Point /usr/local/bin/{wsprd,jt9} at one implementation's binaries.
 
     The switch is the whole fallback story: both builds stay on disk, so
@@ -2908,6 +2911,10 @@ def _select_decoders(impl: str = _DECODER_DEFAULT) -> bool:
     implementation whose binaries are not present, and refuses ubersdr whose
     parity check did not pass — selecting an unverified decoder is the one
     outcome this design exists to prevent.
+
+    ``waive_parity`` is the operator's override (`[decoders]
+    operator_override = true` in coordination.toml, WWV-2 2026-11-16): the
+    unverified build is selected, and the warning says so every time.
     """
     if impl not in _DECODER_IMPLS:
         _err(f'decoders: unknown implementation {impl!r} '
@@ -2922,14 +2929,20 @@ def _select_decoders(impl: str = _DECODER_DEFAULT) -> bool:
         return False
     if impl == 'ubersdr':
         try:
-            if 'parity=verified' not in (dest / '.provenance').read_text():
-                _err('decoders: refusing to select ubersdr — its build did '
-                     'not pass the WSJT-X parity check')
-                return False
+            verified = 'parity=verified' in (dest / '.provenance').read_text()
+            why = 'its build did not pass the WSJT-X parity check'
         except OSError:
-            _err('decoders: refusing to select ubersdr — no provenance '
-                 'marker, so the parity check cannot be confirmed')
+            verified = False
+            why = 'no provenance marker, so the parity check cannot be confirmed'
+        if not verified and not waive_parity:
+            _err(f'decoders: refusing to select ubersdr — {why}')
             return False
+        if not verified:
+            from sigmond import decoder_choice
+            word = decoder_choice.parity('ubersdr', _DECODER_DIR) or 'unknown'
+            _warn(f'decoders: selecting ubersdr although {why} (parity '
+                  f'{word}) — [decoders] operator_override is set in '
+                  f'{_COORDINATION_TOML}')
     for b in _DECODER_BINS:
         link = Path('/usr/local/bin') / b
         # Relative, so the pair stays correct under any prefix, and atomic:
@@ -2945,6 +2958,18 @@ def _select_decoders(impl: str = _DECODER_DEFAULT) -> bool:
     return True
 
 
+def _decoder_override() -> bool:
+    """`[decoders] operator_override = true` in coordination.toml: the
+    operator holds the decoder build (see sigmond.decoder_choice)."""
+    from sigmond import decoder_choice
+    return decoder_choice.operator_override(_COORDINATION_TOML)
+
+
+def _decoder_built(impl: str) -> bool:
+    """Both binaries of one implementation are on disk."""
+    return all((_DECODER_DIR / impl / b).exists() for b in _DECODER_BINS)
+
+
 def _decoder_preference() -> str:
     """The decoder implementation this host asks for.
 
@@ -2953,13 +2978,20 @@ def _decoder_preference() -> str:
     the Coordination dataclass: that renders coordination.env for the
     services, and which binary /usr/local/bin/wsprd points at is not a
     service's environment — it is a property of the host's filesystem.
+
+    With `operator_override = true` and no `implementation`, the build the
+    station runs now is the one asked for: the operator chose it by hand
+    (WWV-2, 2026-11-16), and the default must not overrule that.
     """
     try:
-        data = tomllib.loads(Path('/etc/sigmond/coordination.toml').read_text())
+        data = tomllib.loads(_COORDINATION_TOML.read_text())
     except (OSError, tomllib.TOMLDecodeError):
         return _DECODER_DEFAULT
-    want = (data.get('decoders') or {}).get('implementation')
+    table = data.get('decoders') or {}
+    want = table.get('implementation')
     if not want:
+        if table.get('operator_override') is True:
+            return _decoder_selected() or _DECODER_DEFAULT
         return _DECODER_DEFAULT
     want = str(want).strip().lower()
     if want not in _DECODER_IMPLS:
@@ -2986,10 +3018,25 @@ def _build_decoders() -> bool:
         return False
     _adopt_legacy_decoders()
     want = _decoder_preference()
+    held = _decoder_override()
     if want == 'ubersdr' and not _build_ubersdr_decoders():
-        _warn('decoders: falling back to the wsjtx build '
-              '(ubersdr unavailable on this host)')
-        want = 'wsjtx'
+        if held and _decoder_built('ubersdr'):
+            # The operator chose this build; a rebuild that did not land
+            # leaves the binaries he chose in place, so keep them.
+            _info('decoders: the ubersdr rebuild did not complete; the '
+                  'operator override keeps the ubersdr build already installed')
+        else:
+            if held:
+                _warn('decoders: the operator override asks for ubersdr, but '
+                      'no ubersdr build is installed')
+            _warn('decoders: falling back to the wsjtx build '
+                  '(ubersdr unavailable on this host)')
+            want = 'wsjtx'
+    if held:
+        _info(f'decoders: {want} held by operator override ([decoders] '
+              f'operator_override in {_COORDINATION_TOML}); sigmond will '
+              f'not switch it')
+        return _select_decoders(want, waive_parity=True)
     return _select_decoders(want)
 
 
@@ -6750,6 +6797,8 @@ _PRELOAD_MODULES = {
               'sigmond.environment_kinds', 'sigmond.discovery',
               # _align_deploy_build's stamp check
               'sigmond.build_stamp', 'sigmond.gitowner',
+              # _build_decoders' operator-override read (missing native)
+              'sigmond.decoder_choice',
               # _refresh_cli_reference, after the restart stage
               'sigmond.cli_reference', 'sigmond.cli_walk', 'sigmond.psws',
               'sigmond.site_profile', 'sigmond.snapshot',
@@ -15172,7 +15221,7 @@ def cmd_decoders(args) -> int:
     """
     want = getattr(args, 'select', None)
     if want:
-        if not _select_decoders(want):
+        if not _select_decoders(want, waive_parity=_decoder_override()):
             return 1
         _info('Restart the decode clients to pick it up: '
               'smd restart wspr-recorder psk-recorder')
@@ -15209,6 +15258,10 @@ def cmd_decoders(args) -> int:
               f'— run: smd admin decoders --select {cfg}')
     else:
         _ok(f'{live} selected, matching coordination.toml')
+    from sigmond import decoder_choice
+    note = decoder_choice.override_note(path=_COORDINATION_TOML)
+    if note:
+        _info(note)
     for f in _decoder_findings():
         _err(f'{f.kind}: {f.detail}')
     return 0

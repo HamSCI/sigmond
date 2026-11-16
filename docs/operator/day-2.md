@@ -726,6 +726,28 @@ say so in one line, `ka9q-radio: locally managed (Phil) — left as is at <sha>`
 whoever manages it pulls, builds and restarts it. Details:
 [PROVISIONING-INPUTS.md §8](../PROVISIONING-INPUTS.md#8-single-per-site-profile-implemented).
 
+### Holding a decoder build by hand
+
+sigmond builds two versions of the WSPR/FT8 decoders, `ubersdr` and `wsjtx`,
+and refuses an `ubersdr` build whose parity check against WSJT-X did not pass
+(its `.provenance` reads `parity=FAILED` or anything but `verified`); an
+install then falls back to `wsjtx`. If your site has chosen a build anyway,
+say so in `/etc/sigmond/coordination.toml`:
+
+```toml
+[decoders]
+implementation    = "ubersdr"   # optional; absent = keep the build running now
+operator_override = true
+```
+
+`smd update`, `smd align` and `smd install` then keep that build, never
+switch to the other one on their own, and print
+`decoders: ubersdr held by operator override (...); sigmond will not switch it`.
+`smd check` adds `decoders: ubersdr held by operator override, parity FAILED;
+sigmond will not switch it` to its WSPR line, and `smd admin decoders` shows
+the same. `smd admin decoders --select <build>` still switches when you ask.
+Remove the key, or set it to `false`, to hand the choice back to sigmond.
+
 Full list and reasoning → [do-not-touch.md](do-not-touch.md).
 
 ---
