@@ -11163,6 +11163,11 @@ def _bringup_wait_wisdom(wisdom_file, timeout_s: int = 3600, poll_s: int = 15) -
     Returns True once present, False on timeout.  Re-launches the planner
     service if it died before producing the file."""
     import time
+    local = _wisdom_locally_managed()
+    if local:
+        _info(f'FFT wisdom: ka9q-radio is {local} — keeping the wisdom it '
+              f'has; not waiting on a planner')
+        return True
     wverdict = _wisdom_verdict(wisdom_file)
     if wverdict == 'current':
         return True
@@ -13472,20 +13477,58 @@ def _reload_udev_for_sdrs() -> None:
     _ok('udev rules reloaded + triggered')
 
 
+_WISDOM_UNIT_DEST = Path('/etc/systemd/system/sigmond-wisdom.service')
+
+
+def _wisdom_locally_managed() -> str:
+    """The `locally managed (who)` label when site-profile.toml lists
+    ka9q-radio under [components] locally_managed, else ''.
+
+    Whoever manages radiod manages its FFTW wisdom too: sigmond keeps the
+    wisdom it finds and plans only when asked (`smd admin wisdom plan`).
+    WWV-2, 2026-11-16: an install re-enabled and started the planner on a
+    station whose radiod Phil runs."""
+    local = _locally_managed()
+    return local.label() if 'ka9q-radio' in local else ''
+
+
 def _install_wisdom_service() -> None:
     """Install + enable sigmond-wisdom.service — the first-boot oneshot that
     generates FFTW wisdom when /etc/fftw/wisdomf is absent (then restarts
     services).  Idempotent: the unit's Condition* lines make it a no-op once
     wisdom exists.  fftwf-wisdom is hours-long, so we never run it inline —
     the service handles it on the next boot (or `systemctl start
-    sigmond-wisdom` to trigger now)."""
+    sigmond-wisdom` to trigger now).
+
+    The operator's decision stands (WWV-2, 2026-11-16): a unit he disabled
+    is refreshed but not re-enabled, and a masked one is not touched at all
+    (installing over the mask would unmask it).  With ka9q-radio locally
+    managed the unit is never enabled; its ExecCondition skips it anyway."""
     src = Path(__file__).resolve().parent.parent / 'systemd' / 'sigmond-wisdom.service'
     if not src.exists():
         return
-    _run(['install', '-m', '0644', str(src),
-          '/etc/systemd/system/sigmond-wisdom.service'], sudo=True)
+    unit = _WISDOM_UNIT_DEST.name
+    existed = _WISDOM_UNIT_DEST.exists() or _WISDOM_UNIT_DEST.is_symlink()
+    state = ''
+    if existed:
+        state = (getattr(_run(['systemctl', 'is-enabled', unit]), 'stdout', '')
+                 or '').strip()
+    if state in ('masked', 'masked-runtime'):
+        _info(f'{unit}: masked by the operator — leaving it alone')
+        return
+    _run(['install', '-m', '0644', str(src), str(_WISDOM_UNIT_DEST)], sudo=True)
     _run(['systemctl', 'daemon-reload'], sudo=True)
-    _run(['systemctl', 'enable', 'sigmond-wisdom.service'], sudo=True)
+    local = _wisdom_locally_managed()
+    if local:
+        _info(f'{unit}: not enabled — ka9q-radio is {local}, so sigmond '
+              f'keeps the FFT wisdom it finds; `smd admin wisdom plan` '
+              f'plans on request')
+        return
+    if existed and state == 'disabled':
+        _info(f'{unit}: disabled by the operator — not re-enabled '
+              f'(`systemctl enable {unit}` turns it back on)')
+        return
+    _run(['systemctl', 'enable', unit], sudo=True)
     _ok('sigmond-wisdom.service enabled (generates FFTW wisdom on next boot '
         'when absent; `systemctl start sigmond-wisdom` to run now)')
 
@@ -20800,6 +20843,11 @@ def cmd_wisdom_needed(args) -> int:
     sigmond-wisdom.service's ExecCondition: a nonzero exit skips the unit
     quietly.  Always prints the CPU verdict, so a bundle miss stays loud.
     """
+    local = _wisdom_locally_managed()
+    if local:
+        _info(f'FFT wisdom: ka9q-radio is {local} — the wisdom stays as it '
+              f'is; nothing plans unless asked (smd admin wisdom plan)')
+        return 1
     from sigmond.wisdom import identify_cpu
     from sigmond import wisdom as _w
     verdict = identify_cpu(_WISDOM_BUNDLE_DIRS, _w.CPUINFO)
@@ -20915,6 +20963,15 @@ def cmd_wisdom_plan(args) -> int:
         WISDOM_SIDECAR, cpu_model, radiod_placement, write_sidecar,
         read_sidecar, topup_misses, FFT_MISS_LOG,
     )
+
+    if getattr(args, 'auto', False):
+        local = _wisdom_locally_managed()
+        if local:
+            # --auto is the unattended run (the boot unit); a locally
+            # managed radiod's wisdom changes only when someone asks.
+            _info(f'auto: ka9q-radio is {local} — FFT wisdom left as is; '
+                  f'run `smd admin wisdom plan` to plan it')
+            return 0
 
     fftwf = shutil.which('fftwf-wisdom')
     if fftwf is None:

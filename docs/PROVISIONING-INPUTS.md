@@ -251,6 +251,11 @@ that checkout exactly as it stands:
   `smd admin manifest restore` never clone over, pull, check out, reset or
   build it.  `smd install` of a locally managed component with no checkout
   refuses: put the checkout in place, or drop the name from the list.
+- A locally managed ka9q-radio keeps the FFTW wisdom it has (WWV-2,
+  2026-11-16).  `smd install` never enables `sigmond-wisdom.service`; the
+  unit's ExecCondition (`smd admin wisdom needed`) skips it at every boot;
+  `smd admin wisdom plan --auto` and bring-up neither seed a bundle nor plan.
+  `smd admin wisdom plan`, typed by hand, still plans.
 
 A name that matches no component is warned about, never an error.  The wizard
 rewrites the profile whole, and `smd config profile-install` carries

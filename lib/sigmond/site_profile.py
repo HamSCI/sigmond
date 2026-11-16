@@ -106,8 +106,10 @@ require = []                       # e.g. ["earthdata", "rac"]
 #                                  # sigmond never fetches, pulls, aligns, pins,
 #                                  # resets or rebuilds these, never restarts a
 #                                  # service because one moved, and doctor reports
-#                                  # no drift for them.  Absent = sigmond manages
-#                                  # every checkout (the default).
+#                                  # no drift for them.  With ka9q-radio listed,
+#                                  # FFT wisdom is kept as is and planned only on
+#                                  # request (smd admin wisdom plan).  Absent =
+#                                  # sigmond manages every checkout (the default).
 """
 
 

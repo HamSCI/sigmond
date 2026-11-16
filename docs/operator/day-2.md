@@ -723,8 +723,17 @@ locally_managed_by = "Phil"
 
 `smd update`, `smd align` and `smd doctor` then leave that checkout alone and
 say so in one line, `ka9q-radio: locally managed (Phil) — left as is at <sha>`;
-whoever manages it pulls, builds and restarts it. Details:
+whoever manages it pulls, builds and restarts it. With `ka9q-radio` in the
+list, sigmond also keeps the station's FFT wisdom (`/etc/fftw/wisdomf`) as it
+is and never starts the wisdom planner by itself; `smd admin wisdom plan`
+plans when you ask. Details:
 [PROVISIONING-INPUTS.md §8](../PROVISIONING-INPUTS.md#8-single-per-site-profile-implemented).
+
+To stop the wisdom planner on any station, disable it in the `[VM]`:
+`systemctl disable sigmond-wisdom.service` (with sudo). `smd install` and
+`smd update` leave a disabled planner disabled. `systemctl mask` does not
+work on this unit, because it is a file in `/etc/systemd/system`; disabling
+is enough.
 
 ### Holding a decoder build by hand
 
