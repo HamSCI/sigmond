@@ -221,7 +221,10 @@ def guard(dry_run: bool = False, say=print) -> int:
         subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
     for m in sorted(mounts):
         if dry_run:
-            say(f"storage guard: would seal the bare directory beneath {m}")
+            # Seeing beneath the mount takes a bind mount, which a dry run
+            # does not make; so it cannot know whether a seal is needed.
+            say(f"storage guard: beneath {m}: not checked in a dry run "
+                f"(a real run seals it if empty, or says 'already')")
             continue
         say(f"storage guard: beneath {m}: {seal_bare_dir(m)}")
     if not changed:

@@ -33334,11 +33334,15 @@ def main() -> int:
 
 
 def _guard_after(args, rc: int) -> int:
-    """After a successful apply or update, as root: `smd storage guard`
-    (data-volume design 2026-11-08): every writer waits for its data mount and
-    the bare directory beneath refuses writes.  Best effort, one line each,
-    never changes the command's exit code, never restarts a unit."""
-    if (rc != 0 or args.command not in ('apply', 'update') or os.geteuid() != 0
+    """After a successful apply, update or align --apply, as root: `smd storage
+    guard` (data-volume design 2026-11-08): every writer waits for its data
+    mount and the bare directory beneath refuses writes.  Align counts because
+    the fleet moves by align; without it the guard never ran on the stations
+    that carry a data disk.  Best effort, one line each, never changes the
+    command's exit code, never restarts a unit."""
+    aligning = (args.command == 'align' and getattr(args, 'apply', False)
+                and not getattr(args, 'verify', False))
+    if (rc != 0 or not (args.command in ('apply', 'update') or aligning) or os.geteuid() != 0
             or getattr(args, 'dry_run', False) or not _HAS_SIGMOND_LIB):
         return rc
     try:

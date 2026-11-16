@@ -157,3 +157,58 @@ def test_check_warns_unguarded(tmp_path, mi, monkeypatch):
     assert ln.mark == C.WAIT and "/var/lib/timestd" in ln.text and "smd storage guard" in ln.text
     G.write_dropins({"timestd-core-recorder.service": ["/var/lib/timestd"]}, etc_dir=etc)
     assert C.storage_line(env).mark == C.OK
+
+
+# --- smd runs the guard after apply, update and align --apply ----------------
+
+def _load_smd():
+    import importlib.machinery, importlib.util, os
+    os.environ.setdefault("SIGMOND_NO_VENV_REEXEC", "1")
+    loader = importlib.machinery.SourceFileLoader(
+        "smd_under_test_guard", str(Path(__file__).resolve().parent.parent / "bin" / "smd"))
+    spec = importlib.util.spec_from_loader("smd_under_test_guard", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+@pytest.mark.parametrize("ns, runs", [
+    (dict(command="apply"), True),
+    (dict(command="update"), True),
+    (dict(command="align", apply=True), True),
+    (dict(command="align", apply=False), False),
+    (dict(command="align", apply=True, verify=True), False),
+    (dict(command="status"), False),
+])
+def test_guard_after_runs_for(ns, runs, monkeypatch):
+    smd = _load_smd()
+    calls = []
+    monkeypatch.setattr(smd.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(G, "guard", lambda **kw: calls.append(kw) or 0)
+    assert smd._guard_after(types.SimpleNamespace(**ns), 0) == 0
+    assert bool(calls) is runs
+
+
+def test_guard_after_skips_a_failed_align(monkeypatch):
+    smd = _load_smd()
+    calls = []
+    monkeypatch.setattr(smd.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(G, "guard", lambda **kw: calls.append(kw) or 0)
+    assert smd._guard_after(types.SimpleNamespace(command="align", apply=True), 1) == 1
+    assert calls == []
+
+
+def test_dry_run_never_claims_an_unchecked_seal(monkeypatch):
+    """A dry run cannot see beneath the mount (that needs the bind), so it
+    must not say the directory would be sealed: on 11-16 it said so on four
+    VMs whose directories were already sealed."""
+    monkeypatch.setattr(G, "data_mounts", lambda *a, **k: {"/var/lib/timestd": ["hf-timestd"]})
+    monkeypatch.setattr(G, "client_paths", lambda views: {})
+    monkeypatch.setattr(G, "plan", lambda mounts: {})
+    import sigmond.sysview as SV
+    monkeypatch.setattr(SV, "build_system_view", lambda: types.SimpleNamespace(client_views=[]))
+    said = []
+    assert G.guard(dry_run=True, say=said.append) == 0
+    text = "\n".join(said)
+    assert "would seal" not in text
+    assert "not checked" in text and "/var/lib/timestd" in text
