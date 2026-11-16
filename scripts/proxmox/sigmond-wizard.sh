@@ -1193,13 +1193,18 @@ rac_register(){
 # These three stood further down, among the wizard's questions.  They sit
 # here so that `sigmond-setup --pair-vm` can use them: that subcommand runs
 # before the wizard waits for anything or asks anything.
-# The VM's address on the host-only /30 (PM .1, VM .2).  Needed because the
+# The VM's address on the host-only link (PM .1, VM .2).  Needed because the
 # repair below must NOT go through the guest agent — that is the thing that is
 # broken.  ssh over the private link is the independent path.
+# vmbr1 is a /29 since 2026-11 (room for a radiod-only VM at .3) and a /30 on
+# hosts installed before: read vmbr1 first, either size.  A /29 elsewhere is
+# never taken -- the CLAT holds 192.0.0.1/29 on every IPv6-only station.
 mgmt_vm_ip() {
     [ -n "${SIGMOND_MGMT_VM:-}" ] && { printf '%s\n' "${SIGMOND_MGMT_VM}"; return; }
     local a
-    a=$(ip -4 -o addr show 2>/dev/null \
+    a=$(ip -4 -o addr show dev vmbr1 2>/dev/null \
+        | awk '$4 ~ /\/(29|30)$/ {split($4,p,"/"); print p[1]; exit}')
+    [ -n "$a" ] || a=$(ip -4 -o addr show 2>/dev/null \
         | awk '$4 ~ /\/30$/ {split($4,p,"/"); print p[1]; exit}')
     if [ -n "$a" ]; then
         awk -v ip="$a" 'BEGIN{n=split(ip,o,"."); printf "%s.%s.%s.%d\n",o[1],o[2],o[3],o[4]+1}'
@@ -2227,14 +2232,15 @@ rac_pair_locked(){
         RAC_PAIR_FAIL="could not install the remote-access files on this host (the switch or its units)"
         return 1
     fi
-    # The private link is vmbr1's /30: this host holds its first address and
-    # the decoder VM the next one.  Read that bridge first.  A host can carry
-    # another /30 (a WireGuard link, a point-to-point uplink) and `ip` may list
-    # it first; mgmt_vm_ip reads "the first /30 on this host" and would then
-    # name a machine that is not the VM.  So the VM's address follows from the
-    # bridge's here, unless SIGMOND_MGMT_VM names it.  Only a host whose vmbr1
-    # carries no /30 falls back to the first /30 it has, and to mgmt_vm_ip.
-    pm=$(ip -4 -o addr show dev vmbr1 2>/dev/null | awk '$4 ~ /\/30$/ {split($4,p,"/"); print p[1]; exit}')
+    # The private link is vmbr1's /29 (a /30 on hosts installed before
+    # 2026-11): this host holds its first address and the decoder VM the next
+    # one.  Read that bridge first.  A host can carry another /30 (a WireGuard
+    # link, a point-to-point uplink) and `ip` may list it first; "the first /30
+    # on this host" would then name a machine that is not the VM.  So the VM's
+    # address follows from the bridge's here, unless SIGMOND_MGMT_VM names it.
+    # Only a host whose vmbr1 carries neither falls back to the first /30 it
+    # has, and to mgmt_vm_ip.  Never a /29 off vmbr1: the CLAT's is one.
+    pm=$(ip -4 -o addr show dev vmbr1 2>/dev/null | awk '$4 ~ /\/(29|30)$/ {split($4,p,"/"); print p[1]; exit}')
     if [ -n "$pm" ] && [ -z "${SIGMOND_MGMT_VM:-}" ]; then
         vm=$(awk -v ip="$pm" 'BEGIN{n=split(ip,o,"."); printf "%s.%s.%s.%d\n",o[1],o[2],o[3],o[4]+1}')
     else
@@ -3668,7 +3674,7 @@ uplink_probe() {
     if [ -z "$(ip -o addr show scope global 2>/dev/null | grep -v ' lo ' | head -1)" ]; then
         echo "link: no interface has a global address"; return 1
     fi
-    # ⚡ AN ADDRESS IS NOT A ROUTE.  vmbr1 is the host-only /30 to the decoder
+    # ⚡ AN ADDRESS IS NOT A ROUTE.  vmbr1 is the host-only /29 to the decoder
     # VM and always carries a global address, so an address check alone passes
     # on a station with no uplink at all.  The default route is what separates
     # "has an address" from "can leave the building".
@@ -4512,7 +4518,8 @@ lan_trust_record
 # ⛔ Tell the VM which network the SITE is on.  site-timing discovers a LAN
 # stratum-1 (T4) and a GNSS VTEC stream (:9000) by scanning the VM's own
 # kernel route -- but since v3.50 the VM sits on the host-only 10.99.0.0/30
-# behind this host, so it scanned four addresses holding nothing but us.
+# (a /29 since 2026-11) behind this host, so it scanned a handful of
+# addresses holding nothing but us.
 # AC0G-ND (v3.67, 2026-10-05) came up with NEITHER its LAN stratum-1 nor its
 # VTEC box although both answered on 192.168.8.0/24.  Only this host sees
 # the site LAN; write it where site-timing (and every rerun of it) can read it.
@@ -5308,8 +5315,8 @@ rac_install_relays(){
 # ⛔ THE GUEST AGENT IS NOT ON THE HOT PATH.  It used to be: this script asked
 # `qm agent <vmid> network-get-interfaces` on EVERY accepted connection, "so
 # the relay keeps working when DHCP moves the VM".  Since v3.44 DHCP cannot
-# move the VM -- it sits on a host-only /30 at a fixed address, and the PM is
-# the other end of that /30.
+# move the VM -- it sits on the host-only vmbr1 (a /29 since 2026-11, a /30
+# before) at a fixed address, and the PM holds that link's first address.
 #
 # Meanwhile the cost of asking is not zero, it is the agent's TIMEOUT.  On
 # AI6VN (v3.53, 2026-09-24) the guest agent was running inside the VM with its
@@ -5333,21 +5340,35 @@ vmid = os.environ.get("SIGMOND_VMID", "120")
 ips = []
 
 def _mgmt_peer():
-    """The other end of the host-only /30 the decoder VM lives on.
+    """The decoder VM's address on the host-only link it lives on.
 
-    Derived, not hardcoded: read the PM's own address on a /30 and flip the
-    host bit.  10.99.0.1 -> 10.99.0.2.  Returns None if this PM has no /30,
+    Derived, not hardcoded.  vmbr1 is a /29 since 2026-11 (host .1, decoder
+    VM .2, a radiod-only VM .3) and a /30 on hosts installed before.  Read
+    vmbr1 first: on a /29 whose first address is ours the VM is the next one;
+    on a /30 it is the other usable address.  Only if vmbr1 gives nothing, any
+    /30 on this host, flipped the same way.  Returns None when none fits,
     which is exactly the pre-v3.44 case that still needs the agent.
+
+    A /29 counts ONLY on vmbr1: the CLAT holds 192.0.0.1/29 (RFC 7335) on
+    every IPv6-only station, and its "peer" is nobody.  AI6VN-PM 2026-11-01:
+    with vmbr1 moved to a /29 the old /30-only match returned None and every
+    RAC web connection fell back to `qm agent` / `qm config`, holding the
+    host's CPUs 10-11 at 100 %.
     """
     try:
         out = subprocess.run(["ip", "-4", "-o", "addr", "show"],
                              capture_output=True, text=True, timeout=5).stdout
-        for m in re.finditer(r'inet (\d+\.\d+\.\d+\.\d+)/30\b', out):
-            a = struct.unpack("!I", socket.inet_aton(m.group(1)))[0]
-            # /30: .0 network, .1 and .2 usable, .3 broadcast.  We are one of
-            # the two usable ones; the VM is the other.
-            peer = (a & 0xFFFFFFFC) | (3 - (a & 3))
-            if (a & 3) in (1, 2):
+        found = re.findall(r'^\d+:\s+(\S+)\s+inet (\d+\.\d+\.\d+\.\d+)/(\d+)\b', out, re.M)
+        for dev, ip, plen in [f for f in found if f[0] == "vmbr1"] + \
+                             [f for f in found if f[0] != "vmbr1" and f[2] == "30"]:
+            a = struct.unpack("!I", socket.inet_aton(ip))[0]
+            if plen == "29" and (a & 7) == 1:
+                # /29: .0 network, we are .1, the decoder VM is .2.
+                return socket.inet_ntoa(struct.pack("!I", (a & 0xFFFFFFF8) | 2))
+            if plen == "30" and (a & 3) in (1, 2):
+                # /30: .0 network, .1 and .2 usable, .3 broadcast.  We are
+                # one of the two usable ones; the VM is the other.
+                peer = (a & 0xFFFFFFFC) | (3 - (a & 3))
                 return socket.inet_ntoa(struct.pack("!I", peer))
     except Exception:
         pass

@@ -431,7 +431,7 @@ VM4RELAY_GUARD = ("-A SIGMOND-VM4F -m conntrack --ctstate RELATED,ESTABLISHED -j
                   "-A SIGMOND-VM4F -m conntrack --ctstate DNAT -j RETURN",
                   "-A SIGMOND-VM4F -j DROP")
 NO_VM_ADDRESS = ("cannot read the VM's address: /etc/network/interfaces has no vmbr1 stanza "
-                 "whose address is the first host of a /30")
+                 "whose address is the first host of a /29 or /30")
 VM4RELAY_UNITS = ("/etc/systemd/system/sigmond-vm4relay.service",
                   "/etc/systemd/system/sigmond-vm4relay.timer")
 # The five rules firstboot wrote before v3.72 #23: no interface, no source.
@@ -649,7 +649,7 @@ def vm6proxy_step(root: Path, *, run, script_changed: bool = False) -> str:
         return (f"refused: {VM6PROXY} on this host predates the local-networks-only "
                 f"restriction (no {VM6PROXY_FILTER} line); running it could open the VM's ports, "
                 f"ssh on 2222 included, to the IPv6 internet")
-    # The VM is the vmbr1 /30 peer.  Never an address read from DNAT rules: on
+    # The VM is the vmbr1 peer.  Never an address read from DNAT rules: on
     # a host without the private link those are the operator's own.
     vm = _vm_from_interfaces(root)
     if vm is None:
@@ -734,10 +734,12 @@ def _vm4relay_old_lines(root: Path, vm: str) -> int:
 
 
 def _vm_from_interfaces(root: Path) -> Optional[str]:
-    """The VM's address from the vmbr1 /30 in /etc/network/interfaces: the
-    host holds the /30's first address, the VM the second.  None when the
-    file, the stanza or that address cannot be read, or the host's address
-    is not the first of its /30: the caller refuses then, never guesses."""
+    """The VM's address from the vmbr1 stanza in /etc/network/interfaces: a
+    /29 since 2026-11 (room for a radiod-only VM at .3), a /30 on hosts
+    installed before.  The host holds the link's first address, the decoder
+    VM the second.  None when the file, the stanza or that address cannot be
+    read, the prefix is neither, or the host's address is not the first of
+    its network: the caller refuses then, never guesses."""
     try:
         text = _under(root, "/etc/network/interfaces").read_text(errors="replace")
     except OSError:
@@ -753,7 +755,7 @@ def _vm_from_interfaces(root: Path) -> Optional[str]:
         host = ipaddress.IPv4Interface(a.group(1))
     except ValueError:
         return None
-    if host.network.prefixlen != 30 or int(host.ip) != int(host.network.network_address) + 1:
+    if host.network.prefixlen not in (29, 30) or int(host.ip) != int(host.network.network_address) + 1:
         return None
     return str(host.ip + 1)
 
@@ -789,7 +791,7 @@ def vm4relay_step(root: Path, *, run, script_changed: bool = False) -> str:
         return "skipped: no sigmond-vm4relay on this host (this release does not carry it)"
     if _no_private_link(root):
         return f"skipped: no private link to the VM ({NO_PRIVATE_LINK})"
-    # The VM is the vmbr1 /30 peer, never an address read from DNAT rules.
+    # The VM is the vmbr1 peer, never an address read from DNAT rules.
     vm = _vm_from_interfaces(root)
     if vm is None:
         return f"refused: {NO_VM_ADDRESS}"

@@ -22,6 +22,16 @@ The full DASI2 install is **two phases**:
    (`REBOOT_REQUIRED=0`) and skips the disruptive host reboot — only a
    one-time VM power-cycle is needed to bind the passthrough.
 
+**Cores kept for the host: `HOST_RESERVE_PAIRS`.**  Both phases take it
+from the environment, else from `HOST_RESERVE_PAIRS=` in
+`/etc/sigmond/host-layout.env`, else 0 when the host records the
+radiod-only role (`/etc/sigmond-appliance/station-role`), else 1.  Only a
+chosen value is saved, never the bare default.  Phase 1 normally runs
+before the setup wizard records the role, so on a radiod-only host re-run
+the layout after the wizard: `bash scripts/proxmox/host-setup.sh
+--skip-rac` on the host (reboot when it asks), then `bootstrap.sh` in the
+VM to bind it.  See `docs/operator/radiod-only.md`.
+
 `bootstrap.sh` also still works standalone on a legacy single-phase
 install (fresh Debian VM, host never prepared): it applies the host base
 itself and reboots the host mid-flow, resuming automatically.

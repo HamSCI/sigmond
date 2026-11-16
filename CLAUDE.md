@@ -97,6 +97,16 @@ this shapes the CPU strategy in ways not visible from inside the guest:
   `LOCAL_RADIOD_COUNT=N` for a host with multiple local RX888 triplets;
   each gets its own sibling pair. Non-SMT / asymmetric hosts still fall
   back to manual config (`docs/proxmox/wsprdaemon-proxmox-cpu-clock-tuning.md`).
+- **`HOST_RESERVE_PAIRS`** sets how many physical cores the host keeps
+  for itself: the env value, else the one saved in
+  `/etc/sigmond/host-layout.env`, else 0 when the host records the
+  radiod-only role (`/etc/sigmond-appliance/station-role`), else 1
+  (`choose_host_reserve_pairs` in `scripts/proxmox/radiod-count.sh`).
+  The layout is first computed before the wizard records the role, so on
+  a radiod-only host re-run it afterwards:
+  `bash scripts/proxmox/host-setup.sh --skip-rac` on the host, then
+  `scripts/proxmox/bootstrap.sh` in the VM to bind it
+  (`docs/operator/radiod-only.md`).
 
 Verify on a host: `cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list`
 (the real pairing), `qm config <VMID> | grep hookscript`, and the live

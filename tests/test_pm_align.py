@@ -3052,7 +3052,8 @@ def test_an_unreadable_filter_table_fails_and_installs_nothing(tmp_path):
     None,                                                                 # no file
     "auto vmbr1\n",                                                       # no stanza
     "auto vmbr1\niface vmbr1 inet static\n    bridge-ports none\n",      # no address
-    "auto vmbr1\niface vmbr1 inet static\n    address 10.99.0.1/24\n",   # not a /30
+    "auto vmbr1\niface vmbr1 inet static\n    address 10.99.0.1/24\n",   # not a /29 or /30
+    "auto vmbr1\niface vmbr1 inet static\n    address 10.99.0.3/29\n",   # host is not .1
     "auto vmbr1\niface vmbr1 inet static\n    address 10.99.0.2/30\n",   # host is not .1
     "auto vmbr1\niface vmbr1 inet static\n    address 10.99.0.300/30\n", # not an address
     # The address belongs to the NEXT stanza, not vmbr1's.
@@ -3079,6 +3080,15 @@ def test_both_relays_refuse_rather_than_guess_the_vm(tmp_path, ifaces):
     assert out6.startswith("refused") and "VM's address" in out6, out6
     assert _vm4_installs(calls) == [] and _vm6_installs(calls) == []
     assert pm_align._vm_from_interfaces(tmp_path) is None
+
+
+def test_the_vm_address_follows_the_29(tmp_path):
+    # vmbr1 is a /29 since 2026-11: host .1, decoder VM .2, a radiod-only VM .3.
+    d = tmp_path / "etc/network"
+    d.mkdir(parents=True)
+    (d / "interfaces").write_text("auto vmbr1\niface vmbr1 inet static\n    address 10.99.0.1/29\n"
+                                  "    bridge-ports none\n")
+    assert pm_align._vm_from_interfaces(tmp_path) == "10.99.0.2"
 
 
 def test_the_vm_address_follows_the_30(tmp_path):
