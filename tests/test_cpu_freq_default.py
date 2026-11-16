@@ -152,6 +152,59 @@ class Wiring(unittest.TestCase):
         self.assertIn("'cpu-freq',", src[j:src.index("\ndef ", j + 10)])
 
 
+
+class RadiodCoresBeforeTheirDropIns(unittest.TestCase):
+    """`smd apply` runs the clock policy before it reserves radiod's cores:
+    with no radiod CPUAffinity yet, every CPU got the other-CPU cap and
+    smd-cpu-freq.service kept later applies from fixing it (VK5ARG,
+    2026-11-14).  The affinity plan is the fallback."""
+
+    def _plan(self, radiod):
+        return mock.Mock(radiod=radiod)
+
+    def test_live_cpu_affinity_wins(self):
+        with mock.patch.object(smd, "_get_radiod_cpus_by_unit",
+                               return_value={"radiod@a.service": {14, 15}}), \
+             mock.patch("sigmond.cpu.compute_affinity_plan") as plan:
+            got, src = smd._radiod_cpus_for_clock_policy({"cpu_affinity": {}})
+        self.assertEqual(got, {"radiod@a.service": {14, 15}})
+        self.assertEqual(src, "CPUAffinity")
+        plan.assert_not_called()
+
+    def test_falls_back_to_the_affinity_plan(self):
+        with mock.patch.object(smd, "_get_radiod_cpus_by_unit", return_value={}), \
+             mock.patch("sigmond.cpu.compute_affinity_plan",
+                        return_value=self._plan({"radiod@a.service": {14, 15}})) as plan:
+            got, src = smd._radiod_cpus_for_clock_policy({"cpu_affinity": {"x": 1}})
+        self.assertEqual(got, {"radiod@a.service": {14, 15}})
+        self.assertIn("affinity plan", src)
+        plan.assert_called_once_with({"x": 1})
+
+    def test_no_radiod_anywhere_is_empty(self):
+        with mock.patch.object(smd, "_get_radiod_cpus_by_unit", return_value={}), \
+             mock.patch("sigmond.cpu.compute_affinity_plan",
+                        return_value=self._plan({})):
+            self.assertEqual(smd._radiod_cpus_for_clock_policy({}), ({}, ""))
+
+    def test_a_failing_plan_is_empty_not_a_crash(self):
+        with mock.patch.object(smd, "_get_radiod_cpus_by_unit", return_value={}), \
+             mock.patch("sigmond.cpu.compute_affinity_plan", side_effect=OSError("no sysfs")):
+            self.assertEqual(smd._radiod_cpus_for_clock_policy({}), ({}, ""))
+
+    def test_planned_cores_become_the_fast_set(self):
+        cores = [{2 * i, 2 * i + 1} for i in range(8)]
+        with mock.patch.object(smd, "_get_physical_cores", return_value=cores):
+            clock = smd._clock_plan({"cpu_freq": {}}, {"radiod@a.service": {14, 15}})
+        self.assertEqual(set(clock.fast_cpus), {14, 15})
+
+    def test_cmd_uses_the_fallback(self):
+        src = (REPO / "bin" / "smd").read_text()
+        i = src.index("def cmd_diag_cpu_freq(")
+        body = src[i:src.index("\ndef ", i + 10)]
+        self.assertIn("_radiod_cpus_for_clock_policy(topology)", body)
+        self.assertNotIn("radiod_by_unit = _get_radiod_cpus_by_unit()", body)
+
+
 if __name__ == "__main__":
     unittest.main()
 
