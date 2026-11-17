@@ -2962,13 +2962,16 @@ station_role_vm_default
 
 
 # uploads_toml — the [uploads] block a FRESH install writes: the site sink
-# switch starts `off` (stored as the legacy discard) until the operator checks
-# the station and runs `smd sink upload` (tasks/plan-sink-control.md §10.3
-# item 2).  A configured host prints nothing; `smd config profile-install`
-# then keeps whatever block the station already carries.
+# switch starts at `upload`, so a new station's spots and noise reach
+# wsprdaemon.org from its first cycle.  Starting at `off` (the old §10.3 item 2
+# default) left W7WKR/2 silent for 8 days after its 2026-11-09 install because
+# nobody ran `smd sink upload` afterwards.  An operator who wants a quiet
+# bench station runs `smd sink off`.  A configured host prints nothing;
+# `smd config profile-install` then keeps whatever block the station already
+# carries.
 uploads_toml(){
     [ -e "$CONF_MARK" ] && return 0
-    printf '\n[uploads]\nenabled = false\nmode    = "discard"\nreason  = "new station: the site sink switch stays off until someone runs smd sink upload"\n'
+    printf '\n[uploads]\nenabled = true\nmode    = "upload"\nreason  = "new station: uploads on from install"\n'
 }
 
 # ── prompts ─────────────────────────────────────────────────────────────────
@@ -5731,9 +5734,9 @@ HOSTIP=$(ip -4 -o addr show vmbr0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 |
 [ -n "$HOSTIP" ] || HOSTIP=$(hostname -I 2>/dev/null | tr ' ' '\n' \
     | grep -vE '^(10\.99\.0\.|127\.|192\.0\.0\.|fe80:)' | head -1)
 SINK_NOTE=""
-[ -n "${UPLOADS_TOML:-}" ] && SINK_NOTE=" Site sink switch: off — the station records and decodes but sends
-            no data.  Check reception and
-            identity, then run in the VM: smd sink upload"
+[ -n "${UPLOADS_TOML:-}" ] && SINK_NOTE=" Site sink switch: upload — spots and noise go to wsprdaemon.org
+            from the first cycle.  To keep this
+            station quiet, run in the VM: smd sink off"
 # A radiod-only station uploads nothing, so the sink note does not apply.
 ROLE_NOTE=""
 if [ "${STATION_ROLE:-full}" = radiod-only ]; then

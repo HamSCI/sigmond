@@ -122,7 +122,7 @@ answer to go and correct. A real station's reporter ID is `CALL` or
 
 **How to confirm:** go to [wsprnet.org](https://wsprnet.org), open the
 **Database** tab, and search for your reporter ID in the *Reporter* field. Rows
-should appear about fifteen minutes after you run `smd sink upload`
+should appear about fifteen minutes after the install finishes (or after `smd sink upload`, on a station whose switch was off)
 ([INSTALL.md §9](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#9-fifteen-minutes-later--check-its-alive)).
 That command refuses while GRAPE or the magnetometer packages a day (about
 01:00 to 05:00 UTC); run it again when that finishes.
