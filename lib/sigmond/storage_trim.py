@@ -93,6 +93,10 @@ class RetentionTooShort(ValueError):
 #                 airframes.io where the operator enables it.  The sink
 #                 keeps a local archive: 7 days at ~14k rows/day bounds
 #                 it while covering a week of propagation lookback.
+#   codar.spots — codar-sounder's additive per-peak rows (CONTRACT §17).
+#                 No hs-uploader transport reads them; CODAR reaches wd30
+#                 as sigmondb.capture/arrival rows instead.  7 days at
+#                 ~6k rows/day bounds them (AB4EJ held 31k from 5 days).
 #   timestd.events — no external consumer wired today; the sink is the
 #                 archive.  Operators choose how long to keep before
 #                 truncating.
@@ -102,6 +106,7 @@ _DEFAULT_RETENTION_MINUTES: Dict[Tuple[str, str], int] = {
     ("wspr", "noise"):  24 * 60,
     ("superdarn", "detections"):  30 * 24 * 60,
     ("hfdl", "spots"):  7 * 24 * 60,
+    ("codar", "spots"):  7 * 24 * 60,
 }
 
 _ENV_OVERRIDES: Dict[Tuple[str, str], str] = {
@@ -110,6 +115,7 @@ _ENV_OVERRIDES: Dict[Tuple[str, str], str] = {
     ("wspr", "noise"):  "WSPR_RETENTION_MIN",
     ("superdarn", "detections"):  "SUPERDARN_RETENTION_MIN",
     ("hfdl", "spots"):  "HFDL_RETENTION_MIN",
+    ("codar", "spots"):  "CODAR_RETENTION_MIN",
 }
 
 

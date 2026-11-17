@@ -488,10 +488,15 @@ environment variable on the trim unit overrides it:
 | `wspr.spots`, `wspr.noise` | 24 hours | `WSPR_RETENTION_MIN` |
 | `superdarn.detections` | 30 days | `SUPERDARN_RETENTION_MIN` |
 | `hfdl.spots` | 7 days | `HFDL_RETENTION_MIN` |
+| `codar.spots` | 7 days | `CODAR_RETENTION_MIN` |
 
 `hfdl.spots` goes nowhere: hfdl-recorder writes its decodes there for local use,
 and no uploader reads them, so the trim alone bounds that table. At AC0G-ND,
 about 14,000 rows a day arrive there.
+
+`codar.spots` goes nowhere either. codar-sounder writes one row per peak there
+beside the sigmondb rows that carry CODAR to wd30, and no uploader reads them.
+At AB4EJ, about 6,000 rows a day arrive there.
 
 **So: queue depth is not a delivery measure. Check the destination instead.**
 Your spots have one destination, wsprdaemon.org, which forwards copies to

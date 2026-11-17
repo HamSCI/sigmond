@@ -414,6 +414,8 @@ class TestPolicyFromEnv(unittest.TestCase):
             30 * 24 * 60 * 60)                # default 30 days
         self.assertEqual(by_target[("hfdl", "spots")].max_age_seconds,
                          7 * 24 * 60 * 60)    # default 7 days
+        self.assertEqual(by_target[("codar", "spots")].max_age_seconds,
+                         7 * 24 * 60 * 60)    # default 7 days
         for p in policies:
             self.assertEqual(p.source, "default")
 
@@ -459,6 +461,13 @@ class TestPolicyFromEnv(unittest.TestCase):
               == ("hfdl", "spots")][0]
         self.assertEqual(hf.max_age_seconds, 1440 * 60)
         self.assertEqual(hf.source, "env:HFDL_RETENTION_MIN")
+
+    def test_codar_env_override_applies(self):
+        policies = policy_from_env(env={"CODAR_RETENTION_MIN": "1440"})
+        cs = [p for p in policies if (p.target_db, p.target_table)
+              == ("codar", "spots")][0]
+        self.assertEqual(cs.max_age_seconds, 1440 * 60)
+        self.assertEqual(cs.source, "env:CODAR_RETENTION_MIN")
 
     def test_garbage_env_falls_back_to_default(self):
         policies = policy_from_env(env={"PSK_RETENTION_MIN": "tomorrow"})
