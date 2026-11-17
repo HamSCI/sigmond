@@ -3328,3 +3328,51 @@ def test_new_link_timers_are_enabled():
                for n in ("sigmond-link.timer", "sigmond-link-rac.timer", "sigmond-link.service")]
     enabled = pm_align.enable_new_relays(changes, run=_fake_run(calls))
     assert enabled == ["sigmond-link.timer", "sigmond-link-rac.timer"]
+
+
+# --- pm-memory (v3.93): every Beelink PM reserved 3-4 GB for its iGPU (N8UR,
+#     2026-11-17).  pm-align installs pm-memory and prints its one line; the
+#     resize stays `pm-memory --apply`, since pm-align never runs qm set. ----
+
+def _src_with_memory():
+    return pm_align.Sources(FB_FULL, pm_align.render_wizard(WIZ, 100),
+                            {"pm-memory.py": b"#pm-memory\n"})
+
+
+def test_desired_files_install_pm_memory():
+    paths = {f.path: f.mode for f in pm_align.desired_files(_src_with_memory(), 100)}
+    assert paths["/usr/local/sbin/pm-memory"] == 0o755
+
+
+def test_desired_files_omit_pm_memory_when_the_release_predates_it():
+    assert "/usr/local/sbin/pm-memory" not in {f.path for f in pm_align.desired_files(_src(), 100)}
+
+
+def test_memory_note_reads_pm_memory_brief(tmp_path):
+    p = tmp_path / "usr/local/sbin/pm-memory"
+    p.parent.mkdir(parents=True)
+    p.write_text("#\n")
+    calls = []
+    line = "memory: host 11879 MB, VM 9831 MB, iGPU 4096 MB; to do: BIOS UMA frame buffer to 64 MB"
+    note = pm_align._memory_note(tmp_path, _fake_run(calls, rc=1, stdout=line + "\n"))
+    assert note == line
+    assert calls == [["python3", str(p), "--brief"]]
+
+
+def test_memory_note_is_silent_without_pm_memory(tmp_path):
+    calls = []
+    assert pm_align._memory_note(tmp_path, _fake_run(calls)) is None
+    assert calls == []
+
+
+def test_memory_note_ignores_unexpected_output(tmp_path):
+    p = tmp_path / "usr/local/sbin/pm-memory"
+    p.parent.mkdir(parents=True)
+    p.write_text("#\n")
+    assert pm_align._memory_note(tmp_path, _fake_run([], rc=2, stdout="Traceback\n")) is None
+
+
+def test_pm_align_still_never_runs_qm_set():
+    assert any("qm set, of any kind" in line for line in pm_align.NOT_TOUCHED)
+    src = (REPO / "scripts" / "proxmox" / "pm-align.py").read_text()
+    assert '"qm", "set"' not in src and "'qm', 'set'" not in src

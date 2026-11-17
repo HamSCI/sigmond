@@ -53,12 +53,18 @@ _RELEASE_TAG = re.compile(r"^v\d+\.\d+(\.\d+)?$")
 RAW = "https://raw.githubusercontent.com/HamSCI"
 PROXMOX_FILES = ("pm-heartbeat.py", "pm-heartbeat.service", "pm-heartbeat.timer",
                  "pm-heartbeat-setup.sh", "pm-align.py",
-                 "pm-storage.py", "pm-storage.service", "pm-storage.timer")
+                 "pm-storage.py", "pm-storage.service", "pm-storage.timer",
+                 "pm-memory.py")
 # Files a release may predate: a 404 leaves them absent.  pm-storage arrived
 # with the storage ledger (v3.86); pm-heartbeat-setup.sh installs it from
 # its own directory whenever the release carries it.
 OPTIONAL_PROXMOX_FILES = ("pm-align.py", "pm-storage.py", "pm-storage.service",
-                          "pm-storage.timer")
+                          "pm-storage.timer", "pm-memory.py")
+# pm-memory (v3.93) reports the BIOS graphics carve-out and the VM's memory
+# against the install rule.  pm-align installs it and prints its one-line
+# finding; the resize stays the operator's act (`pm-memory --apply`), because
+# pm-align never changes the VM's configuration.
+PM_MEMORY = "/usr/local/sbin/pm-memory"
 RECORD = "/etc/sigmond-appliance/host-aligned.json"
 # The satellite guard's host side (plan 2026-11-14-satellite-host-guard): sigmond-link
 # and its units from sigmond at wizard_commit.  Optional: a 404 leaves them absent.
@@ -517,6 +523,9 @@ def desired_files(src: Sources, vmid: int, notes: Optional[list] = None) -> list
     for name, path, mode in PM_STORAGE_FILES:
         if name in src.proxmox:
             out.append(HostFile(path, src.proxmox[name], mode, f"scripts/proxmox/{name}"))
+    if "pm-memory.py" in src.proxmox:
+        out.append(HostFile(PM_MEMORY, src.proxmox["pm-memory.py"], 0o755,
+                            "scripts/proxmox/pm-memory.py"))
     if src.vm6proxy is not None:
         if vm6proxy_restricts(src.vm6proxy):
             out.append(HostFile(VM6PROXY, src.vm6proxy, 0o755, "sigmond-appliance/sigmond-vm6proxy"))
@@ -1723,6 +1732,21 @@ def _pairing_note(root: Path) -> str:
     return f"pairing ({PAIRING_RECORD}): {shown}"
 
 
+def _memory_note(root: Path, run) -> Optional[str]:
+    """pm-memory's one line (the BIOS carve-out and the VM's memory), or None
+    when pm-memory is not installed or says nothing.  Read-only: --brief
+    changes nothing.  A failure here never fails pm-align."""
+    path = _under(root, PM_MEMORY)
+    if not path.exists():
+        return None
+    try:
+        r = run(["python3", str(path), "--brief"], capture_output=True, text=True, timeout=60)
+    except Exception:                                          # noqa: BLE001
+        return None
+    line = (r.stdout or "").strip().splitlines()
+    return line[0] if line and line[0].startswith("memory:") else None
+
+
 def _print_status(root: Path) -> None:
     _say(_pairing_note(root))
     tpath = _under(root, TUNNEL_RESULT)
@@ -1808,8 +1832,12 @@ def main(argv=None, *, root: Path = Path("/"), urlopen: Callable = urllib.reques
         if _geteuid() != 0:
             _say("pm-align --apply: run as root")
             return 2
-        return _do_apply(changes, rel, root, run, now, src=src, vmid=vmid,
-                         heartbeat_opt_in=args.heartbeat, heartbeat_dest=args.heartbeat_dest)
+        rc = _do_apply(changes, rel, root, run, now, src=src, vmid=vmid,
+                       heartbeat_opt_in=args.heartbeat, heartbeat_dest=args.heartbeat_dest)
+        mem = _memory_note(root, run)
+        if mem:
+            _say(f"  {mem}")
+        return rc
     tunnel_msg, tunnel_pending = _dry_run_tunnel_note(root)
     _say(f"  {tunnel_msg}")
     _say(f"  {_dry_run_heartbeat_note(root)}")
@@ -1822,6 +1850,9 @@ def main(argv=None, *, root: Path = Path("/"), urlopen: Callable = urllib.reques
             _say(f"  pairing: skipped: {NO_PRIVATE_LINK}")
         else:
             _say(f"  pairing: --apply pairs the decoder VM with this host, or re-asserts it ({SETUP} {PAIR_FLAG})")
+    mem = _memory_note(root, run)
+    if mem:
+        _say(f"  {mem}")
     _say(f"  summary: {len(pending)} file(s) to refresh; re-run with --apply as root")
     return 1 if (pending or tunnel_pending or vm4_pending or vm6_pending) else 0
 
