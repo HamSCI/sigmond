@@ -42,6 +42,12 @@ _SBIN_DIRS = ("/usr/sbin", "/sbin")
 HEALTH = ar.MOUNT.parent / "archive-health.json"            # /var/lib/sigmond/archive-health.json
 MODPROBE_CONF = Path("/etc/modprobe.d/sigmond-archive-usb.conf")
 HEALTH_TIMER = "sigmond-archive-health.timer"
+# hf-timestd's archiver fills the drive.  Its install.sh links these, but a
+# station installed before 2026-11-13 never ran that again (updates only move
+# the checkout), so add links and enables them itself (AB4EJ, 2026-11-18).
+ARCHIVER_UNITS = ("timestd-archive.service", "timestd-archive.timer")
+ARCHIVER_SRC = Path("/opt/git/sigmond/hf-timestd/systemd")
+SYSTEMD_DIR = Path("/etc/systemd/system")
 # A replug restarts the automount that eject/remove stopped (review fix 2).
 UDEV_RULE = Path("/etc/udev/rules.d/90-sigmond-archive.rules")
 
@@ -362,6 +368,22 @@ def _after_mount(reading, dry: bool) -> None:
         _write_health(reading)
     _run(["systemctl", "mask", "--now", "smartmontools.service"], dry)
     _run(["systemctl", "enable", "--now", HEALTH_TIMER], dry)
+    _ensure_archiver(dry)
+
+
+def _ensure_archiver(dry: bool) -> None:
+    """Link hf-timestd's archiver units if missing, then enable its timer."""
+    linked = False
+    for unit in ARCHIVER_UNITS:
+        src = ARCHIVER_SRC / unit
+        if not os.path.lexists(SYSTEMD_DIR / unit) and src.exists():
+            linked = _run(["systemctl", "link", str(src)], dry) == 0 or linked
+    if linked:
+        _run(["systemctl", "daemon-reload"], dry)
+    if _run(["systemctl", "enable", "--now", ARCHIVER_UNITS[1]], dry) != 0:
+        warn("hf-timestd's archiver timer is not running, so nothing fills the drive "
+             "and raw days stay on the SSD; install hf-timestd, then run "
+             "`smd archive add --upgrade`")
 
 
 def _write_udev_rule(uuid: str) -> None:

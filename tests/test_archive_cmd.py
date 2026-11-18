@@ -68,6 +68,9 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(cmd, "HEALTH", tmp_path / "archive-health.json")
     monkeypatch.setattr(cmd, "UDEV_RULE", tmp_path / "udev" / "90-sigmond-archive.rules")
     monkeypatch.setattr(cmd, "_unit_active", lambda unit: False)
+    # No hf-timestd checkout unless a test makes one (_archiver_checkout).
+    monkeypatch.setattr(cmd, "ARCHIVER_SRC", tmp_path / "no-hf-timestd")
+    monkeypatch.setattr(cmd, "SYSTEMD_DIR", tmp_path / "no-etc-systemd")
     return state
 
 
@@ -83,7 +86,7 @@ def test_confirmed_add_formats_mounts_and_records(env):
     assert tools[:4] == ["wipefs", "sfdisk", "udevadm", "mkfs.ext4"]
     assert env.ran[3][-1] == "/dev/sdb1" and "SIGMOND-ARCHIVE" in env.ran[3]
     assert tools[4:] == ["blkid", "systemctl", "chattr", "mount", "systemctl", "systemctl",
-                         "udevadm", "umount", "systemctl", "systemctl"]
+                         "systemctl", "udevadm", "umount", "systemctl", "systemctl"]
     fstab = ar.FSTAB.read_text()
     assert "UUID=root / ext4 defaults 0 1" in fstab
     assert f"UUID=abcd-1234 {ar.MOUNT} ext4 nofail," in fstab
@@ -274,6 +277,47 @@ def test_add_masks_smartd_and_enables_health_timer(env, health):
     assert cmd.cmd_archive(_args()) == 0
     assert ["systemctl", "mask", "--now", "smartmontools.service"] in env.ran
     assert ["systemctl", "enable", "--now", "sigmond-archive-health.timer"] in env.ran
+
+
+def _archiver_checkout(tmp_path, monkeypatch, linked=False):
+    src = tmp_path / "hf-timestd" / "systemd"
+    src.mkdir(parents=True)
+    units = tmp_path / "etc-systemd"
+    units.mkdir()
+    for u in cmd.ARCHIVER_UNITS:
+        (src / u).write_text("[Unit]\n")
+        if linked:
+            (units / u).symlink_to(src / u)
+    monkeypatch.setattr(cmd, "ARCHIVER_SRC", src)
+    monkeypatch.setattr(cmd, "SYSTEMD_DIR", units)
+    return src
+
+
+def test_add_links_and_enables_the_archiver(env, health, tmp_path, monkeypatch):
+    # AB4EJ 2026-11-18: hf-timestd installed 11-10, the archiver timer came
+    # 11-13 and a git ff never links new units, so the drive stayed empty and
+    # raw days never left the SSD.
+    src = _archiver_checkout(tmp_path, monkeypatch)
+    assert cmd.cmd_archive(_args()) == 0
+    for u in cmd.ARCHIVER_UNITS:
+        assert ["systemctl", "link", str(src / u)] in env.ran
+    assert ["systemctl", "enable", "--now", "timestd-archive.timer"] in env.ran
+
+
+def test_add_leaves_linked_archiver_units_alone(env, health, tmp_path, monkeypatch):
+    _archiver_checkout(tmp_path, monkeypatch, linked=True)
+    assert cmd.cmd_archive(_args()) == 0
+    assert not [a for a in env.ran if a[:2] == ["systemctl", "link"]]
+    assert ["systemctl", "enable", "--now", "timestd-archive.timer"] in env.ran
+
+
+def test_upgrade_enables_the_archiver(env, health, tmp_path, monkeypatch):
+    src = _archiver_checkout(tmp_path, monkeypatch)
+    ar.CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    ar.CONFIG.write_text('uuid = "abcd-1234"\nmount = "%s"\nserial = "S6XN"\n' % ar.MOUNT)
+    assert cmd.cmd_archive(_args(upgrade=True, device=None, confirm=None)) == 0
+    assert ["systemctl", "link", str(src / "timestd-archive.timer")] in env.ran
+    assert ["systemctl", "enable", "--now", "timestd-archive.timer"] in env.ran
 
 
 def test_add_chattr_before_mount(env, health):

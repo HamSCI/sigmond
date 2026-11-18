@@ -1166,7 +1166,7 @@ def archive_line(env: Env) -> Optional[Line]:
         if st.get('failures'):
             warn.append(f'{st["failures"]} file(s) failed verification three times')
     elif state == 'mounted' and not st:
-        warn.append('the archiver has not run yet (hf-timestd installs timestd-archive.timer)')
+        warn.append(f'the archiver has not run yet; {RUN}smd archive add --upgrade (links and starts timestd-archive.timer)')
     for f in PRUNE_UNIT_FILES():
         try:
             if '--archive-root' in f.read_text():
