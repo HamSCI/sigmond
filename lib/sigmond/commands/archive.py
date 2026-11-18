@@ -15,6 +15,7 @@ import datetime as _dt
 import os
 import pwd
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -75,9 +76,17 @@ def _make_client_dirs(root) -> None:
         except KeyError:
             continue
         d = root / name
-        if not d.exists():
+        # The drive is removable media: a folder name on it may be a symlink
+        # made elsewhere.  Never follow one, and never chown off the drive.
+        try:
+            st = os.lstat(d)
+        except FileNotFoundError:
             os.mkdir(d, 0o755)
-        os.chown(d, pw.pw_uid, pw.pw_gid)
+            st = os.lstat(d)
+        if not stat.S_ISDIR(st.st_mode) or st.st_dev != os.lstat(root).st_dev:
+            warn(f"{d} is not a plain folder on the archive drive; left alone")
+            continue
+        os.chown(d, pw.pw_uid, pw.pw_gid, follow_symlinks=False)
         ok(f"{d} owned by {user}")
 
 

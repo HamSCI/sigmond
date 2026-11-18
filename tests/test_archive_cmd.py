@@ -183,6 +183,21 @@ def test_add_gives_the_archiver_its_own_folder(env, monkeypatch):
     assert d.is_dir() and d.stat().st_uid == os.getuid()
 
 
+def test_a_client_folder_that_is_a_symlink_is_left_alone(env, monkeypatch, tmp_path):
+    # A removable drive may carry timestd -> /somewhere made on another machine.
+    me = types.SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid())
+    monkeypatch.setattr(cmd.pwd, "getpwnam",
+                        lambda u: me if u == "timestd" else (_ for _ in ()).throw(KeyError(u)))
+    chowned = []
+    monkeypatch.setattr(cmd.os, "chown", lambda *a, **k: chowned.append(a))
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    ar.MOUNT.mkdir(parents=True, exist_ok=True)
+    (ar.MOUNT / "timestd").symlink_to(target)
+    cmd._make_client_dirs(ar.MOUNT)
+    assert chowned == []
+
+
 def test_add_without_the_client_user_makes_no_folder(env, monkeypatch):
     def nobody(u):
         raise KeyError(u)
