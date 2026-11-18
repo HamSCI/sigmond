@@ -6944,7 +6944,9 @@ _PRELOAD_MODULES = {
               # site_profile's locally_managed name check
               'sigmond.installer', 'sigmond.lan_order',
               # commands.uploader's routing helpers (uniform routing)
-              'sigmond.uniform_routing', 'sigmond.sink_state'),
+              'sigmond.uniform_routing', 'sigmond.sink_state',
+              # _align_own_units installs sigmond's units after the move
+              'sigmond.drift', 'sigmond.drift.units', 'sigmond.drift.model'),
 }
 
 
@@ -9440,7 +9442,31 @@ def _align_apply(args) -> int:
             steps = align_apply.apply_plan(rel, items, ctx)
 
         steps = steps + extra_steps
+        steps = steps + _align_own_units(Path(base) / 'sigmond')
         return _align_make_live(args, rel, steps, base=base, catalog=catalog, now=_now)
+
+
+def _align_own_units(sigmond_repo, *, unit_dir=Path('/etc/systemd/system'),
+                     run=None) -> list:
+    """Install sigmond's own units (install.sh does this once; updates never
+    rerun it), then daemon-reload when any landed.  Enables nothing."""
+    from sigmond import align_apply
+    from sigmond.drift import units as drift_units
+    run = run or subprocess.run
+    try:
+        wrote = drift_units.install_own_units(sigmond_repo, unit_dir, run=run)
+    except OSError as exc:
+        return [align_apply.Step('sigmond-units', 'failed',
+                                 f'could not install units: {exc}')]
+    if not wrote:
+        return []
+    r = _align_run(['systemctl', 'daemon-reload'], run=run, timeout=60,
+                   action='systemctl daemon-reload')
+    if r.returncode != 0:
+        return [align_apply.Step('sigmond-units', 'failed',
+                                 f'installed {", ".join(wrote)}; daemon-reload '
+                                 f'failed: {(r.stderr or "").strip()}')]
+    return [align_apply.Step('sigmond-units', 'installed', ', '.join(wrote))]
 
 
 _ALIGN_BLOCKING = ('failed', 'refused', 'skipped')
