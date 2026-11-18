@@ -375,6 +375,32 @@ def _synthesized_library_entries() -> dict[str, CatalogEntry]:
     }
 
 
+def _repo_key(url) -> str:
+    """A comparable repo URL: case, SSH-vs-HTTPS and a trailing / or .git
+    do not count (align_apply.normalize_repo, kept here so the catalog
+    imports nothing from align)."""
+    u = str(url or "").strip().lower()
+    if u.startswith("git@github.com:"):
+        u = "https://github.com/" + u[len("git@github.com:"):]
+    u = u.rstrip("/")
+    return u[:-len(".git")] if u.endswith(".git") else u
+
+
+def _drop_replaced_repo(block: dict, below: dict) -> dict:
+    """``block`` without its ``repo`` when the layer below lists that repo in
+    ``replaces``: a repo another one replaced is stale wherever it appears.
+    AC0G-B4, 2026-11-18: an old full-copy /etc/sigmond/catalog.toml still
+    named wa2n-code/ka9q-web, overrode the move to the fork, and align
+    refused the v3.92 pin.  A block that sets its own ``replaces`` keeps its
+    ``repo``: it speaks for itself."""
+    if "repo" not in block or "replaces" in block:
+        return block
+    replaced = {_repo_key(r) for r in (below.get("replaces") or ())}
+    if _repo_key(block["repo"]) not in replaced:
+        return block
+    return {k: v for k, v in block.items() if k != "repo"}
+
+
 def load_catalog(path: Optional[Path] = None) -> dict[str, CatalogEntry]:
     """Load the catalog, keyed by client name.
 
@@ -390,7 +416,9 @@ def load_catalog(path: Optional[Path] = None) -> dict[str, CatalogEntry]:
         3. ``/etc/sigmond/catalog.toml`` operator override.
 
     For each layer, only the keys present in the block override the
-    same keys from earlier layers — missing keys fall through.  New
+    same keys from earlier layers — missing keys fall through.  One
+    exception: a ``repo`` that the layer below lists in ``replaces`` is
+    dropped (``_drop_replaced_repo``).  New
     entries at any layer are added; entries at higher layers always
     win on the fields they declare.
 
@@ -429,7 +457,7 @@ def load_catalog(path: Optional[Path] = None) -> dict[str, CatalogEntry]:
     for layer_path in layer_paths:
         for name, block in _load_raw_blocks(layer_path).items():
             existing = merged.get(name) or {}
-            merged[name] = {**existing, **block}
+            merged[name] = {**existing, **_drop_replaced_repo(block, existing)}
 
     # Drop anything the deprecation list declares.  A stale deploy.toml
     # on disk (e.g. /opt/git/sigmond/wsprdaemon-client) is no longer

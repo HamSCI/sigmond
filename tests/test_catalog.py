@@ -210,6 +210,44 @@ class TestSparseOverlay:
         assert foo.requires == ('bar',)            # falls through
         assert foo.install_script == '/from/repo.sh'
 
+    def test_operator_repo_that_the_repo_catalog_replaces_is_ignored(
+            self, monkeypatch, tmp_path):
+        """AC0G-B4, 2026-11-18: an old full-copy /etc/sigmond/catalog.toml
+        still named wa2n-code/ka9q-web, so it overrode the repo file's move
+        to the fork; align never repointed the clone and refused the v3.92
+        pin "ancestry unknown".  A repo the lower layer lists in `replaces`
+        is stale by definition and must not win."""
+        repo = (
+            '[client.ka9q-web]\n'
+            'kind = "server"\n'
+            'repo = "https://github.com/mijahauan/ka9q-web"\n'
+            'replaces = ["https://github.com/wa2n-code/ka9q-web"]\n'
+        )
+        op = (
+            '[client.ka9q-web]\n'
+            'kind = "server"\n'
+            'description = "operator words"\n'
+            'repo = "https://github.com/wa2n-code/ka9q-web.git"\n'
+        )
+        entries = self._install_layers(monkeypatch, tmp_path,
+                                       repo_toml=repo, operator_toml=op)
+        web = entries['ka9q-web']
+        assert web.repo == 'https://github.com/mijahauan/ka9q-web'
+        assert web.replaces == ('https://github.com/wa2n-code/ka9q-web',)
+        assert web.description == 'operator words'      # the rest still overrides
+
+    def test_operator_repo_not_in_replaces_still_wins(
+            self, monkeypatch, tmp_path):
+        repo = (
+            '[client.ka9q-web]\n'
+            'repo = "https://github.com/mijahauan/ka9q-web"\n'
+            'replaces = ["https://github.com/wa2n-code/ka9q-web"]\n'
+        )
+        op = '[client.ka9q-web]\nrepo = "git@my-fork:ka9q-web"\n'
+        entries = self._install_layers(monkeypatch, tmp_path,
+                                       repo_toml=repo, operator_toml=op)
+        assert entries['ka9q-web'].repo == 'git@my-fork:ka9q-web'
+
     def test_repo_only_entry_propagates_through_operator_layer(
             self, monkeypatch, tmp_path):
         """The original bug: a new entry added to the repo catalog
