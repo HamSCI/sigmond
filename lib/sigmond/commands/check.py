@@ -69,6 +69,7 @@ CHECK_META = {
     'magnetometer page': ('platform.magnetometer-page', 'platform', 'gmag-webui'),
     'receivers':         ('receivers.instances', 'decode', None),
     'topology':          ('platform.topology', 'platform', None),
+    'drift':             ('platform.drift', 'platform', None),
 }
 FIX_SEP = '  ' + FIX
 
@@ -1490,6 +1491,75 @@ def topology_line(env: Env) -> Optional[Line]:
 
 
 # ---------------------------------------------------------------------------
+# The drift report (docs/superpowers/specs/2026-11-18-drift-report-design.md)
+# ---------------------------------------------------------------------------
+# The daily timer writes it; this line only reads it.  The spec's stale "!"
+# is this file's WAIT (as the archive line's WARN is).
+
+DRIFT_JSON = Path('/var/lib/sigmond/drift.json')
+DRIFT_STALE_S = 36 * 3600
+
+
+def _drift_age_s(doc: dict, path: Path, now: float) -> Optional[float]:
+    try:
+        made = datetime.strptime(str(doc.get('generated_at', '')),
+                                 '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+        return now - made.timestamp()
+    except ValueError:
+        try:
+            return now - path.stat().st_mtime
+        except OSError:
+            return None
+
+
+def _plural(n: int, word: str) -> str:
+    return f'{n} {word}{"" if n == 1 else "s"}'
+
+
+def drift_line(env: Env, path: Optional[Path] = None) -> Optional[Line]:
+    """FAIL when the latest drift report holds a fault (the first one, with
+    its fix); WAIT when the report is older than 36 h; ok with the counts
+    otherwise; -- before the timer has written one."""
+    label = 'drift'
+    path = Path(path or DRIFT_JSON)
+    if not path.exists():
+        return Line(ABSENT, label, f'no drift report yet.  {RUN}smd align (prints one now)')
+    doc = _json_file(path)
+    if not doc:
+        return Line(WAIT, label, f'{path} does not parse.  {RUN}smd align (prints a current report)')
+    items = [i for i in (doc.get('items') or []) if isinstance(i, dict)]
+    faults = [i for i in items if i.get('severity') == 'fault']
+    n_drift = len(items) - len(faults)
+    accepted = [a for a in (doc.get('accepted') or []) if isinstance(a, dict)]
+    n_test = sum(1 for a in accepted if a.get('kind') == 'test')
+    note = ''
+    if accepted:
+        note = f'; {len(accepted)} accepted ({_plural(n_test, "test")})'
+    reminders = doc.get('reminders') or []
+    if reminders:
+        note += f'; {_plural(len(reminders), "test")} to restore soon'
+    age = _drift_age_s(doc, path, env.now)
+    if age is not None and age > DRIFT_STALE_S:
+        return Line(WAIT, label, f'drift report stale (written {doc.get("generated_at") or "?"}, '
+                                 f'{int(age // 3600)} h ago); the daily timer has not run.  '
+                                 f'{RUN}smd align (prints a current report)')
+    if faults:
+        f = faults[0]
+        return Line(FAIL, label, f'{_plural(len(faults), "fault")}, {n_drift} drift{note}; '
+                                 f'{f.get("kind")} {f.get("subject")}: {f.get("detail")}.  '
+                                 f'{FIX}{f.get("fix")}')
+    if n_drift:
+        kinds: dict = {}
+        for i in items:
+            kinds[i.get('kind')] = kinds.get(i.get('kind'), 0) + 1
+        by = ', '.join(f'{n} {k}' for k, n in sorted(kinds.items(), key=lambda kv: str(kv[0])))
+        return Line(OK, label, f'no faults; {n_drift} drift ({by}){note}.  {RUN}smd align lists them')
+    rel = doc.get('release')
+    against = f' {doc.get("baseline")} {rel}' if rel else ' its release'
+    return Line(OK, label, f'nothing differs from{against}{note}')
+
+
+# ---------------------------------------------------------------------------
 # The lines, in the order the installer reads them (spec §2).  Each entry is
 # (label, function); a function returns a Line, or None for a line that does
 # not apply here at all.  Later tasks add their entries in place.
@@ -1506,6 +1576,7 @@ CHECKS: List[Tuple[str, Callable[[Env], Optional[Line]]]] = [
     ('archive', archive_line),
     ('services', services_line),
     ('topology', topology_line),
+    ('drift', drift_line),
     ('uploads', uploads_line),
     ('meteor scatter', meteor_line),
     *[(label, mag_page_line if label == MAG_PAGE else page_check(label, port, needs))

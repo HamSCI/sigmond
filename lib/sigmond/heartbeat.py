@@ -90,6 +90,11 @@ class ReaderUnavailable(Exception):
     """
 
 
+# The daily drift report (sigmond.drift); fresh for 36 h.
+DRIFT_JSON_PATH = "/var/lib/sigmond/drift.json"
+DRIFT_FRESH_S = 36 * 3600
+
+
 @dataclass
 class HeartbeatPaths:
     """Where the production readers look.  Every path is overridable so
@@ -101,6 +106,7 @@ class HeartbeatPaths:
     watermarks_db: str = WATERMARKS_DB
     hs_uploader_src: str = HS_UPLOADER_SRC
     spool_dir: str = SPOOL_DIR
+    drift_json: str = DRIFT_JSON_PATH
 
 
 # ---------------------------------------------------------------------------
@@ -867,6 +873,9 @@ def _read_manifest(paths: HeartbeatPaths) -> dict:
                          manifest_drift_text, sha_contained)
     from .provenance import component_versions
 
+    from_report = _manifest_from_drift_json(paths.drift_json)
+    if from_report is not None:
+        return from_report
     try:
         text = Path(paths.manifest_path).read_text()
     except OSError:
@@ -888,6 +897,63 @@ def _read_manifest(paths: HeartbeatPaths) -> dict:
         "blessed_source": paths.manifest_path,
         "drift": manifest_drift_text(live, text, ancestry=anc),
     }
+
+
+# drift report source-item fix -> manifest drift status.  A source item
+# carries no status of its own; its fix names it (sigmond.drift.source._MAP).
+def _source_status(fix: str) -> Optional[str]:
+    from .drift.source import _MAP
+    for status, (_sev, f) in _MAP.items():
+        if f == fix:
+            return {"forward": "moved", "refuse": "moved", "diverged": "moved",
+                    "ahead": "superset", "missing": "manifest_only",
+                    "stray": "live_only", "local": "moved"}.get(status)
+    return None
+
+
+def _short_or_none(s: str) -> Optional[str]:
+    s = (s or "").strip()
+    return None if s in ("", "none") else s
+
+
+def _manifest_from_drift_json(path: str, now: Optional[float] = None
+                              ) -> Optional[dict]:
+    """The manifest block from a fresh drift report's source items, or None
+    (absent, unreadable, older than 36 h, or no release record) so the
+    caller computes it as before.  Accepted items still count: accepting a
+    difference does not make the commits equal."""
+    try:
+        doc = json.loads(Path(path).read_text())
+        made = datetime.strptime(str(doc["generated_at"]),
+                                 "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    now = time.time() if now is None else now
+    if not isinstance(doc, dict) or now - made.timestamp() > DRIFT_FRESH_S:
+        return None
+    if doc.get("baseline") not in ("blessed", "candidate") or not doc.get("release"):
+        return None
+    entries = [(i.get("subject"), i.get("fix"), i.get("detail"))
+               for i in doc.get("items") or []
+               if isinstance(i, dict) and i.get("kind") == "source"]
+    for a in doc.get("accepted") or []:
+        key = str(a.get("key", "")) if isinstance(a, dict) else ""
+        if key.startswith("source:"):
+            entries.append((key[len("source:"):], a.get("fix"), ""))
+    drift = []
+    for comp, fix, detail in entries:
+        status = _source_status(str(fix or ""))
+        if not comp or comp == "baseline" or status is None:
+            continue
+        live, _sep, target = str(detail or "").partition(";")[0].partition(" -> ")
+        if live.strip() and live.strip() == target.strip():
+            continue  # a locally managed component sitting at its pin
+        drift.append({"component": comp, "status": status,
+                      "manifest": _short_or_none(target),
+                      "live": _short_or_none(live)})
+    return {"present": True,
+            "blessed_source": f"{path} ({doc['baseline']} {doc['release']})",
+            "drift": drift}
 
 
 def _read_authority(path: str = AUTHORITY_PATH,

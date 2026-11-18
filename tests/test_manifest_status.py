@@ -58,8 +58,10 @@ class ManifestStatusTest(unittest.TestCase):
         self.manifest = root / "manifest.txt"
         self.version = root / "version"
         self.version.write_text("v3.99 2026-10-27\n")
+        self.drift_json = root / "drift.json"
         self.paths = heartbeat.HeartbeatPaths(
-            base=str(self.base), manifest_path=str(self.manifest))
+            base=str(self.base), manifest_path=str(self.manifest),
+            drift_json=str(self.drift_json))
 
     def _write_manifest(self, shas):
         rows = "".join(f"    {n} {s[:12]}\n" for n, s in shas.items())
@@ -114,6 +116,68 @@ class ManifestStatusTest(unittest.TestCase):
         text = json.dumps(self._status())
         self.assertTrue(text.isascii())
         self.assertEqual(json.loads(text)["components"]["comp00"], "match")
+
+
+class DriftReportSourceTest(ManifestStatusTest):
+    """With a fresh drift.json the manifest block comes from its source
+    items; the keys every consumer reads stay the same."""
+
+    def _write_drift(self, items, accepted=(), age_s=3600, baseline="blessed"):
+        from datetime import datetime, timedelta, timezone
+        at = (datetime.now(timezone.utc) - timedelta(seconds=age_s)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+        self.drift_json.write_text(json.dumps({
+            "station": "S", "release": "v3.90", "baseline": baseline,
+            "generated_at": at, "counts": {}, "items": list(items),
+            "accepted": list(accepted), "reminders": []}))
+
+    @staticmethod
+    def _src(comp, detail, fix, sev="drift"):
+        return {"kind": "source", "severity": sev, "subject": comp, "detail": detail,
+                "fix": fix, "key": f"source:{comp}"}
+
+    def test_manifest_status_keys_unchanged(self):
+        self._write_manifest(self.shas)
+        before = self._status()
+        block_before = heartbeat._read_manifest(self.paths)
+        self._write_drift([
+            self._src("comp03", "aaaaaaa -> bbbbbbb", "smd align --apply"),
+            self._src("comp04", "ccccccc -> ddddddd",
+                      "smd align --apply --allow-rollback (or accept it)"),
+            self._src("ghost", "none -> eeeeeee",
+                      "smd align --apply --install-missing", sev="fault"),
+            self._src("baseline", "x", "smd align --apply"),
+            {"kind": "unit", "severity": "fault", "subject": "x.timer",
+             "detail": "d", "fix": "smd align --apply", "key": "unit:x.timer"}],
+            accepted=[{"key": "source:comp05", "kind": "test",
+                       "fix": "remove it or add it to the release"}])
+        st = self._status()
+        block = heartbeat._read_manifest(self.paths)
+        self.assertEqual(set(st), set(before))
+        self.assertEqual(set(block), set(block_before))
+        self.assertTrue(st["present"])
+        self.assertIn("blessed v3.90", st["source"])
+        comps = st["components"]
+        self.assertEqual(comps["comp03"], "moved")
+        self.assertEqual(comps["comp04"], "superset")
+        self.assertEqual(comps["comp05"], "live_only")
+        self.assertEqual(comps["ghost"], "manifest_only")
+        self.assertEqual(comps["comp00"], "match")
+        row = next(d for d in block["drift"] if d["component"] == "comp03")
+        self.assertEqual(set(row), {"component", "status", "manifest", "live"})
+        self.assertEqual((row["live"], row["manifest"]), ("aaaaaaa", "bbbbbbb"))
+        # the heartbeat mapper reads it the same way
+        mapped = heartbeat._map_manifest(block)
+        self.assertEqual(mapped["data"]["drift"], block["drift"])
+
+    def test_stale_or_baseline_none_report_is_ignored(self):
+        self._write_manifest(self.shas)
+        self._write_drift([self._src("comp03", "aaaaaaa -> bbbbbbb",
+                                     "smd align --apply")], age_s=37 * 3600)
+        self.assertEqual(self._status()["components"]["comp03"], "match")
+        self._write_drift([self._src("comp03", "aaaaaaa -> bbbbbbb",
+                                     "smd align --apply")], baseline="none")
+        self.assertEqual(self._status()["source"], str(self.manifest))
 
 
 class FetchedAtTest(unittest.TestCase):

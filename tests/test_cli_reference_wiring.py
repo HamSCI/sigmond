@@ -283,6 +283,8 @@ class AlignTests(unittest.TestCase):
                 mock.patch.object(smd, '_align_live_state',
                                   return_value=(dict(rel.components), {}, {}, {})), \
                 mock.patch.object(smd, '_align_print_restarts', return_value=0), \
+                mock.patch.object(smd, '_align_drift_report',
+                                  side_effect=_tac._empty_drift), \
                 mock.patch.object(smd, '_align_ancestry',
                                   return_value=lambda c, a, b: True), \
                 mock.patch('sigmond.catalog.load_catalog', return_value={}):

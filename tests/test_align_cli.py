@@ -35,6 +35,11 @@ REL = align.Release(tag="v3.53", manifest_text="", appliance_commit=None,
                                 "ka9q-radio": "401992c"})
 
 
+def _empty_drift(rel, plan, files, base):
+    from sigmond.drift.model import Report
+    return Report(station="test", release=None, baseline="none")
+
+
 def run(live, dirty=None, files=None, recorded="v3.36", release=REL, no_cost=True,
        origins=None, errors=None, **ns):
     args = argparse.Namespace(release=None, base="/opt/git/sigmond", no_cost=no_cost, **ns)
@@ -49,6 +54,9 @@ def run(live, dirty=None, files=None, recorded="v3.36", release=REL, no_cost=Tru
         mock.patch.object(smd, "_align_units_started_at", return_value=None),
         mock.patch.object(smd, "_align_head_moved_at", return_value=None),
         mock.patch.object(smd, "_align_radiod_built_at", return_value=None),
+        # The drift report reads the host (topology, units, decoders);
+        # tests/test_drift_build_report.py drives it with fakes.
+        mock.patch.object(smd, "_align_drift_report", side_effect=_empty_drift),
         mock.patch.object(smd, "_align_live_state",
                           return_value=(live, dirty or {}, origins or {}, errors or {})),
         (mock.patch("sigmond.align.image_file_drift", files) if callable(files) else

@@ -6364,6 +6364,39 @@ def cmd_fleet(args) -> int:
     return 1 if unhealthy else 0
 
 
+def _version_states() -> list:
+    """[(name, (lifecycle, policy))] for sigmond and every catalog
+    component, in `smd component list`'s order (sigmond first, then by
+    name).  Empty when the catalog cannot be read: `smd version` never
+    fails for want of it."""
+    try:
+        catalog = load_catalog()
+        from sigmond.topology import load_topology as _lib_load_topology
+        topo = _lib_load_topology(TOPOLOGY_PATH)
+    except Exception:
+        return []
+    try:
+        from sigmond.component_state import compute_state
+    except Exception:
+        compute_state = None
+    out = [('sigmond', ('self (smd)', 'latest'))]
+    for name in sorted(catalog):
+        try:
+            life, _color, policy = _component_lifecycle(
+                name, catalog[name], topo, compute_state)
+        except Exception:
+            life, policy = '?', '?'
+        life = life.split(' — ', 1)[0]
+        if life == '—':
+            life = '-'
+        out.append((name, (life, policy)))
+    return out
+
+
+COMPONENT_LIST_NOTE = ('smd component list now shows what smd version shows; '
+                       'use smd version (this form retires in v3.95)')
+
+
 def cmd_version(args) -> int:
     """What is actually installed here — image lineage plus live commits.
 
@@ -6414,6 +6447,15 @@ def cmd_version(args) -> int:
         # and test-update-v3.sh all capture this output and parse that
         # list.  --hashes prints it on a terminal too.
         detail_only=detail, standing=standing, image=image))
+    # What `smd component list` showed beside the commits (its lifecycle
+    # state and version-policy columns), in a block of its own after a
+    # blank line, so no reader of `components (live):` sees new fields.
+    states = _version_states()
+    if states:
+        print('\nlifecycle and version policy:')
+        print(f'    {"component":<20} {"lifecycle":<20} policy')
+        for name, (life, policy) in states:
+            print(f'    {name:<20} {life:<20} {policy}')
     # What `smd align` last recorded, after everything the image build and
     # `smd fleet` parse: a station on a release candidate says so here.
     try:
@@ -6946,7 +6988,9 @@ _PRELOAD_MODULES = {
               # commands.uploader's routing helpers (uniform routing)
               'sigmond.uniform_routing', 'sigmond.sink_state',
               # _align_own_units installs sigmond's units after the move
-              'sigmond.drift', 'sigmond.drift.units', 'sigmond.drift.model'),
+              'sigmond.drift', 'sigmond.drift.units', 'sigmond.drift.model',
+              # heartbeat._read_manifest reads drift.json's source items
+              'sigmond.drift.source'),
 }
 
 
@@ -9784,6 +9828,136 @@ def _align_missing_notes(plan, args) -> tuple:
     return out, skip
 
 
+def _align_drift_plan(plan, ahead, diverged, skip_missing) -> list:
+    """The dry run's plan as the drift report reads it: each `move` split
+    into forward / ahead / diverged by what the commit-distance lookups
+    found (no git here: the dry run never fetches, so a move with no
+    lookup reads forward), and the missing components --apply would skip
+    left out (the station never ran them)."""
+    import dataclasses
+    from sigmond import align
+    out = []
+    for it in plan:
+        if it.status == 'missing' and it.component in skip_missing:
+            continue
+        if it.status == 'move':
+            if it.component in ahead:
+                it = dataclasses.replace(it, status='ahead', note=align.AHEAD_NOTE)
+            elif it.component in diverged:
+                it = dataclasses.replace(it, status='diverged',
+                                         note=align.DIVERGED_NOTE)
+            else:
+                it = dataclasses.replace(it, status='forward')
+        out.append(it)
+    return out
+
+
+def _align_json_file(path) -> Optional[dict]:
+    """A JSON object from ``path``, or None when absent or unreadable."""
+    import json
+    try:
+        doc = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _align_drift_report(rel, plan, files, base):
+    """Build the drift report for the dry run.  Collectors that read live
+    state run here only, never during --apply's own steps; each runs
+    through run_collectors, so one that fails is one fault item."""
+    from sigmond import align_apply
+    from sigmond.drift import build_report as br
+    from sigmond.drift.source import baseline_of
+    release, baseline = baseline_of(_align_json_file(align_apply.ALIGNED_RECORD))
+    readers = br.station_readers(
+        plan=plan, release=release, baseline=baseline,
+        host_record=_align_json_file(
+            Path('/etc/sigmond-appliance/host-aligned.json')),
+        file_drift=files, manifest=dict(rel.components or {}),
+        base=Path(base))
+    return br.build(br.station_name(), readers=readers)
+
+
+def _align_print_drift(report) -> None:
+    from sigmond.drift.build_report import render_text
+    for line in render_text(report):
+        print(line)
+
+
+def _align_plan_json(plan) -> list:
+    return [{'component': it.component, 'status': it.status, 'live': it.live,
+             'target': it.target, 'note': it.note} for it in plan]
+
+
+def _align_json(args) -> int:
+    """`smd align --json`: the dry run, its text swallowed, then one JSON
+    document: the drift report (Report.to_json) plus the plan under
+    ``plan``.  The exit code is the dry run's."""
+    import io
+    import json
+    sink: dict = {}
+    args._drift_sink = sink
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = cmd_align(args)
+    if 'report' in sink:
+        doc = dict(sink['report'].to_json())
+        doc['plan'] = _align_plan_json(sink.get('plan') or [])
+    else:
+        lines = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
+        doc = {'error': lines[-1].strip() if lines else f'exit {rc}'}
+    print(json.dumps(doc, indent=2, ensure_ascii=True))
+    return rc
+
+
+def _align_accept(args) -> int:
+    """`smd align --accept KEY --reason TEXT [--test] [--until DATE]`:
+    record one drift exception in /etc/sigmond/drift-exceptions.toml."""
+    import datetime as _dt
+    import getpass
+    from sigmond.drift import exceptions as drift_exceptions
+    key = args.accept
+    reason = (getattr(args, 'reason', None) or '').strip()
+    if ':' not in key:
+        print(f'smd align --accept: {key!r} is no item key; give kind:subject '
+              f'as smd align prints it')
+        return 2
+    if not reason:
+        print('smd align --accept: --reason is required (say why the difference stays)')
+        return 2
+    until = None
+    raw_until = getattr(args, 'until', None)
+    if raw_until:
+        try:
+            until = _dt.date.fromisoformat(raw_until)
+        except ValueError:
+            print(f'smd align --accept: --until {raw_until!r} is not YYYY-MM-DD')
+            return 2
+    if _need_root('align --accept'):
+        return 1
+    by = os.environ.get('SUDO_USER') or getpass.getuser()
+    path = drift_exceptions.DEFAULT_PATH
+    try:
+        exc = drift_exceptions.accept(
+            path, key, reason=reason, by=by,
+            test=bool(getattr(args, 'test', False)), until=until,
+            now=_dt.datetime.now(_dt.timezone.utc))
+    except drift_exceptions.ExceptionsFileError as e:
+        print(f'smd align --accept: {e}')
+        return 1
+    except ValueError as e:
+        print(f'smd align --accept: {e}')
+        return 2
+    kind = 'temporary test' if exc.kind == 'test' else 'standing exception'
+    print(f'recorded in {path}: {exc.key} accepted as a {kind} by {exc.by}, '
+          f'{exc.start.isoformat()} to {exc.until.isoformat()}: {exc.reason}')
+    if exc.kind == 'test':
+        print('  the board reminds you the day before it ends; '
+              'restore baseline with smd align --apply')
+    return 0
+
+
 def cmd_align(args) -> int:
     """`smd align` — how far this station sits from the latest blessed release.
 
@@ -9815,6 +9989,22 @@ def cmd_align(args) -> int:
             or getattr(args, 'no_restart', False)):
         print('smd align: --allow-rollback, --max-bytes and --no-restart only apply with --apply')
         return 2
+    if getattr(args, 'accept', None):
+        return _align_accept(args)
+    if (getattr(args, 'test', False) or getattr(args, 'until', None)
+            or getattr(args, 'reason', None)):
+        print('smd align: --reason, --test and --until only apply with --accept ITEM')
+        return 2
+    if getattr(args, 'json', False) and (getattr(args, 'apply', False)
+                                         or getattr(args, 'verify', False)):
+        print('smd align: --json is for the dry run (not --apply or --verify)')
+        return 2
+    if getattr(args, 'report', False):
+        print('smd align --report: arrives with the daily drift timer; '
+              'use smd align --json for the report now')
+        return 2
+    if getattr(args, 'json', False) and getattr(args, '_drift_sink', None) is None:
+        return _align_json(args)
     if getattr(args, 'verify', False):
         return _align_verify(args)
     if getattr(args, 'apply', False):
@@ -9853,6 +10043,7 @@ def cmd_align(args) -> int:
     rate_limited = None       # first commit_distance error naming a rate limit
     ahead_components = set()  # 'move' items commit_distance found already
                                # ahead of the target — left, not moved
+    diverged_components = set()  # 'move' items commit_distance found diverged
     for it in plan:
         if it.status == 'current':
             line = f'{(it.live or "")[:8]:<8}              current'
@@ -9885,6 +10076,7 @@ def cmd_align(args) -> int:
                             phrase = f'behind by {ahead}'
                         elif ahead > 0 and behind > 0:
                             phrase = f'diverged ({ahead}/{behind})'
+                            diverged_components.add(it.component)
                         else:
                             phrase = 'no commit difference'
                         file_part = ('files ?' if nfiles is None
@@ -9954,6 +10146,14 @@ def cmd_align(args) -> int:
               f"could not be checked: {names}")
     print('  apply: re-run with --apply to align this station and restart what is stale '
           '(--no-restart leaves services alone)')
+    drift_plan = _align_drift_plan(plan, ahead_components, diverged_components,
+                                   skip_missing)
+    report = _align_drift_report(rel, drift_plan, files, base)
+    sink = getattr(args, '_drift_sink', None)
+    if sink is not None:
+        sink['report'], sink['plan'] = report, plan
+    else:
+        _align_print_drift(report)
     pending = (counts['move'] or counts['refuse'] or counts['missing'] or stale or unverified
                or stale_now)
     return 1 if pending else 0
@@ -18967,6 +19167,104 @@ def _fetched_at(repo_dir) -> str | None:
     return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(mtime))
 
 
+def _component_lifecycle(name, entry, topo, compute_state) -> tuple:
+    """(lifecycle label, ANSI colour, version policy) for one catalog
+    component: what `smd component list` and `smd version` show."""
+    comp = topo.components.get(name)
+    policy = (comp.version if comp else 'latest') or 'latest'
+
+    # Lifecycle state — three regimes:
+    #
+    #   library   ka9q-python and friends.  No systemd units, never
+    #             "running" — either importable from the venv or
+    #             not.  ComponentState's cloned/installed/active
+    #             chain doesn't apply; ask the catalog directly.
+    #
+    #   binary    Components whose deploy.toml declares only
+    #             templated units that no other client instantiates
+    #             (e.g. wspr-recorder, exec'd as a child by
+    #             wd-ka9q-record).  ComponentState would label
+    #             these "enabled, stopped"; in reality they're
+    #             pure command-line tools.  Show "binary,
+    #             on-PATH" / "binary, missing" so the operator
+    #             isn't told to start something there's no service
+    #             for.
+    #
+    #   service   The normal case — display_status drives the label.
+    kind = getattr(entry, 'kind', '')
+    lifecycle_label = '—'
+    lifecycle_color = ''
+
+    if kind == 'library':
+        # Importability depends on which Python interpreter looks —
+        # smd's own interpreter doesn't have client venvs' pip-
+        # installed packages, so find_spec() from here gives a
+        # false-negative on libraries that the running clients
+        # plainly use.  Just label "library" and let the operator
+        # judge by whether downstream clients work.
+        lifecycle_label = 'library'
+        lifecycle_color = '\033[32m'
+    elif _is_binary_only_component(entry):
+        on_path = shutil.which(entry.name) is not None
+        if on_path:
+            lifecycle_label = 'binary, on PATH'
+            lifecycle_color = '\033[32m'
+        else:
+            lifecycle_label = 'binary, missing'
+    elif kind in ('server', 'infra') and not getattr(entry, 'topology_alias', None):
+        # A server- or infra-kind component with NO topology_alias (e.g.
+        # ka9q-web, gpsdo-monitor, igmp-querier) runs as a single
+        # <name>.service that isn't in the topology, so compute_state
+        # can't map it and falls back to a misleading 'configured' /
+        # 'downloaded' even while the unit is enabled+running.  Read the
+        # unit state directly.
+        #
+        # Components WITH an alias (e.g. ka9q-radio, whose alias 'radiod'
+        # maps to the templated radiod@<instance>.service) ARE resolvable
+        # via the topology, so they must fall through to compute_state
+        # below — hardcoding <name>.service here would look for a
+        # nonexistent 'ka9q-radio.service' and wrongly report 'configured'
+        # even while radiod is running.
+        unit = f'{entry.name}.service'
+        # rac's DEPLOYED unit is the frpc tunnel wd-rac.service (managed by
+        # `smd admin rac`), not rac.service (the newer sigmond-rac
+        # packaging).  Prefer wd-rac.service when it's present so a running
+        # tunnel reads 'running' instead of a misleading 'configured'.
+        # (The VERDICT column still reflects whether the sigmond-rac repo
+        # is cloned — a separate git-state axis.)
+        if entry.name == 'rac' and 'wd-rac.service' in _run(
+                ['systemctl', 'list-unit-files', 'wd-rac.service'],
+                sudo=False).stdout:
+            unit = 'wd-rac.service'
+        active  = _run(['systemctl', 'is-active', '--quiet', unit],
+                       sudo=False).returncode == 0
+        enabled = _run(['systemctl', 'is-enabled', '--quiet', unit],
+                       sudo=False).returncode == 0
+        if active:
+            lifecycle_label = 'enabled, running' if enabled else 'running'
+            lifecycle_color = '\033[32m'
+        elif enabled:
+            lifecycle_label = 'enabled, stopped'
+            lifecycle_color = '\033[33m'
+        else:
+            lifecycle_label = 'configured'
+            lifecycle_color = '\033[33m'
+    elif compute_state is not None:
+        try:
+            state = compute_state(
+                name, topo,
+                alias=getattr(entry, 'topology_alias', None),
+            )
+            lifecycle_label = state.display_status
+            if state.active:
+                lifecycle_color = '\033[32m'
+            elif state.enabled or state.configured:
+                lifecycle_color = '\033[33m'
+        except Exception:
+            pass
+    return lifecycle_label, lifecycle_color, policy
+
+
 def _component_statuses(args, *, fetch: bool) -> list[dict]:
     """Build a status row per catalog component.
 
@@ -19006,98 +19304,8 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
         # do have a repo on disk and a version policy — surface them so the
         # operator sees git divergence and can target them with --update.
 
-        comp = topo.components.get(name)
-        policy = (comp.version if comp else 'latest') or 'latest'
-
-        # Lifecycle state — three regimes:
-        #
-        #   library   ka9q-python and friends.  No systemd units, never
-        #             "running" — either importable from the venv or
-        #             not.  ComponentState's cloned/installed/active
-        #             chain doesn't apply; ask the catalog directly.
-        #
-        #   binary    Components whose deploy.toml declares only
-        #             templated units that no other client instantiates
-        #             (e.g. wspr-recorder, exec'd as a child by
-        #             wd-ka9q-record).  ComponentState would label
-        #             these "enabled, stopped"; in reality they're
-        #             pure command-line tools.  Show "binary,
-        #             on-PATH" / "binary, missing" so the operator
-        #             isn't told to start something there's no service
-        #             for.
-        #
-        #   service   The normal case — display_status drives the label.
-        kind = getattr(entry, 'kind', '')
-        lifecycle_label = '—'
-        lifecycle_color = ''
-
-        if kind == 'library':
-            # Importability depends on which Python interpreter looks —
-            # smd's own interpreter doesn't have client venvs' pip-
-            # installed packages, so find_spec() from here gives a
-            # false-negative on libraries that the running clients
-            # plainly use.  Just label "library" and let the operator
-            # judge by whether downstream clients work.
-            lifecycle_label = 'library'
-            lifecycle_color = '\033[32m'
-        elif _is_binary_only_component(entry):
-            on_path = shutil.which(entry.name) is not None
-            if on_path:
-                lifecycle_label = 'binary, on PATH'
-                lifecycle_color = '\033[32m'
-            else:
-                lifecycle_label = 'binary, missing'
-        elif kind in ('server', 'infra') and not getattr(entry, 'topology_alias', None):
-            # A server- or infra-kind component with NO topology_alias (e.g.
-            # ka9q-web, gpsdo-monitor, igmp-querier) runs as a single
-            # <name>.service that isn't in the topology, so compute_state
-            # can't map it and falls back to a misleading 'configured' /
-            # 'downloaded' even while the unit is enabled+running.  Read the
-            # unit state directly.
-            #
-            # Components WITH an alias (e.g. ka9q-radio, whose alias 'radiod'
-            # maps to the templated radiod@<instance>.service) ARE resolvable
-            # via the topology, so they must fall through to compute_state
-            # below — hardcoding <name>.service here would look for a
-            # nonexistent 'ka9q-radio.service' and wrongly report 'configured'
-            # even while radiod is running.
-            unit = f'{entry.name}.service'
-            # rac's DEPLOYED unit is the frpc tunnel wd-rac.service (managed by
-            # `smd admin rac`), not rac.service (the newer sigmond-rac
-            # packaging).  Prefer wd-rac.service when it's present so a running
-            # tunnel reads 'running' instead of a misleading 'configured'.
-            # (The VERDICT column still reflects whether the sigmond-rac repo
-            # is cloned — a separate git-state axis.)
-            if entry.name == 'rac' and 'wd-rac.service' in _run(
-                    ['systemctl', 'list-unit-files', 'wd-rac.service'],
-                    sudo=False).stdout:
-                unit = 'wd-rac.service'
-            active  = _run(['systemctl', 'is-active', '--quiet', unit],
-                           sudo=False).returncode == 0
-            enabled = _run(['systemctl', 'is-enabled', '--quiet', unit],
-                           sudo=False).returncode == 0
-            if active:
-                lifecycle_label = 'enabled, running' if enabled else 'running'
-                lifecycle_color = '\033[32m'
-            elif enabled:
-                lifecycle_label = 'enabled, stopped'
-                lifecycle_color = '\033[33m'
-            else:
-                lifecycle_label = 'configured'
-                lifecycle_color = '\033[33m'
-        elif compute_state is not None:
-            try:
-                state = compute_state(
-                    name, topo,
-                    alias=getattr(entry, 'topology_alias', None),
-                )
-                lifecycle_label = state.display_status
-                if state.active:
-                    lifecycle_color = '\033[32m'
-                elif state.enabled or state.configured:
-                    lifecycle_color = '\033[33m'
-            except Exception:
-                pass
+        lifecycle_label, lifecycle_color, policy = _component_lifecycle(
+            name, entry, topo, compute_state)
 
         repo_dir = _resolve_repo_dir(name, entry.repo)
         if repo_dir is None:
@@ -31161,6 +31369,24 @@ def _build_parser() -> argparse.ArgumentParser:
                    help='stop fetching once this many bytes have been '
                         'transferred (plain integer, or a suffix like 500K, '
                         '20M, 1G; only with --apply)')
+    p.add_argument('--json', action='store_true',
+                   help='dry run only: print the drift report (and the plan '
+                        'under "plan") as one JSON document, nothing else')
+    p.add_argument('--report', action='store_true',
+                   help='what the daily drift timer runs (not yet: arrives '
+                        'with sigmond-drift.timer)')
+    p.add_argument('--accept', metavar='ITEM',
+                   help='accept one drift item by its key (kind:subject, as '
+                        'the report prints it) in '
+                        '/etc/sigmond/drift-exceptions.toml; needs --reason')
+    p.add_argument('--reason', metavar='TEXT',
+                   help='with --accept: why the difference stays (required)')
+    p.add_argument('--test', action='store_true',
+                   help='with --accept: a temporary test (default 7 days, at '
+                        'most 30); without it a standing exception (default '
+                        '30 days, at most 180)')
+    p.add_argument('--until', metavar='YYYY-MM-DD',
+                   help='with --accept: the last day the exception holds')
 
     p = sub.add_parser('version', aliases=['versions'],
                        help='what is actually installed (image lineage + live commits)')
@@ -33967,6 +34193,16 @@ def main() -> int:
         if cc is None:                      # bare `smd component` -> list
             p_c_list.parse_args([], namespace=args)
             cc = 'list'
+        if cc == 'list' and not (getattr(args, 'catalog', False)
+                                 or getattr(args, 'json', False)):
+            # The plain table retires: `smd version` answers "what does
+            # this station run" (drift-report spec, "One command per
+            # question").  --json stays for the snapshot and the TUI.
+            print(COMPONENT_LIST_NOTE)
+            print()
+            return cmd_version(argparse.Namespace(
+                base=None, hashes=False,
+                offline=bool(getattr(args, 'no_fetch', False))))
         if cc == 'list':
             # Read-only catalog view — synthesize the flags cmd_list
             # expects but that aren't on the `component list` parser.
