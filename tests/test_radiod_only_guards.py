@@ -212,7 +212,7 @@ def test_profile_install_on_radiod_only_drops_refused_components(
     comps = seen["components"].split(",")
     assert "ka9q-radio" in comps
     assert "wspr-recorder" not in comps
-    assert set(comps) <= {"ka9q-radio", "igmp-querier", "ka9q-web"}
+    assert set(comps) <= {"ka9q-radio", "igmp-querier", "ka9q-web", "gpsdo-monitor"}
     assert not _enabled(smd, "wspr-recorder")
 
 

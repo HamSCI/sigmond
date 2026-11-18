@@ -391,5 +391,6 @@ optional           = ["mag-recorder", "hf-tec", "superdarn-sounder"]
 [profile.radiod-only]
 description        = "Radiod-only host — radiod for local SDRs, consumed by a decoder host on the LAN (no clients, no uploads)"
 clients            = []
-local_radiod_infra = []
+# Monitoring runs on every station (Rob 2026-11-18); skipped with a warning when no GPSDO is attached.
+local_radiod_infra = ["gpsdo-monitor"]
 optional           = ["igmp-querier", "ka9q-web"]

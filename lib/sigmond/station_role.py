@@ -13,7 +13,8 @@ ROLE_PATH = Path(os.environ.get('SIGMOND_STATION_ROLE_PATH')
                  or '/etc/sigmond/station-role')
 RADIOD_ONLY = 'radiod-only'
 FULL = 'full'
-ALLOWED_ON_RADIOD_ONLY = frozenset({'ka9q-radio', 'igmp-querier', 'ka9q-web'})
+# gpsdo-monitor: monitoring runs on every station, radiod-only included (Rob 2026-11-18).
+ALLOWED_ON_RADIOD_ONLY = frozenset({'ka9q-radio', 'igmp-querier', 'ka9q-web', 'gpsdo-monitor'})
 
 
 def role(path: Optional[Path] = None) -> str:

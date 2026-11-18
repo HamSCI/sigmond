@@ -42,6 +42,8 @@ def test_refusal():
     assert str(sr.ROLE_PATH) in msg and "full" in msg
     assert refusal("igmp-querier", "radiod-only") is None
     assert refusal("ka9q-web", "radiod-only") is None
+    # Rob 2026-11-18: monitoring runs on every station, radiod-only included.
+    assert refusal("gpsdo-monitor", "radiod-only") is None
 
 
 def test_non_utf8_file_is_full_and_replaceable(tmp_path):
@@ -55,7 +57,9 @@ def test_non_utf8_file_is_full_and_replaceable(tmp_path):
 def test_catalog_profile():
     prof = load_profiles()["radiod-only"]
     assert prof.clients == ()
-    assert prof.local_radiod_infra == ()
+    # gpsdo-monitor is radiod infra here as on a full station (skipped with a
+    # warning when no GPSDO is attached); Rob 2026-11-18.
+    assert prof.local_radiod_infra == ("gpsdo-monitor",)
     assert set(prof.optional) == {"igmp-querier", "ka9q-web"}
 
 
