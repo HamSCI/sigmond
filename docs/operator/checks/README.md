@@ -38,7 +38,7 @@ per radiod, labelled `radiod <id>`, and no decode, upload or page lines. Each
 line names the first part that fails: the card missing from the USB bus, the
 unit not active, a status name that does not resolve, a radiod that publishes
 with `ttl 0` or on `lo` (fix: `smd admin radiod publish`), or sample loss in
-the journal. See [radiod-only.md](../radiod-only.md).
+the journal. The operator guide's radiod-only page, docs/operator/radiod-only.md, explains the role.
 
 ## When a check cannot run
 
