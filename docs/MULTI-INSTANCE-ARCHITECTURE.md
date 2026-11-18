@@ -191,6 +191,7 @@ smd admin instance edit <client> <reporter-id>             # invoke the client's
 smd admin instance enable <client> <reporter-id>           # systemctl enable + start
 smd admin instance disable <client> <reporter-id>          # systemctl disable + stop
 smd admin instance migrate                                 # one-shot migration from radiod-keyed names
+smd admin instance split <client> [--apply]                # codar-sounder / hfdl-recorder: one instance per receiver
 smd admin instance canonical <text> [--systemd]            # print the storage (or unit-name) form; read-only
 ```
 
@@ -229,6 +230,28 @@ smd admin sources add wspr-recorder@AC0G-B1 radiod:my-rx888
 smd admin instance edit wspr-recorder AC0G-B1     # set antenna, sdr, processing knobs
 smd admin instance enable wspr-recorder AC0G-B1
 ```
+
+### Splitting codar-sounder and hfdl-recorder by receiver
+
+These two clients began with one instance per radiod
+(`codar-sounder@ac0g-b1-a-status.local`), read from one shared config, and
+their rows carried no reporter.  A station that runs them for several
+receivers, or for receivers on another machine (AC0G-B2, KFS-MAIN), now
+runs one instance per receiver instead: `codar-sounder@AC0G-B1A` reads
+`/etc/codar-sounder/AC0G-B1A.toml`, and every row it writes carries
+AC0G/B1A.  `smd admin instance split <client>` makes the change from the
+site profile's `[[receiver]]` list.  Without `--apply` it prints the plan:
+each receiver's key, reporter id, radiod, config file and unit, the
+legacy units it retires and the shared config it moves aside.  With
+`--apply` it first has the client's own `config init` write every
+per-receiver file.  If any of them refuses, it removes what it wrote and
+stops, and the station records as before.  Then it stops the legacy units
+(hfdl's squitter timers too), moves the shared config aside as
+`<name>.pre-instances-<date>`, starts the new units and timers, and
+rewrites the uploader manifest so the tars declare the receivers they
+carry.  It never restarts radiod, and a second run finds nothing to do.
+A station with one receiver under its own id has nothing to split; the
+verb says so and stops unless given `--force`.
 
 ---
 

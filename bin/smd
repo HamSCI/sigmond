@@ -28965,6 +28965,136 @@ def cmd_instance_migrate(args) -> int:
     return 0
 
 
+def _split_station_id(coord) -> str:
+    """The station's own reporter id: the name it uploads under when the
+    operator set one, else its [station] reporter id, else [host] call."""
+    st = getattr(coord, 'station', None)
+    for v in (getattr(st, 'uploader_call', ''), getattr(st, 'reporter_id', ''),
+              getattr(coord.host, 'call', '')):
+        if (v or '').strip():
+            return v.strip()
+    return ''
+
+
+def cmd_instance_split(args, *, run=None, manifest=None, etc_root=None) -> int:
+    """`smd admin instance split <client> [--apply] [--max-centres N]
+    [--force]`: one codar-sounder or hfdl-recorder instance per receiver in
+    the site profile's [[receiver]] list, in place of the radiod-keyed ones
+    (tasks/transporter-reporters/2026-11-18-design.md, part 3).  Without
+    --apply it prints the plan and changes nothing.  Never touches radiod.
+    ``run``, ``manifest`` and ``etc_root`` are for tests."""
+    from sigmond import instance_split as _sp_split
+    client = args.client
+    if client not in _sp_split.SPLIT_CLIENTS:
+        _err(f'instance split: {client} is not split by this verb; it handles '
+             f'{", ".join(sorted(_sp_split.SPLIT_CLIENTS))}')
+        return 2
+    max_centres = getattr(args, 'max_centres', None)
+    if max_centres is not None and client not in _sp_split.MAX_CENTRES_CLIENTS:
+        _err(f'instance split: --max-centres applies to codar-sounder only')
+        return 2
+    apply_ = bool(getattr(args, 'apply', False))
+    if apply_ and run is None and _need_root('admin instance split'):
+        return 1
+    from sigmond import site_profile as _sp
+    from sigmond.coordination import load_coordination
+    from sigmond.receivers import ReceiverError, load_receivers
+    try:
+        receivers = load_receivers(getattr(args, 'profile_path', None)
+                                   or _sp.SITE_PROFILE_PATH)
+    except ReceiverError as exc:
+        _err(f'instance split: {exc}')
+        return 1
+    try:
+        coord = getattr(args, 'coord', None) or load_coordination()
+        station = _split_station_id(coord)
+    except Exception:                                      # noqa: BLE001
+        coord, station = None, ''
+    run = run or _sp_split.default_run
+    plan = _sp_split.build_plan(
+        client, receivers, station_id=station,
+        etc_root=Path(etc_root) if etc_root else Path('/etc'),
+        known_instances=_sp_split.known_instances(client, run),
+        force=bool(getattr(args, 'force', False)))
+    init_base = [f'/usr/local/bin/{client}', 'config', 'init']
+    try:
+        from sigmond.commands.client_config import (_find_deploy_toml,
+                                                    _read_contract_config)
+        deploy = _find_deploy_toml(client)
+        entry = (_read_contract_config(deploy) or {}).get('init') if deploy else None
+        if isinstance(entry, list) and entry:
+            init_base = [str(x) for x in entry]
+    except Exception:                                      # noqa: BLE001
+        pass
+    todo = _sp_split.steps(plan, state=lambda u: _sp_split.unit_state(u, run),
+                           init_base=init_base, max_centres=max_centres)
+
+    _heading(f'instance split {client}' + ('' if apply_ else ' (dry run)'))
+    _info(f'station: {station or "(no id)"}')
+    for t in plan.targets:
+        print(f'  {t.reporter_id:<14} {t.key:<14} {t.radiod:<30} '
+              f'{t.config}  {t.unit}' + (f' + {t.timer}' if t.timer else '')
+              + ('  [config exists]' if t.config_ok else ''))
+    for rid, why in plan.skipped:
+        _info(f'{rid}: no instance ({why})')
+    if plan.legacy_units:
+        _info('retires: ' + ', '.join(plan.legacy_units + plan.legacy_timers))
+    if plan.shared is not None:
+        _info(f'moves aside: {plan.shared} -> {plan.shared_aside.name}')
+    from sigmond import uploader_manifest as _um
+    try:
+        sender = _um.reporter_call(coord) if coord is not None else None
+    except Exception:                                      # noqa: BLE001
+        sender = None
+    ids = _um.declared_receivers(receivers, sender)
+    _info('uploader manifest: wsprdaemon tars declare receivers = '
+          + (', '.join(ids) if ids else 'none (single-receiver station)'))
+    for n in plan.notes:
+        _warn(n)
+    if plan.refused:
+        for p in plan.problems:
+            _err(p)
+        _err('refused; nothing changed')
+        return 1
+    if not todo:
+        _ok('nothing to do: the split is done')
+        return 0
+    print()
+    for i, st in enumerate(todo, 1):
+        _info(f'{i:>2}. {st.text}')
+        if st.argv and st.phase == 'config':
+            _info(f'      {" ".join(st.argv)}')
+    if not apply_:
+        print()
+        _info('dry run; nothing changed.  Re-run with --apply to do it '
+              '(radiod is never touched).')
+        return 0
+    if manifest is None:
+        def manifest():
+            from sigmond.commands.uploader import cmd_uploader_manifest
+            return cmd_uploader_manifest(argparse.Namespace(write=True,
+                                                            enable=False))
+    env = None
+    try:
+        from sigmond.commands.client_config import _build_env_bag
+        env = dict(os.environ)
+        env.update(_build_env_bag(client=client))
+        # The arguments name the receiver; nothing in the env may stand in.
+        for k in ('SIGMOND_INSTANCE', 'SIGMOND_RADIOD_STATUS',
+                  'SIGMOND_RADIOD_INDEX'):
+            env.pop(k, None)
+    except Exception:                                      # noqa: BLE001
+        env = None
+    print()
+    rc = _sp_split.apply(plan, todo, run=run, env=env,
+                         say=lambda m: (_err(m) if m.startswith('FAILED')
+                                        else _ok(m)),
+                         manifest=manifest)
+    if rc == 0:
+        _ok(f'{client}: one instance per receiver')
+    return rc
+
+
 def cmd_instance_canonical(args) -> int:
     """`smd admin instance canonical <text> [--systemd]`: read-only.
 
@@ -31285,7 +31415,7 @@ def _build_parser() -> argparse.ArgumentParser:
         'instance',
         help='per-reporter client instance lifecycle '
              '(list / show / add / remove / edit / enable / disable / migrate '
-             '/ canonical)')
+             '/ split / canonical)')
     instance_sub = p_instance.add_subparsers(dest='instance_command')
     instance_sub.add_parser('help', help='show this help')
 
@@ -31360,6 +31490,26 @@ def _build_parser() -> argparse.ArgumentParser:
         '--yes', action='store_true',
         help='actually perform the migration (requires root); '
              'without this, only the candidate list is printed')
+
+    p_i_split = instance_sub.add_parser(
+        'split',
+        help='run codar-sounder or hfdl-recorder as one instance per '
+             'receiver in the site profile, retiring the radiod-keyed ones '
+             '(dry run by default)')
+    p_i_split.add_argument('client', help='codar-sounder or hfdl-recorder')
+    p_i_split.add_argument('--apply', action='store_true',
+                           help='make the changes (requires root); without '
+                                'it, print the plan only')
+    p_i_split.add_argument('--dry-run', action='store_true',
+                           help='print the plan only (the default)')
+    p_i_split.add_argument('--max-centres', type=int, default=None,
+                           metavar='N',
+                           help='codar-sounder: channels each new instance '
+                                'records (passed to its config init)')
+    p_i_split.add_argument('--force', action='store_true',
+                           help='split a station whose one receiver carries '
+                                'its own id, or drop a radiod no receiver '
+                                'names')
 
     p_i_canonical = instance_sub.add_parser(
         'canonical',
@@ -33724,6 +33874,10 @@ def main() -> int:
             return cmd_instance_migrate(args)
         if ic == 'canonical':
             return cmd_instance_canonical(args)
+        if ic == 'split':
+            if getattr(args, 'dry_run', False):
+                args.apply = False
+            return cmd_instance_split(args)
         p_instance.print_help()
         return 0
 

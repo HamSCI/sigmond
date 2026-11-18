@@ -237,7 +237,10 @@ def test_a_merged_proxied_station_renders_as_before(monkeypatch, tmp_path,
     assert out[0]["transport"] == {
         "type": "wsprdaemon_tar", "forward_to_wsprnet": True,
         "wsprnet_reporter_call": "KFS", "wsprnet_reporter_grid": "CN87",
-        "psk_reporter_call": "KFS", "psk_reporter_grid": "CN87"}
+        "psk_reporter_call": "KFS", "psk_reporter_grid": "CN87",
+        # Two receivers under one sender: the tar declares both
+        # (tasks/transporter-reporters/2026-11-18-design.md).
+        "receivers": ["KFS/NW", "KFS/SE"]}
 
 
 def test_collect_pipelines_unmerged_emits_no_key(monkeypatch, tmp_path):

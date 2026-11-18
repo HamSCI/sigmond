@@ -217,6 +217,27 @@ def _config_radiods(component: str) -> set:
     return out
 
 
+def _reporter_keyed_tomls(etc_dir: Path, component: str) -> set:
+    """Stems of /etc/<component>/<KEY>.toml spelled as a reporter key
+    (AC0G-B1A): the per-receiver configs `smd admin instance split`
+    creates.  A radiod status name (lower case, dots) never matches."""
+    from .instance import InvalidReporterId, validate_reporter_id
+
+    def _is_key(stem: str) -> bool:
+        # instance_split.is_reporter_key, inlined: lifecycle's importers
+        # preload a fixed module list (tests/test_preload_modules.py).
+        try:
+            validate_reporter_id(stem)
+        except InvalidReporterId:
+            return False
+        return "=" not in stem and not stem.endswith("-config")
+    try:
+        return {p.stem for p in etc_dir.glob("*.toml")
+                if p.is_file() and _is_key(p.stem)}
+    except (OSError, PermissionError):
+        return set()
+
+
 def _expand_template(
     component: str,
     template: str,
@@ -334,7 +355,15 @@ def _expand_template(
         except PermissionError:
             pass
 
-    if instances_from == "config-radiods":
+    # Once a station runs one instance per receiver (`smd admin instance
+    # split`), files named by reporter key (AC0G-B1A.toml) replace the
+    # shared config's radiods.  A shared config still standing beside them
+    # (moved back, or re-rendered by an install) must not start the
+    # radiod-keyed units again: each would open its radiod's channels a
+    # second time.
+    if instances_from == "config-radiods" and not (
+            component in CONFIG_RADIOD_DEFAULTS
+            and _reporter_keyed_tomls(etc_dir, component)):
         configured |= _config_radiods(component)
 
     # systemctl reports instance names in ESCAPED form ('=' -> \x3d), while

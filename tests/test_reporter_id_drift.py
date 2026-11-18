@@ -1,7 +1,8 @@
 """Each client's copy of the reporter-id table matches sigmond's, byte for
 byte (tasks/spec-reporter-id-v372.md §5, "The guard against drift").
 
-psk-recorder, meteor-scatter and wspr-recorder each keep a small
+psk-recorder, meteor-scatter, wspr-recorder, codar-sounder and
+hfdl-recorder each keep a small
 _reporter_id.py rather than importing sigmond, and run it against their
 copy of tests/data/reporter_id_vectors.json.  That only guards anything
 while the copies agree.  A client checkout absent from beside sigmond
@@ -34,6 +35,12 @@ class SiblingTableTests(unittest.TestCase):
 
     def test_wspr_recorder(self):
         self._check("wspr-recorder")
+
+    def test_codar_sounder(self):
+        self._check("codar-sounder")
+
+    def test_hfdl_recorder(self):
+        self._check("hfdl-recorder")
 
 
 if __name__ == "__main__":

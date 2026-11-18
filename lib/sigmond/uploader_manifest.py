@@ -52,7 +52,7 @@ from . import psws, safe_write
 from .catalog import load_catalog
 from .coordination import Coordination, load_coordination
 from .discover import find_deploy_toml
-from .instance import display_reporter_id, list_instances
+from .instance import display_reporter_id, list_instances, parse_user_reporter_id
 from .topology import Topology, load_topology
 
 logger = logging.getLogger(__name__)
@@ -855,8 +855,10 @@ def collect_pipelines(topology: Optional[Topology] = None,
             pipelines.append(rendered)
     if check_features:
         warn_hidden_pipelines(topology, is_running)
-    return apply_sender_key(apply_merge(apply_proxying(pipelines, coord), target),
-                            features)
+    return apply_receivers(
+        apply_sender_key(apply_merge(apply_proxying(pipelines, coord), target),
+                         features),
+        declared_receivers(receivers, call))
 
 
 def _pin_psws_key(rendered: dict, client: str) -> dict:
@@ -899,6 +901,58 @@ def apply_sender_key(pipelines: list, features: Optional[frozenset]) -> list:
         if isinstance(t, dict) and "receiver" in t and "sender" not in t:
             t = {("sender" if k == "receiver" else k): v for k, v in t.items()}
             p = dict(p, transport=t)
+        out.append(p)
+    return out
+
+
+#: hs-uploader's wsprdaemon_tar key for the receivers a transporter carries
+#: (hs-uploader a8faec7; written to the tar's routing.json default.receivers).
+RECEIVERS_KEY = "receivers"
+
+
+def declared_receivers(receivers: list, sender: Optional[str]) -> list:
+    """The reporter ids (display form, sorted) a station declares it
+    carries rows for, or ``[]``.
+
+    A transporter (AC0G-B2, KFS-MAIN) or a station with several receivers
+    ships rows filed under reporter ids other than its own sender name, and
+    wsprdaemon-server's sigmondb ingest accepts those only when the tar
+    declares them (tasks/transporter-reporters/2026-11-18-design.md).  So
+    the list is every [[receiver]]'s reporter id once any of them differs
+    from ``sender``; otherwise none, so a single-receiver station's tars
+    stay byte-identical."""
+    ids: dict = {}
+    for r in receivers or ():
+        rid = getattr(r, "reporter_id", "") or ""
+        if not rid.strip():
+            continue
+        try:
+            k = parse_user_reporter_id(rid)
+        except ValueError:
+            continue
+        ids.setdefault(k, display_reporter_id(k))
+    if not ids:
+        return []
+    try:
+        own = parse_user_reporter_id(sender) if sender else None
+    except ValueError:
+        own = None
+    if set(ids) == {own}:
+        return []
+    return sorted(ids.values())
+
+
+def apply_receivers(pipelines: list, ids: list) -> list:
+    """Put ``receivers = ids`` on every wsprdaemon_tar transport: the WSPR
+    tar and the codar/hfdl sigmondb tars alike, since the server checks the
+    declaration per tar.  No ids writes nothing.  Pure."""
+    if not ids:
+        return list(pipelines)
+    out = []
+    for p in pipelines:
+        t = p.get("transport")
+        if isinstance(t, dict) and t.get("type") == "wsprdaemon_tar":
+            p = dict(p, transport=dict(t, **{RECEIVERS_KEY: list(ids)}))
         out.append(p)
     return out
 

@@ -87,3 +87,72 @@ def test_other_clients_are_unaffected(tmp_path, monkeypatch):
                      '[systemd]\ntemplated_units = ["psk-recorder@.service"]\n',
                      CONFIG)
     assert units == set()
+
+
+# ---- one instance per receiver (`smd admin instance split`) ----------------
+
+def _resolve_with_files(tmp_path, monkeypatch, component, deploy_text, files):
+    """Like _resolve, with extra files in /etc/<component>/."""
+    deploy = tmp_path / "deploy.toml"
+    deploy.write_text(deploy_text)
+    etc_dir = tmp_path / "etc"
+    etc_dir.mkdir()
+    for name, text in files.items():
+        (etc_dir / name).write_text(text)
+    monkeypatch.setattr("sigmond.lifecycle._find_deploy_toml",
+                        lambda c: deploy if c == component else None)
+
+    def fake_path(p):
+        s = str(p)
+        if s == f"/etc/{component}":
+            return etc_dir
+        if s.startswith("/etc/"):
+            m = mock.Mock(spec=Path)
+            m.exists.return_value = False
+            m.glob.return_value = []
+            return m
+        return Path(p)
+    monkeypatch.setattr("sigmond.lifecycle.Path", fake_path)
+    monkeypatch.setattr("sigmond.lifecycle.subprocess.run",
+                        lambda *a, **k: mock.Mock(returncode=0, stdout="[]"))
+    return {u.unit: u for u in resolve_units([component], [component])}
+
+
+HFDL_DEPLOY = ('[systemd]\ntemplated_units = ["hfdl-recorder@.service", '
+               '"hfdl-recorder-squitters@.timer"]\n'
+               'instances_from = "config-radiods"\n')
+PER_RX = ('[instance]\nreporter_id = "AC0G/B1A"\n\n'
+          '[[radiod]]\nstatus = "a-status.local"\n')
+
+
+def test_per_receiver_files_are_the_instances(tmp_path, monkeypatch):
+    units = _resolve_with_files(tmp_path, monkeypatch, "hfdl-recorder",
+                                HFDL_DEPLOY,
+                                {"AC0G-B1A.toml": PER_RX,
+                                 "AC0G-B1B.toml": PER_RX.replace("A\"", "B\"")})
+    assert set(units) == {
+        "hfdl-recorder@AC0G-B1A.service", "hfdl-recorder@AC0G-B1B.service",
+        "hfdl-recorder-squitters@AC0G-B1A.timer",
+        "hfdl-recorder-squitters@AC0G-B1B.timer"}
+    assert not any(u.orphaned for u in units.values())
+
+
+def test_a_shared_config_beside_them_starts_no_radiod_keyed_unit(tmp_path,
+                                                                 monkeypatch):
+    """⛔ The radiod-keyed unit would open its radiod's channels a second
+    time beside the per-receiver one."""
+    units = _resolve_with_files(tmp_path, monkeypatch, "codar-sounder",
+                                '[systemd]\ntemplated_units = '
+                                '["codar-sounder@.service"]\n',
+                                {"AC0G-B1A.toml": PER_RX,
+                                 "codar-sounder-config.toml": CONFIG})
+    assert set(units) == {"codar-sounder@AC0G-B1A.service"}
+
+
+def test_the_moved_aside_shared_config_is_no_instance(tmp_path, monkeypatch):
+    units = _resolve_with_files(
+        tmp_path, monkeypatch, "codar-sounder",
+        '[systemd]\ntemplated_units = ["codar-sounder@.service"]\n',
+        {"AC0G-B1A.toml": PER_RX,
+         "codar-sounder-config.toml.pre-instances-20261118": CONFIG})
+    assert set(units) == {"codar-sounder@AC0G-B1A.service"}
