@@ -134,10 +134,52 @@ def test_missing_provenance_with_folder_is_fault(tmp_path, monkeypatch):
     assert [i.severity for i in items] == ["fault"]
 
 
-def test_operator_override_suppresses_decoder_items(tmp_path, monkeypatch):
+def test_installer_with_build_and_no_stamp_is_quiet(tmp_path, monkeypatch):
+    d = _repo(tmp_path, "hf-timestd", build=True)
+    (d / "install.sh").write_text("")
+    s = _repo(tmp_path, "wspr-recorder", build=True)
+    (s / "scripts").mkdir()
+    (s / "scripts" / "install.sh").write_text("")
+    _heads(monkeypatch, {"hf-timestd": SHA_A, "wspr-recorder": SHA_A})
+    assert builds.build_items(tmp_path, ["hf-timestd", "wspr-recorder"],
+                              enabled={}, decoder_dir=tmp_path / "nodec",
+                              stamp_dir=tmp_path / "stamps") == []
+
+
+def test_build_without_installer_or_stamp_is_fault(tmp_path, monkeypatch):
+    _repo(tmp_path, "station-web", build=True)
+    _heads(monkeypatch, {"station-web": SHA_A})
+    items = builds.build_items(tmp_path, ["station-web"], enabled={},
+                               decoder_dir=tmp_path / "nodec",
+                               stamp_dir=tmp_path / "stamps")
+    assert [i.severity for i in items] == ["fault"]
+
+
+def test_live_drift_fix_names_the_switch_command(tmp_path):
+    (tmp_path / "bin" / "wsprd").symlink_to(
+        "/usr/local/libexec/sigmond/decoders/wsjtx/wsprd")
+    (item,) = builds.build_items(tmp_path, [], enabled={},
+                                 decoder_dir=_dec(tmp_path))
+    assert item.fix.startswith("smd admin decoders --select ubersdr")
+
+
+def test_operator_override_suppresses_live_and_msk144(tmp_path, monkeypatch):
     cfg = tmp_path / "c.toml"
     cfg.write_text("[decoders]\noperator_override = true\n")
     monkeypatch.setattr(decoder_choice, "COORDINATION_TOML", cfg)
+    (tmp_path / "bin" / "wsprd").symlink_to(
+        "/usr/local/libexec/sigmond/decoders/wsjtx/wsprd")
     assert builds.build_items(tmp_path, [], enabled={"meteor-scatter": True},
                               decoder_dir=_dec(tmp_path),
                               run=_help("nothing")) == []
+
+
+def test_operator_override_keeps_provenance_fault(tmp_path, monkeypatch):
+    cfg = tmp_path / "c.toml"
+    cfg.write_text("[decoders]\noperator_override = true\n")
+    monkeypatch.setattr(decoder_choice, "COORDINATION_TOML", cfg)
+    _repo(tmp_path, "ubersdr_wsprd")
+    _heads(monkeypatch, {"ubersdr_wsprd": SHA_B})
+    items = builds.build_items(tmp_path, [], enabled={},
+                               decoder_dir=_dec(tmp_path, sha=SHA_A))
+    assert [i.subject for i in items] == ["ubersdr-decoders"]

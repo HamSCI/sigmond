@@ -10,8 +10,8 @@ Three checks, all reusing what sigmond already records:
   runs.
 * the live decoder: wsjtx while a parity-verified ubersdr build exists.
 
-An operator override of the decoder choice suppresses the decoder items;
-the override kind reports it.
+An operator override of the decoder choice suppresses the live-decoder and
+MSK144 items; the override kind reports it.
 """
 
 from __future__ import annotations
@@ -38,7 +38,10 @@ def _stamp_items(base: Path, components: Iterable[str],
     out = []
     for name in components:
         repo = Path(base) / name
-        if not build_stamp.declares_build(repo):
+        # Same predicate as build_stamp.needs_build: an install.sh owns its
+        # build and smd stamps only the no-installer branch.
+        if (build_stamp.has_installer(repo)
+                or not build_stamp.declares_build(repo)):
             continue
         head = build_stamp.head_of(repo)
         if not build_stamp.is_stale(repo, head=head, directory=stamp_dir):
@@ -94,7 +97,9 @@ def _live_item(decoder_dir: Path) -> Optional[Item]:
         return None
     return Item("build", "drift", "decoders",
                 "wsjtx decoders are live although the UberSDR build "
-                "passed its parity check", _APPLY)
+                "passed its parity check",
+                "smd admin decoders --select ubersdr, then smd restart "
+                "wspr-recorder psk-recorder meteor-scatter")
 
 
 def build_items(base: Path, components: Iterable[str], *,
@@ -103,12 +108,13 @@ def build_items(base: Path, components: Iterable[str], *,
                 run=subprocess.run,
                 stamp_dir: Optional[Path] = None) -> list:
     items = _stamp_items(base, components, stamp_dir)
-    if decoder_choice.operator_override():
-        return items
-    for item in (_provenance_item(base, decoder_dir),
-                 _msk144_item(decoder_dir, run)
-                 if enabled.get("meteor-scatter") else None,
-                 _live_item(decoder_dir)):
-        if item is not None:
-            items.append(item)
+    held = decoder_choice.operator_override()
+    # A wrong-commit build is wrong whichever decoder the operator chose;
+    # the override silences only the MSK144 and live-decoder items.
+    candidates = [_provenance_item(base, decoder_dir)]
+    if not held:
+        if enabled.get("meteor-scatter"):
+            candidates.append(_msk144_item(decoder_dir, run))
+        candidates.append(_live_item(decoder_dir))
+    items.extend(i for i in candidates if i is not None)
     return items
