@@ -51,7 +51,7 @@ def test_current_gives_no_item():
 
 def test_no_baseline_still_reports_other_kinds():
     assert source.baseline_of(None) == (None, "none")
-    assert source.source_items([]) == [Item(
+    assert source.source_items([], baseline="none") == [Item(
         "source", "drift", "baseline", "no blessed or candidate record",
         "smd align --apply")]
 
@@ -84,3 +84,24 @@ def test_host_release_mismatch():
 
 def test_host_none_gives_nothing():
     assert source.host_items(None, [], vm_release="v3.93") == []
+
+
+def test_candidate_baseline_empty_plan_gives_no_items():
+    assert source.source_items([], baseline="candidate") == []
+
+
+def test_host_candidate_flag_mismatch_both_directions():
+    out = source.host_items({"release": "v3.93", "candidate": True}, [],
+                            vm_release="v3.93", vm_candidate=False)
+    assert len(out) == 1
+    assert "host on candidate v3.93, VM on blessed v3.93" in out[0].detail
+    out = source.host_items({"release": "v3.93"}, [],
+                            vm_release="v3.93", vm_candidate=True)
+    assert "host on blessed v3.93, VM on candidate v3.93" in out[0].detail
+    assert source.host_items({"release": "v3.93", "candidate": True}, [],
+                             vm_release="v3.93", vm_candidate=True) == []
+
+
+def test_host_record_without_release_says_unknown():
+    out = source.host_items({}, [], vm_release="v3.93")
+    assert "host on blessed unknown" in out[0].detail

@@ -12,7 +12,7 @@ from sigmond.drift.model import Item
 
 _APPLY = "smd align --apply"
 
-# status -> (severity, fix); refuse takes its fix from the note when it has one.
+# status -> (severity, fix)
 _MAP = {
     "forward": ("drift", _APPLY),
     "ahead": ("drift", "smd align --apply --allow-rollback (or accept it)"),
@@ -38,7 +38,7 @@ def baseline_of(aligned_record: Optional[dict]) -> tuple:
     return rel, ("candidate" if aligned_record.get("candidate") else "blessed")
 
 
-def source_items(plan: list, *, baseline: str = "none") -> list:
+def source_items(plan: list, *, baseline: str) -> list:
     """One Item per align.Item that is not current.
 
     ``baseline`` is the second value of ``baseline_of``; with "none" the
@@ -62,7 +62,8 @@ def source_items(plan: list, *, baseline: str = "none") -> list:
 
 
 def host_items(host_record: Optional[dict], file_drift: list, *,
-               vm_release: Optional[str] = None) -> list:
+               vm_release: Optional[str] = None,
+               vm_candidate: bool = False) -> list:
     """Items for the Proxmox host as the VM sees it.
 
     ``file_drift`` is align.image_file_drift's list of dicts.  An "unknown"
@@ -76,8 +77,13 @@ def host_items(host_record: Optional[dict], file_drift: list, *,
             out.append(Item("host", "drift",
                             f"host file {f['path']} {status}",
                             f.get("note") or status, "pm-align --apply"))
-    rel = host_record.get("release")
-    if vm_release and rel != vm_release:
+    rel = host_record.get("release") or "unknown"
+    host_cand = bool(host_record.get("candidate"))
+    if vm_release and (rel != vm_release or host_cand != vm_candidate):
+        def kind(c):
+            return "candidate" if c else "blessed"
         out.append(Item("host", "drift", "host release",
-                        f"host at {rel}, VM at {vm_release}", "pm-align --apply"))
+                        f"host on {kind(host_cand)} {rel}, "
+                        f"VM on {kind(vm_candidate)} {vm_release}",
+                        "pm-align --apply"))
     return out
