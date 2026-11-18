@@ -2,7 +2,7 @@
 
 > **Audience:** operator, fleet admin, and the site's IT department
 > **Status:** current
-> **Verified against:** sigmond e709974 on 2026-11-14 — keys and defaults checked against bin/sigmond-link; probe traffic measured on the AI6VN lab stations behind the ODROID gateway (sat-sim) on 2026-11-14.
+> **Verified against:** sigmond f3b0c6e on 2026-11-18 — keys and defaults checked against bin/sigmond-link; probe traffic measured on the AI6VN lab stations behind the ODROID gateway (sat-sim) on 2026-11-14.
 > **Canonical for:** the satellite-link guard (`[link_schedule]`), what its probe costs, and how the list of addresses a station talks to is collected
 
 Some sites (the South Pole is the first) reach the internet only while a

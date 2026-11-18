@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 5554c6e on 2026-11-13 — whole page re-read; ports, relays, the `smd` verbs and the page links checked against pm-align.py, the wizard and `smd <verb> --help`. Routing passages: sigmond 0d9e879 on 2026-11-13 — every spot goes to wsprdaemon.org, checked against uniform_routing.py, uploader_manifest.apply_proxying, upload.py, bin/smd `watch uploads` and wspr-recorder's hs_uploader_shim.py. Earlier: sigmond 007bf72 on 2026-10-10 — remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; walk-through fixes (live dasi002 + b4) as of 4aec0c2
+> **Verified against:** sigmond f3b0c6e on 2026-11-18 — whole page re-read; ports, relays, the `smd` verbs and the page links checked against pm-align.py, the wizard and `smd <verb> --help`. Routing passages: sigmond 0d9e879 on 2026-11-13 — every spot goes to wsprdaemon.org, checked against uniform_routing.py, uploader_manifest.apply_proxying, upload.py, bin/smd `watch uploads` and wspr-recorder's hs_uploader_shim.py. Earlier: sigmond 007bf72 on 2026-10-10 — remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; walk-through fixes (live dasi002 + b4) as of 4aec0c2
 > **Canonical for:** the operator's table of contents
 
 You are hosting a *station*: one small computer that listens to the whole

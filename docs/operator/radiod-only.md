@@ -2,12 +2,13 @@
 
 > **Audience:** operator (and the fleet admin who builds the machine)
 > **Status:** current
-> **Verified against:** sigmond branch `radiod-only-profile` on 2026-11-01. The steps follow what AI6VN-PM VM 101 needed by hand that day; the documented path has not yet been run end to end from a fresh VM
+> **Verified against:** sigmond f3b0c6e on 2026-11-18 — profile, role file, refusals and `smd config init radiod` flags checked against etc/catalog.toml, station_role.py and `smd <verb> --help`. The VM steps follow what AI6VN-PM VM 101 needed by hand on 2026-11-01; nobody has yet run the documented path end to end from a fresh VM
 > **Canonical for:** building and attaching a radiod-only station: a receiver host that runs radiod and nothing else, decoded by another station on the same LAN
 
-A *radiod-only* station runs the radio and nothing else. It owns one or more
+A *radiod-only* station runs the radio and little else. It owns one or more
 RX888s, turns each into a set of channels, and publishes them on the local
-network. Another station on the same LAN, the *decoder host*, records,
+network. It also runs `gpsdo-monitor`, because every station monitors its
+clock; with no GPSDO attached, sigmond skips that unit and prints a warning. Another station on the same LAN, the *decoder host*, records,
 decodes and uploads them, and serves their ka9q-web pages. The radiod-only
 station uploads nothing and shows no web pages of its own.
 
@@ -47,7 +48,7 @@ On a plain Debian machine with the RX888 plugged in:
 psk-recorder and the rest) is enabled on the machine. It names each one;
 disable them with the `smd disable <name>` lines it prints, or install on a
 clean machine. It then records the role (`/etc/sigmond/station-role` reads
-`radiod-only`), installs and starts radiod only, with `ttl = 1` so the
+`radiod-only`), installs and starts radiod (and gpsdo-monitor), with `ttl = 1` so the
 channels reach the LAN, and ends with a **radiod published on the LAN**
 checkpoint. No card on the bus: the bring-up ends PARTIAL and finishes once
 the card appears.

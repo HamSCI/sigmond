@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 5554c6e on 2026-11-13 — whole page re-read; verbs and flags against `smd <verb> --help`, the restart table against etc/catalog.toml, doctor findings against sdr_events.py, console-panel lines against sigmond-appliance, disk numbers against hf-timestd b7f5a56; sample outputs dated 2026-08 not re-run. Routing passages: sigmond 37c46f1 on 2026-11-13 — every spot goes to wsprdaemon.org, checked against uniform_routing.py, uploader_manifest.apply_proxying, upload.py, bin/smd `watch uploads` and wspr-recorder's hs_uploader_shim.py. Earlier: sigmond 913bfed on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 16f47bc on 2026-10-11: the console panel's bring-up and guest-agent lines checked against sigmond-appliance 68e966a (`firstboot-v3.sh`) and `bin/sigmond-firstrun-bringup`; earlier checks, at 007bf72 on 2026-10-10: remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; sink words checked at 58fb909 against commands/sink.py and commands/config.py
+> **Verified against:** sigmond f3b0c6e on 2026-11-18 — whole page re-read; the disk section rechecked against `smd storage --help` and hf-timestd's ledger gate. Earlier: sigmond 5554c6e on 2026-11-13 — verbs and flags against `smd <verb> --help`, the restart table against etc/catalog.toml, doctor findings against sdr_events.py, console-panel lines against sigmond-appliance, disk numbers against hf-timestd b7f5a56; sample outputs dated 2026-08 not re-run. Routing passages: sigmond 37c46f1 on 2026-11-13 — every spot goes to wsprdaemon.org, checked against uniform_routing.py, uploader_manifest.apply_proxying, upload.py, bin/smd `watch uploads` and wspr-recorder's hs_uploader_shim.py. Earlier: sigmond 913bfed on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 16f47bc on 2026-10-11: the console panel's bring-up and guest-agent lines checked against sigmond-appliance 68e966a (`firstboot-v3.sh`) and `bin/sigmond-firstrun-bringup`; earlier checks, at 007bf72 on 2026-10-10: remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; sink words checked at 58fb909 against commands/sink.py and commands/config.py
 > **Amended 2026-09-02** (not re-walked): the SDR sentinel was retired, so a
 > re-seated RX888 is now brought back with `smd status` + `smd adopt`, not by
 > waiting two minutes.
@@ -994,10 +994,12 @@ Anything *else* in the tens of gigabytes is the thing to name. **Paste the whole
 output to your fleet admin either way** — an unexpected name near the top is
 exactly cause #2, and it is what they need to see.
 
-⚠ There is no `smd` verb for this. `smd admin storage` is **not** a read-only
-report — its three subcommands (`migrate-to-sqlite`, `trim`, `tune-timestd`)
-change the station — so do not reach for it (`smd admin storage --help`, read
-live on b4, 2026-08-23).
+`smd storage status` is read-only too. It prints each store's fill, each
+client's holding and target, and any alarm that sigmond's storage ledger has
+raised; send that output along with the `du` listing. ⚠ `smd admin storage` is
+**not** a read-only report — its three subcommands (`migrate-to-sqlite`,
+`trim`, `tune-timestd`) change the station — so do not reach for it
+(`smd admin storage --help`).
 
 **What the numbers mean** —
 [day-2.md §3](day-2.md#3-disk--df--h-) owns this table and is the canonical
@@ -1005,6 +1007,12 @@ version; the short form is that **80 %** is a warning and **95 %** is the number
 that costs you data: the timing client pauses all writes and alerts at once, and
 if the disk is *still* ≥95 % ten minutes later it begins deleting your oldest
 recordings until the disk is back under 90 %.
+
+**The storage ledger now shares this job.** Sigmond's ledger
+(`sigmond-storage.timer`, every two minutes) asks each client to trim before a
+store fills. While it manages hf-timestd, the ledger decides retention, and only
+the 95 % emergency rule below stays with hf-timestd. The numbers below still
+describe that emergency rule.
 
 **How much warning do you get? Ten minutes — but only since 2026-08-22.** This
 is worth stating plainly because the two figures in circulation are both real:

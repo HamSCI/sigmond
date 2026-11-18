@@ -2,7 +2,7 @@
 
 > **Audience:** scientist
 > **Status:** current
-> **Verified against:** sigmond 55b9e68 on 2026-08-23 — Costas-array 1e7d6f6 + eclipse-reception-report + live b4 archive listing
+> **Verified against:** sigmond f3b0c6e on 2026-11-18 — a historical record of the 2026-08-12 capture; its numbers, paths and archive listing come from Costas-array 1e7d6f6, the reception report and a live b4 listing taken 2026-08-23, and this pass did not re-read the archive
 > **Canonical for:** the 2026-08-12 eclipse Costas listener as a worked example
 
 On 2026-08-11 a station operator was asked to receive an experimental HamSCI

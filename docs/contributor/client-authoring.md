@@ -2,14 +2,14 @@
 
 > **Audience:** contributor
 > **Status:** current
-> **Verified against:** sigmond 2cd11c4 on 2026-08-24 — code
+> **Verified against:** sigmond f3b0c6e on 2026-11-18 — code (`cpu.py`, `client_features.py`, contract v0.9, ADD-A-CLIENT, meteor-scatter and psk-recorder docs)
 > **Role:** pointer + rule — routes you through the client-authoring documents and states the rule that a client's own `docs/` must be true; the canonical client contract lives in [`CLIENT-CONTRACT.md`](../CLIENT-CONTRACT.md) ★
 
-Writing a new client is well covered — by four documents, a runnable
-scaffold and two living examples. What was *not* written down is the
-order to read them in, and the obligation that outlives the merge: **a
-client's own `docs/` must describe that client.** This page is those two
-things. It restates none of the mechanics.
+Four documents, a runnable scaffold and two living examples cover the
+writing of a new client. This page adds two things they leave out: the
+order to read them in, and the obligation that outlives the merge — **a
+client's own `docs/` must describe that client.** It restates none of the
+mechanics.
 
 ## The path
 
@@ -19,7 +19,7 @@ Read in this order. Each one assumes the previous.
 |---|---|---|
 | 1 | [../scientist/becoming-a-client.md](../scientist/becoming-a-client.md) | The bridge. Whether you should build a client at all (Tier 0 — a capture on a disk — is often the right answer), what Tier 1 buys you, and the scientist's route through the two contributor documents below. Start here even as a contributor: it is the only page that argues the *decision*. |
 | 2 | [../ADD-A-CLIENT.md](../ADD-A-CLIENT.md) | The mechanics. The eight things you must ship — repo layout, `deploy.toml`, templated unit, contract subcommands, config template + render step, `[client_features]` TUI registration, catalog entry, storage verbs — plus the `config/help.toml` three-tier audit and the drop-in verification steps. |
-| 3 | [../CLIENT-CONTRACT.md](../CLIENT-CONTRACT.md) ★ | The norm. §1–§19: what each surface must do and why. ADD-A-CLIENT tells you which file to touch; the contract tells you what "correct" means, and it wins every disagreement. |
+| 3 | [../CLIENT-CONTRACT.md](../CLIENT-CONTRACT.md) ★ | The norm (version 0.9). §1–§19: what each surface must do and why, including output sinks (§17) with the storage verbs of §17.7. ADD-A-CLIENT tells you which file to touch; the contract tells you what "correct" means, and it wins every disagreement. |
 | 4 | [../REQUIREMENTS-TEMPLATE.md](../REQUIREMENTS-TEMPLATE.md) | The requirements register your client fills in as `docs/REQUIREMENTS.md`, in the same shape as every other component so the whole suite stays comparable. Interface requirements are *referenced*, not restated — the contract already holds them. |
 | — | [../scientist/skeleton/README.md](../scientist/skeleton/README.md) | A copyable, MIT-licensed, stdlib-only minimal client (`deploy.toml`, unit, `cli.py`, `config/help.toml`, `pyproject.toml`). Run it on your laptop before you go near a station. |
 | — | [../EVENT-CLIENT-PLAYBOOK.md](../EVENT-CLIENT-PLAYBOOK.md) ★ | Read *first* instead of (2) if this is a short-notice one-off — eclipse, meteor shower, eruption. It covers the capture-first, channel-envelope and load-budget decisions the checklist assumes you already made. |
@@ -45,21 +45,27 @@ service template to a CPU group (`'psk-recorder@.service': 'other'`,
 decoder that is missing from it runs **unconfined — including on
 radiod's hyperthread pair** — where its decode bursts pollute radiod's
 L1/L2/L3 and the symptom is RX888 USB packet drops, not anything that
-looks like your client's fault. It has been caught twice by
-observation rather than by any check — wspr-recorder (`223427c`,
-2026-05-30) and then meteor-scatter, hs-uploader and two watchdogs, all
-found running on B4-100's radiod HT pair (`6a9fe3f`, 2026-07-20). Both
-fixes were one line each; the cost was the drop investigation that
-preceded them. Add your template when you add the client, and note that
-nothing asserts the map is complete — a missing entry is silent until a
-station shows packet loss.
+looks like your client's fault. Observation caught the omission three
+times, and no check did: wspr-recorder (`223427c`, 2026-05-30),
+meteor-scatter, hs-uploader and two watchdogs on B4-100's radiod HT pair
+(`6a9fe3f`, 2026-07-20), and station-web (2026-09-28). Each fix took one
+line; the drop investigation before it cost far more. Add your template
+when you add the client. Nothing asserts that the map is complete, so a
+missing entry stays silent until a station shows packet loss. Guest
+`isolcpus` (`lib/sigmond/cpu.py`) fences the guest kernel and every unlisted
+service off radiod's cores at once. It backs up the map and does not replace
+it, and an image cannot bake it in because the right cores depend on where
+radiod landed.
 
 **`[client_features]` is how you appear in the operator's tools.** A
 `watch` verb, a `verifier` target and a `receiver_channels` parser are
 declared in your own `deploy.toml` and loaded by
 `lib/sigmond/client_features.py` — no sigmond-side edit. Skipping them
 does not break anything; it just means `smd watch <you>` does not exist
-and the TUI has nothing to show.
+and the TUI has nothing to show. Storage works the same way: a client that
+declares nothing about `data_sinks` floors and classes still appears in
+`smd storage status` as an unmanaged client, which sigmond measures and never
+asks to trim (contract §17.7).
 
 ## The six-file docs skeleton
 
@@ -121,7 +127,8 @@ client decoded FT8 and FT4 with `decode_ft8` and uploaded through a
 `pskreporter-sender` subprocess. It decodes MSK144 with
 `jt9 --msk144 -Y` and has no `decode_ft8` and no sender subprocess
 anywhere on its runtime path. The README claimed 15 s / 7.5 s FT slots;
-the T/R period is 30 s by default. `docs/REQUIREMENTS.md` was the only
+the T/R period was 30 s by default. (The default has since moved to 15 s, the
+MSK144 norm.) `docs/REQUIREMENTS.md` was the only
 accurate document, and it called its own repo "the highest doc-debt in
 the suite."
 

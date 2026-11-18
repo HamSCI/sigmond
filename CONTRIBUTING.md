@@ -16,7 +16,7 @@ there.**
 | role | machine | what it is for |
 |---|---|---|
 | development | the devbox VM on B3 | writing code and running tests, as yourself |
-| build + staging | B3's PM, and a nested VM on it (`test-nested-v3.sh`) | building images and validating an install before it ships |
+| build + staging | B3's PM, and a nested VM on it (`test-nested-v3.sh`) | building the Proxmox image and validating an install before it ships |
 | production | B4, DASI002 and the field units | collecting science data |
 
 **B4 is a reference station, not a development machine.** Its value is
@@ -81,6 +81,8 @@ smd doctor          # what is wrong here?
 smd doctor --fix    # repairs ownership only — never touches your edits
 smd update          # what would change? (dry run)
 smd update --apply  # do the mechanical steps
+smd align           # how far is this station from the latest blessed
+                    # sigmond release? (dry run; `--apply` moves it there)
 smd admin manifest adopt <manifest.txt> [--allow-superset] [--apply]
                     # after a release: record what blessed baseline
                     # this host now satisfies (§6)
@@ -100,7 +102,7 @@ false. DASI002 read `v3.20` while running v3.31-era components.
 Never prefix `smd` with `sudo`; it elevates itself.
 
 **Fleet-outward (push).** You are on the devbox, wearing the
-fleet-administrator hat: building and blessing images (§6), rolling a
+fleet-administrator hat: building and blessing releases (§6), rolling a
 change across designated machines, watching the fleetboard (§10). This
 orientation owns the *when* and the *order*; the actual mutation is
 still, always, the station-inward procedure above — executed on each
@@ -146,7 +148,7 @@ requires. A bare `pytest` or `python -m pytest` runs outside the venv and
 misses the dev extras (Textual, etc.); on a fresh system with no venv yet
 it fails outright with `No module named pytest`.
 
-The suite is the main asset — over 2000 tests in sigmond alone. A change
+The suite is the main asset — about 8,300 tests in sigmond alone. A change
 without a test that would have failed before it is not finished.
 
 **Write the test first and watch it fail.** Several bugs this project
@@ -158,6 +160,10 @@ against the bug.
 Changing what version of something we build is a deliberate act, never a
 side effect.
 
+* A station holds each component at its blessed pin until someone releases
+  it: `smd update` refuses a pinned component, `smd update --unpin` lets it
+  follow the branch, and `smd align --apply` moves it to the latest blessed
+  release and pins it there.
 * `ka9q-radio` is pinned by **two files that must agree** —
   `ka9q-python/ka9q/compat.py` (the importable constant, preferred) and
   `ka9q-python/ka9q_radio_compat` (the text fallback). `sync_types.py
@@ -183,7 +189,11 @@ side effect.
 
 ## 6. Cutting a release
 
-An appliance image moves through four rungs — **built → tested → blessed
+A release (named "sigmond vN", for example sigmond v3.93) is the blessed list
+of component versions. It reaches stations by two install paths — the
+Proxmox USB image, built by the sigmond-appliance repo, and a bare-metal
+install from the repos — and reaches running stations through `smd align`.
+The Proxmox image moves through four rungs — **built → tested → blessed
 → rolled** — and nothing is blessed without evidence. Full detail lives in
 `sigmond-appliance/docs/RELEASE.md`; this is the summary a contributor
 needs to know the mechanism exists.
@@ -196,18 +206,19 @@ needs to know the mechanism exists.
 * The **component pin manifest** is generated from `smd version` inside
   the golden VM template at build time, never hand-written, and ships
   beside the image.
-* `bless-release.sh <version> [--apply]` enforces seven gates (version
+* `bless-release.sh <version> [--apply]` enforces nine gates (version
   format, tag reachable from `origin/main`, clean tree, verified image
   checksum, a real manifest, test evidence tied to *that* image, no
-  pre-existing Release) and cannot publish without a human typing a
+  pre-existing Release, install instructions that name this release, a
+  changelog section for it) and cannot publish without a human typing a
   confirmation at a terminal — it reads `/dev/tty` explicitly so a pipe
   or an automated caller can't satisfy it.
 * The first Release is
   [v3.32](https://github.com/HamSCI/sigmond-appliance/releases/tag/v3.32):
   the record carries the manifest, the sha256, and the test verdict. The
   image itself stays on the artifact store — GitHub caps release assets
-  at 2 GiB and images run ~4.7 GB (`sigmond-appliance/docs/RELEASE.md`
-  §3 "Blessed" is authoritative for the figure).
+  at 2 GiB and the image exceeds that (`sigmond-appliance/docs/RELEASE.md`
+  §3 "Blessed" gives the figure).
 
 **The gate earned its keep immediately.** A v3.32 build from a proper
 tag, with a valid 22-component manifest and a verified checksum, shipped
@@ -218,7 +229,8 @@ its contents. Every install from that image would have booted with no
 sigmond payload. The gate refused to bless it.
 
 **The fourth rung — rolled — is real now.** Live hosts are never
-reimaged; after a bless they adopt the Release's manifest in place:
+reimaged; after a bless they move to the release with `smd align` and adopt
+the Release's manifest in place:
 
 ```bash
 smd admin manifest adopt <manifest.txt>                    # dry-run plan

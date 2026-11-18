@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** current
-> **Verified against:** sigmond 913bfed on 2026-10-23 — code (`smd sink --help`, `commands/sink.py`, `commands/config.py` `_site_change`, `commands/uploader.py`, `install_lock.py`; earlier rows: `smd fleet --help`, `fleet.py:700,705,1028`)
+> **Verified against:** sigmond f3b0c6e on 2026-11-18 — code (`smd --help`, `smd admin --help` and each verb's `--help`, `commands/archive.py`, `commands/storage.py`, `align.py`, `hamsci_sink/_bundled.py`, `etc/catalog.toml`)
 > **Canonical for:** sigmond's orchestration model and the smd verb→module map
 
 ## The shape
@@ -23,14 +23,14 @@ reports about itself. The whole-suite picture is
 [`../CLIENT-CONTRACT.md`](../CLIENT-CONTRACT.md) ★.
 
 The user-facing surface is one stdlib-only Python program, `bin/smd`
-(20,221 lines today), plus the `lib/sigmond/` package it leans on. Core `smd` imports
+(about 34,000 lines today), plus the `lib/sigmond/` package it leans on. Core `smd` imports
 nothing outside the standard library — Textual is a lazy import reached only by
 `smd tui` — because it has to run on a freshly-imaged host before any venv
 exists.
 
 ## Layers
 
-The thirteen layers named in [`../../CLAUDE.md`](../../CLAUDE.md) §Architecture
+The fourteen layers named in [`../../CLAUDE.md`](../../CLAUDE.md) §Architecture
 layers, each with the module that implements it:
 
 | # | Layer | Module | What it answers |
@@ -48,14 +48,19 @@ layers, each with the module that implements it:
 | 11 | TUI configurator | `lib/sigmond/tui/` (Textual, lazy import) | the three-panel interactive surface behind `smd tui` |
 | 12 | Environment discovery | `lib/sigmond/commands/environment.py`, `lib/sigmond/discovery/` | mDNS/IGMP/NTP/HTTP probing of network peers |
 | 13 | ka9q-radio drift watcher | `lib/sigmond/commands/ka9q_watch.py` | is the pinned ka9q-radio commit still stream-compatible with upstream |
+| 14 | Storage capacity ledger | `lib/sigmond/storage/`, `lib/sigmond/commands/storage.py`, `sigmond-storage.timer` | how many bytes each client holds on each store, and which client must trim when a store fills |
 
 Two cross-cutting concerns are not layers but shape everything: **CPU pinning**
 (each local radiod owns one hyperthread sibling pair; decoder clients are
 confined to the worker cores via `AFFINITY_UNITS` in `lib/sigmond/cpu.py` — add
 a new decoder client there or it silently runs on radiod's cores) and the
-**sink** (`sigmond.hamsci_sink.Writer.from_env()` picks `$SIGMOND_SQLITE_PATH`,
-else `/var/lib/sigmond/sink.db` if writable, else a no-op writer so a client
-stays standalone-safe).
+**sink** (`sigmond.hamsci_sink.Writer.from_env()` takes the first match of
+`$HAMSCI_SINK_PATH`, `$SIGMOND_SQLITE_PATH`, `path` in
+`/etc/hs-uploader/sink.toml`, an existing `/var/lib/sigmond/sink.db`, and
+`/var/lib/hs-uploader/sink.db`. When the process cannot write the last two, it
+gets a no-op writer, so a client stays standalone-safe). Add a new decoder
+client to `AFFINITY_UNITS`, and note that guest `isolcpus` is the durable
+fence beneath that hand-kept list.
 
 ## Production paths
 
@@ -64,7 +69,7 @@ The FHS anchors — `/etc/sigmond`, `/var/lib/sigmond`, `/var/log/sigmond`,
 [`../../lib/sigmond/paths.py`](../../lib/sigmond/paths.py); the rest are named at
 their point of use: `GIT_BASE` in `discover.py` / `installer.py`, the operator
 catalog layer in `catalog.py` (`DEFAULT_CATALOG_PATHS`), `site-profile.toml` in
-`capture_prep.py`, the sink default in hs-uploader's `sink/writer.py` (copied
+`capture_prep.py`, the sink path rule in hs-uploader's `sink/writer.py` (copied
 into `hamsci_sink/_bundled.py`), and `upload-wake.sock` in ka9q-python's
 wspr_recorder.
 
@@ -77,7 +82,7 @@ wspr_recorder.
 | `/etc/sigmond/site-profile.toml` | per-site profile written by `personalize` |
 | `/etc/sigmond/catalog.toml` | operator overrides only — the sparse top layer of the catalog (sparse: only the keys present here override; everything else falls through to the layer below) |
 | `/etc/sigmond/environment.toml` | declared network peers, checked against observation |
-| `/var/lib/sigmond/sink.db` | the shared SQLite sink every producer writes into |
+| `/var/lib/hs-uploader/sink.db` | the shared SQLite sink every producer writes into. Older stations keep it at `/var/lib/sigmond/sink.db`, and `Writer.from_env()` still prefers that file when it exists |
 | `/var/lib/sigmond/upload-wake.sock` | stateless edge trigger: "something committed, go re-derive completeness" |
 | `/var/lib/sigmond/lifecycle.lock` | the flock layer 8 takes |
 | `/var/log/sigmond/` | sigmond's own logs (clients log to their own paths, declared in `deploy.toml`) |
@@ -114,9 +119,17 @@ mandatory manual `enable`.
 **Core vs discretionary.** The split lives in the catalog profiles.
 `[profile.dasi2].clients` installs by default; `[profile.dasi2].optional` is
 added by `smd bringup dasi2 --with-optional` or the TUI's "Optional clients"
-checkbox. Read the current membership out of
-[`../../etc/catalog.toml`](../../etc/catalog.toml) rather than from prose — it
-moves (ledger row 54).
+checkbox. Today the dasi2 core holds hf-timestd, wspr-recorder, psk-recorder,
+mag-recorder, gmag-webui, meteor-scatter, hamsci-physics, hfdl-recorder,
+codar-sounder and station-web; hf-tec and superdarn-sounder stay optional.
+Other profiles exist (`wd`, `base`, `client`, `radiod-only`). Read the current
+membership out of [`../../etc/catalog.toml`](../../etc/catalog.toml) rather than
+from prose — it moves.
+
+**Dormant until adopted.** Bring-up installs a component whose hardware stands
+absent (a magnetometer, a GPSDO) but leaves it dormant: installed, not enabled,
+not started. `smd start` skips dormant components. `smd adopt` starts one after
+the hardware appears and the operator says yes.
 
 ## The verb map
 
@@ -128,15 +141,14 @@ and the `lib/sigmond/` module it leans on. Handlers live in `bin/smd` unless the
 `smd --help` and `smd admin --help` and fails if a verb is missing here or a
 row names something that is not a verb. There are no deprecated top-level verbs
 left to list: the v2 removals in
-[`../CLI-V2-SPEC.md`](../CLI-V2-SPEC.md) §5 are gone from argparse entirely
-(ledger row 52).
+[`../CLI-V2-SPEC.md`](../CLI-V2-SPEC.md) §5 are gone from argparse entirely.
 
 | Verb | Who / when | What it does | Implementation | Mutates? |
 |---|---|---|---|---|
 | `admin` | contributor | umbrella for diagnostics + maintenance; bare form prints the group help | no handler — `main()` rewrites `args.command = args.admin_command`, so every relocated verb keeps its old dispatch branch | via its subverb |
-| `adopt` | after attaching hardware | adopt one offer named by `smd status`: record its sources for the components that consume them, then enable and start what the offer brings, after an explicit yes (`--yes` for scripted provisioning; an absent terminal is never read as consent). `--dry-run` reports the plan and starts nothing. It RECORDS a selection; it does not render one into a client's config — adopt prints `smd admin sources apply` as the next step, because that is the verb that writes `[[source]]` tables (and today only wspr-recorder is multi-source aware). The only verb in the adoption design that starts anything — detection alone never does. Distinct from `admin manifest adopt`, which adopts a blessed image manifest | `cmd_adopt` → `adoption.py` (`offers`, `plan`, `SOURCE_CONSUMERS`), `station_identity.py` (`identify` for membership from the hostname, `read_manifest` / `identity_from_manifest` for the PSWS IDs the PM recorded), `sources.py` (`ClientSources`), then `cmd_start` under `lifecycle_lock` | yes (root + lock), except `--dry-run` |
-| `align` | station-inward | dry run only: how far this station sits from the latest blessed appliance release — target, per-component plan, commit distance, image-carried file drift, host recorded-vs-blessed level; `--no-cost` skips the commit-distance lookups | `cmd_align` → `align.py` (`fetch_release`, `plan_align`, `commit_distance`, `image_file_drift`, `recorded_release`), `doctor.py`, `provenance.py`, `catalog.py` | no |
-| `archive` | operator, once per drive | the archive drive for raw IQ (tasks/plan-external-storage.md, phase 1). `add` lists the disks, waits while the operator plugs the drive in (or takes `--device`), refuses a drive below the RX-888's hub or off USB, warns on a shared controller, takes the drive's name typed back (or `--confirm`), then partitions, formats ext4 with the label `SIGMOND-ARCHIVE`, mounts it by UUID at `/var/lib/sigmond/archive` through a `nofail` fstab line, and writes `/etc/sigmond/archive.toml`; `--dry-run` changes nothing. `status` reads the drive, its fill and the days that fit. `remove` unmounts it; `--forget` also drops the fstab line and the config. The archiver that fills the drive is hf-timestd's (phase 2) | `cmd_archive` → `commands/archive.py`, `archive.py` (`list_disks`, `rx888_devpaths`, `judge_placement`, `fstab_with_archive`, `config_text`) | `add` and `remove` do (root), except `--dry-run` |
+| `adopt` | after attaching hardware | adopt one offer named by `smd status`: record its sources for the components that consume them, then enable and start what the offer brings (this starts the components that bring-up left dormant), after an explicit yes (`--yes` for scripted provisioning; an absent terminal is never read as consent). `--dry-run` reports the plan and starts nothing. It RECORDS a selection; it does not render one into a client's config — adopt prints `smd admin sources apply` as the next step, because that is the verb that writes `[[source]]` tables (and today only wspr-recorder is multi-source aware). The only verb in the adoption design that starts anything — detection alone never does. Distinct from `admin manifest adopt`, which adopts a blessed image manifest | `cmd_adopt` → `adoption.py` (`offers`, `plan`, `SOURCE_CONSUMERS`), `station_identity.py` (`identify` for membership from the hostname, `read_manifest` / `identity_from_manifest` for the PSWS IDs the PM recorded), `sources.py` (`ClientSources`), then `cmd_start` under `lifecycle_lock` | yes (root + lock), except `--dry-run` |
+| `align` | station-inward | bring a station to a blessed sigmond release. A bare run is a dry run: target, per-component plan, commit distance, image-carried file drift, host recorded-vs-blessed level (`--no-cost` skips the commit-distance lookups; `--release TAG` or `--manifest PATH` picks another target). `--apply` moves each component to the release pin, refreshes image files, re-runs bring-up and restarts stale services, radiod first, then runs fast checks. `--verify` reads the gap and upload verdicts since the last alignment | `cmd_align` → `align.py` (`fetch_release`, `plan_align`, `commit_distance`, `image_file_drift`, `recorded_release`), `align_apply.py`, `align_live.py`, `doctor.py`, `provenance.py`, `catalog.py` | `--apply` does (root) |
+| `archive` | operator, once per drive | the archive drive for raw IQ. `add` lists the disks, waits while the operator plugs the drive in (or takes `--device`), refuses a drive below the RX-888's hub or off USB, warns on a shared controller, runs a short SMART self-test, takes the drive's name typed back (or `--confirm`), then partitions, formats ext4 with the label `SIGMOND-ARCHIVE`, mounts it by UUID at `/var/lib/sigmond/archive` through a `nofail` fstab line, and writes `/etc/sigmond/archive.toml`. A drive that already carries the label is re-attached with its data kept (`--format` erases it; `--upgrade` brings an added drive up to date without formatting it); both `add` forms link hf-timestd's archiver units when missing and enable the timer. `--dry-run` changes nothing. `status` reads the drive, its fill and the days that fit. `health-refresh` and `test` read and exercise its SMART data (`sigmond-archive-health.timer` runs the refresh hourly). `eject` and `remove` unmount it for a safe unplug; `remove --forget` also drops the fstab line and the config. hf-timestd's `timestd-archive.timer` copies raw IQ to the drive | `cmd_archive` → `commands/archive.py`, `archive.py`, `archive_health.py` (`list_disks`, `rx888_devpaths`, `judge_placement`, `fstab_with_archive`, `config_text`) | `add`, `eject` and `remove` do (root), except `--dry-run` |
 | `apply` | after a config edit | reconcile running units with current config: re-render radiod fragments + firmware, regenerate the uploader manifest, restart what changed | `cmd_apply` → `lifecycle.py`, `commands/radiod_fragments.py`, `commands/radiod_firmware.py`, `commands/uploader.py`, `coordination.py` | yes (root + lock) |
 | `bringup` | first install | guided station bring-up from a catalog profile; `--with-optional` adds the discretionary set | `cmd_bringup` → `bringup.py` (`build_plan`), `catalog.py`, `coordination.py`, `site_profile.py`, `psws.py`; the plan's steps shell out to sub-`smd` calls, which is how `topology.py` is reached (`smd enable <comp>`) | yes (root) |
 | `check` | installer, daily | does this station work: one line per item (PSK, WSPR, magnetometer, GRAPE, storage, uploads, meteor scatter, the VM's own pages), each marked `ok`, `wait` (not yet), `FAIL` or `--` (not on this station), in ASCII for the host console, then PASS (exit 0), WAIT (exit 2) or FAIL (exit 1). `--no-verdict` drops the verdict line for `sigmond-check` on the Proxmox host, which adds the page lines through the host's addresses; `--json` serves tests and tools. It never calls the timing judge (tasks/spec-smd-check-v372.md) | `cmd_check` → `commands/check.py`, `component_state.py` (`compute_state`), `heartbeat.py` (`_read_backlog`), `coordination.py` | no |
@@ -154,13 +166,13 @@ left to list: the v2 removals in
 | `remote` | operator | the operator's switch for remote access on an appliance station: `status`, `off` (stays off across reboots), `on`. It asks the Proxmox host over the private link, with a key that can run one script there (`sigmond-rac-switch`), and prints the host's answer; the host alone turns the tunnel on or off (tasks/plan-remote-access.md). `motd` prints the login banner's one line from the last answer | dispatch branch → `commands/remote.py` | all but `motd` do (root: the pairing key belongs to root) |
 | `restart` | operator | restart managed units, `reset-failed` first | `cmd_restart` → `lifecycle.py`, `component_state.py`, `catalog.py` | yes (root + lock) |
 | `sink` | operator | the site sink switch, in the sink words of tasks/plan-sink-control.md §2.1. `status` shows it. `off` sends no data and stores nothing new for upload; it needs `--reason` and a typed confirmation or `--yes`. `fill` stores and sends no data; until v3.79, sigmond's trim keeps FT8 spots for one hour and WSPR spots for 24 hours, sent or not. `upload` stores and sends. With an hs-uploader that offers `gate`, each verb writes `site.toml` and the `[uploads]` mirror together ([The site sink switch](#the-site-sink-switch)); without it, `[uploads]` alone, as v3.78 did. Leaving `off` keeps today's and yesterday's (UTC) packages and moves older ones aside; it refuses while packaging runs. The verb is site-only: `smd sink <client>` refuses. It shares its handler with `upload` | `cmd_sink` → `commands/sink.py`, `commands/config.py` (`cmd_config_uploads`, `_site_change`, `_close_doors`), `sink_levers.py`, `sink_mirror.py`, `sink_state.py`, `sink_doors.py` | all but `status` do (root) |
-| `storage` | operator, and the 2-minute timer | the storage capacity ledger (docs/superpowers/specs/2026-11-04-storage-capacity-design.md). `status` prints each store's fill and stage, each client's holding, target and allotment, and the alarms; `--json` prints the tick's status file unchanged. `share` sets a client's share weight; `directive` sets a client's final-stage policy, or marks the station hands-off for at most 14 days (the ledger then alarms but stops no client). `tick` runs one pass; `sigmond-storage.timer` runs it every 2 minutes. Not `smd admin storage`, which trims the sink and migrates ClickHouse | `cmd_storage` → `commands/storage.py`, `storage/tick.py` (`run_tick`, `Runners`) | all but `status` do (root) |
+| `storage` | operator, and the 2-minute timer | the storage capacity ledger (docs/superpowers/specs/2026-11-04-storage-capacity-design.md; client side in [`../CLIENT-CONTRACT.md`](../CLIENT-CONTRACT.md) §17.7). `status` prints each store's fill and stage, each client's holding, target and allotment, and the alarms; `--json` prints the tick's status file unchanged. `share` sets a client's share weight. `directive` sets a client's final-stage policy, marks the station hands-off for at most 14 days (the ledger then alarms but stops no client), or switches the stop lever (`stop-lever on\|off`, off by default). `guard` makes every data writer wait for its mount and makes the bare directory beneath refuse writes; `smd apply` and `smd update` run it. `tick` runs one pass; `sigmond-storage.timer` runs it every 2 minutes. Not `smd admin storage`, which trims the sink and migrates ClickHouse | `cmd_storage` → `commands/storage.py`, `storage/tick.py` (`run_tick`, `Runners`), `storage/guard.py`, `storage/clientcall.py` | all but `status` do (root) |
 | `status` | daily | service health snapshot plus each client's own inventory: version, channels, frequencies, timing judge, PSWS state | `cmd_status` → `catalog.py`, `cpu.py`, `psws.py`, `timing_judge.py`, `ui.py` | no |
 | `start` | operator | start managed units in `order_units()` order; also enables an installed-but-disabled named component | `cmd_start` → `lifecycle.py`, `component_state.py`, `harmonize.py` | yes (root + lock) |
 | `stop` | operator | stop managed units, reverse start order | `cmd_stop` → `lifecycle.py` | yes (root + lock) |
 | `timing` | daily | timing authority in one line — tier, offset, σ, judge age, GPSDO state | `cmd_timing_show` → `commands/timing_show.py` (reads `/run/hf-timestd/authority.json`) | no |
 | `tui` | operator | launch the three-panel Textual configurator; re-execs into the production venv if Textual is missing | `cmd_tui` → `tui/` (lazy import) | via its screens |
-| `update` | station-inward | the pull-orientation updater: plan first, `--apply` executes; refuses rather than discarding a colliding local change | `cmd_update` → `update.py`, `provenance.py`, `catalog.py`, `doctor.py`, `wisdom.py` | `--apply` does (root) |
+| `update` | station-inward | the pull-orientation updater: plan first, `--apply` executes; refuses rather than discarding a colliding local change, and refuses a component held at its blessed pin unless `--unpin` (release the holds) or `--latest` (move everything to the branch tip and re-pin) says otherwise | `cmd_update` → `update.py`, `provenance.py`, `catalog.py`, `doctor.py`, `wisdom.py` | `--apply` does (root) |
 | `upload` | operator | the legacy words for the site sink switch, kept as an alias: `status`, `on` (store and send; same as `sink upload`), `hold`/`off` (same as `sink fill`: send no data; the trim keeps FT8 spots about an hour and WSPR spots about a day, and `on` then sends what is still stored), `discard` (same as `sink off`; needs `--reason` and a typed confirmation or `--yes`). Leaving `discard`, by any verb, keeps today's and yesterday's (UTC) packages and sets older ones aside, as `sink upload` does. `config uploads` reaches the same handler | `cmd_config_uploads` → `commands/config.py`, `coordination.py` (`Uploads.mode`), `uploader_manifest.py` (`effective_mode`, which serves only the render without `gate`, and renders the legacy hold when the hs-uploader the service runs cannot honour discard), `sink_doors.py` | all but `status` do (root) |
 | `version` | station-inward | image lineage plus each component's commit read live from its checkout | `cmd_version` → `provenance.py`, `doctor.py` | no |
 | `versions` | station-inward | alias of `version` | `cmd_version` | no |
@@ -174,8 +186,8 @@ left to list: the v2 removals in
 | `admin environment` | debugging | peers declared in `environment.toml` versus what is observed: `list`, `probe`, `describe` | `cmd_environment_*` → `commands/environment.py`, `discovery/`, `environment_kinds.py` | `probe` writes the observation cache |
 | `admin service-events` | platform | restarts and memory (OOM) kills per service over 24 h: `collect` (root, sigmond-service-events.timer every 5 min) writes /run/sigmond/service-events.json; `show` prints it | `bin/smd` → `service_events.py` | `collect` writes the status file |
 | `admin heartbeat` | fleet | assemble + spool one 5-minute envelope (`emit`) or show the spool (`show`) | `cmd_admin_heartbeat_emit` / `cmd_admin_heartbeat_show` → `heartbeat.py`, `heartbeat_schema.py`, `uploader_manifest.py`, `provenance.py` | `emit` writes the spool |
-| `admin instance` | multi-reporter hosts | per-reporter client instance lifecycle: `list`, `show`, `add`, `remove`, `edit`, `enable`, `disable`, `migrate` | `cmd_instance_*` → `instance.py` | all but `list`/`show` (root) |
-| `admin log` | debugging | follow a client's journal, or its file logs with `--files`; `--level` sets the level via `coordination.env` + SIGHUP | `cmd_log` → `log_cmd.py`, `component_state.py`, `catalog.py` | `--level` writes `coordination.env` (ledger row 53) |
+| `admin instance` | multi-reporter hosts | per-reporter client instance lifecycle: `list`, `show`, `add`, `remove`, `edit`, `enable`, `disable`, `migrate`, `canonical` (print a reporter id in storage form; read-only), and `split` (run codar-sounder or hfdl-recorder as one instance per receiver in the site profile, retiring the radiod-keyed ones; dry run by default) | `cmd_instance_*` → `instance.py`, `instance_split.py` | all but `list`/`show`/`canonical` (root) |
+| `admin log` | debugging | follow a client's journal, or its file logs with `--files`; `--level` sets the level via `coordination.env` + SIGHUP | `cmd_log` → `log_cmd.py`, `component_state.py`, `catalog.py` | `--level` writes `coordination.env` |
 | `admin manifest` | after a release | adopt a blessed image manifest onto an already-running host (`adopt`), or restore one (`restore`) | `cmd_manifest_adopt`, `cmd_manifest_restore` → `manifest_adopt.py`, `manifest_restore.py`, `provenance.py` | `--apply` does (root) |
 | `admin native-build` | after a pin moves | rebuild each native source (onion, wsjtx, ubersdr_wsprd) whose checkout sits off sigmond's pin; plan-first. `smd update` runs it as a step, and sigmond's `install.sh` runs it at its end | `cmd_admin_native_build`, `_native_rebuilds_due`, `_run_native_builder`, `_native_git` | `--apply` does (root, per step) |
 | `admin personalize` | first boot of a clone | re-identify a cloned image: hostname, identity, config render, secrets, validate; plan-first | `cmd_personalize` → `site_profile.py`; the rest of the sequence shells out to `smd config render`, `smd admin secrets status`, `smd admin validate` | `--yes` does (root) |
@@ -213,7 +225,8 @@ fleets break — [`../../CONTRIBUTING.md`](../../CONTRIBUTING.md) §3 is canonic
 **Station-inward (pull)**: you are on the machine, it looks out to the
 repositories for itself — `smd version`, `smd doctor`, `smd update` (plan),
 `smd update --apply`, then `smd admin manifest adopt` to record which blessed
-baseline it now satisfies. It needs git remotes and nothing else, which is why
+baseline it now satisfies. `smd align` moves a station to the latest blessed
+sigmond release in one planned step. It needs git remotes and nothing else, which is why
 it is the only orientation a public install will ever have.
 **Fleet-outward (push)**: you are the fleet administrator deciding *when* and
 in *what order*; the mutation is still the station-inward procedure, run on
@@ -341,13 +354,19 @@ reads wspr-recorder at `upload` again, the step restores the recorded
 enablement links, provided the unit link still names the recorded target.
 It starts nothing.  Every other lever stays lowered.
 
-**In-process senders.**  psk-recorder and meteor-scatter can each post to
-pskreporter from their own process.  The renderer reads each instance's
-environment and leaves out the daemon pipeline of a producer whose instances
-all send in-process, so the same spots do not post twice.  A doubtful
-reading keeps the pipeline.  On the shared form the pipeline stays and the
-renderer warns.  The harmonize rule `uploader-inprocess-drift` flags a
-manifest that no longer matches the environments.
+**In-process senders.**  The standard sends every WSPR, FT4, FT8 and MSK144
+spot to wsprdaemon.org alone. The server forwards copies to wsprnet.org and
+pskreporter.info, so a station posts to neither. psk-recorder defaults to
+`PSK_DELIVERY_PIPELINES=server-merge` and meteor-scatter to
+`METEOR_SCATTER_DELIVERY_MODE=deposit`, and neither runs a sender in that state
+(`uniform_routing.py` moves older instances onto it). An old instance may still
+carry an in-process pskreporter sender (`direct`). The renderer reads each
+instance's environment and leaves out the daemon pipeline of a producer whose
+instances all send in-process, so the same spots do not post twice
+(`inprocess_senders.py`). A doubtful reading keeps the pipeline. On the shared
+form the pipeline stays and the renderer warns. The harmonize rule
+`uploader-inprocess-drift` flags a manifest that no longer matches the
+environments.
 
 **The write sequence.**  After the sink switch steps above:
 
@@ -398,6 +417,9 @@ align --apply`, which moves each checkout to the latest blessed release,
 pinned, and re-runs bring-up.
 
 ## The site sink switch
+
+A repo install holds all uploads until the operator runs `smd sink upload`
+(sigmond's `install.sh` says so at its end).
 
 `smd sink off|fill|upload`, `smd upload on|hold|off|discard` and `smd config
 uploads enable|disable` all reach `cmd_config_uploads`.  With an

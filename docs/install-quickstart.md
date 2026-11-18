@@ -1,8 +1,13 @@
 # Sigmond install quickstart
 
+> **Audience:** operator, contributor
+> **Status:** reference; the canonical bare-metal path is [install-bare-metal.md](install-bare-metal.md)
+> **Verified against:** sigmond f3b0c6e on 2026-11-18
+> **Canonical for:** what `install.sh` does, step by step
+
 > **Start elsewhere (2026-11-11).**  Sigmond installs two ways.  For a station on your own Linux
 > machine, with no Proxmox, follow [install-bare-metal.md](install-bare-metal.md); `smd bringup`
-> does what this page describes.  For a dedicated computer from the USB image (a Proxmox host
+> runs the steps below and the bring-up after them.  For a dedicated computer from the Proxmox USB image (a Proxmox host
 > with the station in a VM), follow
 > [sigmond-appliance INSTALL.md](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md).
 > This page stays as the reference for the `install.sh` bootstrap step by step.
@@ -100,7 +105,7 @@ That's it. After the success banner you have:
 
 ```bash
 which smd                  # → /usr/local/bin/smd
-smd list --catalog         # prints the catalog of known clients
+smd component list --catalog   # prints the catalog of known clients
 ls -la /opt/git/sigmond/   # both repos owned by sigmond:sigmond
 ```
 
@@ -153,11 +158,11 @@ sudo userdel -r sigmond                      # only if no human user shares the 
 > the first move.
 
 ```bash
+smd bringup dasi2                # install, configure and start the core station
+# or by hand:
 smd tui                          # interactive configurator
-# or, headless:
-smd install radiod
+smd install ka9q-radio           # installing a component also enables it in topology
 smd install wspr-recorder
-sudo vi /etc/sigmond/topology.toml    # set enabled = true
 smd start
 smd status
 ```

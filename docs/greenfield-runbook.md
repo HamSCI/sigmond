@@ -1,5 +1,10 @@
 # Greenfield install runbook — bare host to recording station
 
+> **Audience:** operator, contributor
+> **Status:** reference; the canonical bare-metal path is [install-bare-metal.md](install-bare-metal.md)
+> **Verified against:** sigmond f3b0c6e on 2026-11-18
+> **Canonical for:** the order of the manual bring-up phases and the host-tuning details behind them
+
 > **Superseded as the starting point (2026-11-08).**  For a bare-metal install, start at
 > [install-bare-metal.md](install-bare-metal.md): `smd bringup` now does the phases below in one
 > command.  This runbook stays as the reference for doing them by hand.
@@ -285,10 +290,13 @@ uploading client:
 
 ```bash
 smd config upload wspr-recorder                     # status: which instances upload
-smd config upload wspr-recorder AC0G/SIGMA --on     # enable (wsprnet + wsprdaemon)
+smd config upload wspr-recorder AC0G/SIGMA --on     # enable (spots go to wsprdaemon.org, which forwards them)
 smd config upload psk-recorder  AC0G/SIGMA --on     # enable (wsprdaemon.org forwards to pskreporter)
 sudo systemctl restart 'wspr-recorder@AC0G/SIGMA'   # apply
 ```
+
+A repo install starts with every upload held, whatever these flags say. Release them with
+`smd sink upload` once the station checks out ([install-bare-metal.md](install-bare-metal.md) section 5).
 
 This flips the enable flag — **identity** comes from `smd config render`
 (site-profile), and **credentials** from `smd admin secrets`. `smd admin
@@ -321,7 +329,7 @@ Spot-check data is actually flowing:
 
 ```bash
 sudo find /dev/shm/wspr-recorder -name '*.wav' | wc -l     # WSPR WAVs in flight
-sudo find /var/lib/timestd/raw_buffer -maxdepth 2 -type d  # hf-timestd Digital RF
+sudo find /var/lib/timestd/raw_buffer -maxdepth 2 -type d  # hf-timestd Digital RF (raw IQ stored as F16 by default since 2026-11-18)
 systemctl list-timers 'grape-*' 'timestd-*'                # hf-timestd timers active
 smd watch gpsdo --once                                     # GPSDO locked? 3D fix + PLL + PPS (disciplines the rx888)
 ```

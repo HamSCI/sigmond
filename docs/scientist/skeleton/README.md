@@ -2,7 +2,7 @@
 
 > **Audience:** scientist
 > **Status:** current
-> **Verified against:** sigmond 55b9e68 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
+> **Verified against:** sigmond f3b0c6e on 2026-11-18 — contract and storage pointers re-read against CLIENT-CONTRACT.md (version 0.9) and ADD-A-CLIENT.md; the skeleton itself still declares contract 0.8
 > **Canonical for:** the copyable Tier-1 scaffold (nothing else — the narrative is [becoming-a-client.md](../becoming-a-client.md))
 
 Six files that sigmond will accept as a client. They are documentation
@@ -290,8 +290,9 @@ On a station the venv is `/opt/git/sigmond/<client>/venv/` and the symlink to
 | `deps.pypi` version, and `pyproject.toml`'s empty `dependencies` | whatever ka9q-python your client is tested against — both lists, they serve different readers |
 | no `install.sh` | the standalone installer §5 requires (see above) — it must also create the `myrec` service user/group and `/etc/my-recorder/env/`, the same setup `deploy.toml`'s `mkdir`/`owner` steps do for a fleet install |
 | `[[hs_uploader.pipeline]]` — absent | a pipeline declaration, if your rows should leave the station ([becoming-a-client.md](../becoming-a-client.md#shipping-it-upstream)) |
+| storage verbs and `data_sinks` classes — absent | `storage holdings`, `storage trim` and `storage final`, plus `classes` on your file sinks and `contract_version = "0.9"`. Without them sigmond registers your files as unmanaged, with no floor and no trim policy ([ADD-A-CLIENT.md §9](../../ADD-A-CLIENT.md#9-storage-tell-sigmond-what-you-hold-client-contractmd-177)) |
 | `[client_features]` — absent | one block per TUI screen you want to appear on ([ADD-A-CLIENT.md §5](../../ADD-A-CLIENT.md#5-client_features--tui-registration-drop-in)) |
-| `[[deps.pypi]] ka9q-python = "3.25.2"` in `deploy.toml` | a version actually on PyPI (**3.22.0** is; 3.25.2 is not) — or the `git+https://github.com/HamSCI/ka9q-python@v3.25.2` checkout install [capture-quickstart.md](../capture-quickstart.md) uses instead |
+| `[[deps.pypi]] ka9q-python = "3.25.2"` in `deploy.toml` | a version you have checked on PyPI (when this page was written 3.22.0 was there and 3.25.2 was not; the ka9q-python repo now stands at 3.27.0) — or the `git+https://github.com/HamSCI/ka9q-python@v3.25.2` checkout install [capture-quickstart.md](../capture-quickstart.md) uses instead |
 
 ## License
 

@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond a00d977 on 2026-11-14 — code (lib/sigmond/commands/check.py, lib/sigmond/service_events.py)
+> **Verified against:** sigmond f3b0c6e on 2026-11-18 — code (lib/sigmond/commands/check.py, lib/sigmond/service_events.py)
 > **Canonical for:** what the services check in `smd check` means
 
 Check id: `platform.services`

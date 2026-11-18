@@ -6,11 +6,18 @@ coordinated mesh rather than as isolated receivers. Two axes of diversity
 compound: **spatial** (many receivers, §2) and **modal** (several different
 GPS-governed ionospheric instruments at each node, §3). It also explains why
 that capability is **resilient to the loss of any single transmitter**,
-including CHU (§4). `hf-timestd` is used as the worked example throughout, but it
+including CHU, which fell silent in 2026 (§4). `hf-timestd` is used as the worked example throughout, but it
 is one instrument among several.
 
 **Audience:** Station operators, HamSCI collaborators, and anyone weighing the
 value of adding a node to the network.
+
+**Verified against:** sigmond f3b0c6e on 2026-11-18. Client names and roles
+checked against `etc/catalog.toml`; the transmitter list follows the 2026 loss
+of CHU.
+
+**Canonical for:** what a mesh of stations can deliver, as a design argument.
+It states no measured network result.
 
 **Status:** Forward-looking. Single-station capability is implemented and live
 (see [`hf-timestd/docs/PHYSICS.md`](https://github.com/HamSCI/hf-timestd/blob/main/docs/PHYSICS.md)); the
@@ -22,7 +29,7 @@ network capability described here is what those stations enable *collectively*.
 
 A single DASI2 station measures path-integrated ionospheric quantities along a
 handful of fixed great-circle paths — from the receiver to each HF time
-standard it can hear (WWV, WWVH, CHU, BPM). Its primary ionospheric science
+standard it can hear (WWV, WWVH and BPM; CHU went silent in 2026). Its primary ionospheric science
 product is **carrier-phase differential TEC (dTEC)**: the rate of change of
 total electron content along each path, at ~6 mTECU/min sensitivity and
 minute-level cadence, anchored to an absolute scale by a local dual-frequency
@@ -113,7 +120,7 @@ directly co-registrable in time. Without a common, precise timebase, fusing a
 TEC sample with an oblique ionogram with a magnetometer trace would be guesswork;
 with it, they are the same clock's view of one ionosphere.
 
-- **`hf-tec` — coded-beacon absolute TEC.** PRN-coded HF beacons at known
+- **`hf-tec` — coded-beacon absolute TEC (optional client).** PRN-coded HF beacons at known
   locations and frequencies, received against GPS time, yield absolute
   group-delay slant TEC and differential carrier-phase TEC — much as GNSS does,
   but at HF on dedicated beacon paths. This is the purpose-built **absolute-TEC**
@@ -123,7 +130,7 @@ with it, they are the same clock's view of one ionosphere.
   absolute-TEC samples feeding the tomographic input of §2.3 — and a second,
   independent absolute anchor alongside GNSS-VTEC.
 
-- **`codar-sounder` — oblique ionograms.** Opportunistic reception of CODAR
+- **`codar-sounder` — oblique ionograms (core client of the dasi2 profile).** Opportunistic reception of CODAR
   coastal-radar FMCW chirps, GPS-timed, produces swept-frequency **oblique
   soundings**: a *measured dispersion curve and MUF* along each path — the one
   thing a fixed-frequency dTEC instrument cannot produce. A network of
@@ -133,7 +140,7 @@ with it, they are the same clock's view of one ionosphere.
   the reanalysis currently assumes** (the fixed-9.0-MHz `foF2_noon` in
   `hf-timestd`'s reanalysis).
 
-- **`hfdl-recorder` — dense opportunistic illuminators.** HFDL ground stations
+- **`hfdl-recorder` — dense opportunistic illuminators (core client of the dasi2 profile).** HFDL ground stations
   are tens of fixed, known-location HF transmitters worldwide across many
   frequencies (~2.6–21 MHz). GPS-timestamped reception of their bursts adds
   path-integral, SNR, and Doppler observables on **far more azimuths and
@@ -161,7 +168,10 @@ with it, they are the same clock's view of one ionosphere.
 - **`wspr-recorder` / `psk-recorder` — the existing dense layer.** WSPR/FST4W and
   FT4/FT8 already have *enormous* distributed amateur coverage (wsprnet,
   wsprdaemon, PSKReporter), so the network effect for those modes is not
-  hypothetical — it exists today. Their spots are a ready-made, globally dense
+  hypothetical — it exists today. A sigmond station sends every WSPR,
+  FT4/FT8 and MSK144 spot to wsprdaemon.org alone, and wsprdaemon.org forwards
+  it to wsprnet.org and pskreporter.info. CODAR and HFDL timing rows go to
+  sigmondb on the same server, and GRAPE and magnetometer data go to PSWS. Their spots are a ready-made, globally dense
   propagation dataset (path, SNR, frequency, often Doppler/drift) the
   GPS-governed instruments above can be cross-referenced against. The sigmond
   node's contribution is to add the *precisely-timed, physics-grade* instruments
@@ -176,16 +186,15 @@ large one — co-registered in time by shared GPS governance, spanning **driver*
 `hfdl-recorder`, `wspr`/`psk`). Each modality covers a blind spot of the others,
 and the network replicates that coverage across space.
 
-## 4. Why the network does not depend on CHU — or any one transmitter
+## 4. Why the network does not depend on any one transmitter, CHU included
 
-The world's HF time-standard transmitters are a slowly shrinking resource. CHU
-(Ottawa) is the nearest-term risk: it has faced recurrent funding threats and
-its disappearance would, for a **single central-US station**, be painful — CHU
-is that station's only northeast azimuth, its only non-US-longitude path, the
-only source of FSK-decoded verified UTC / DUT1 / leap-second data, and it fills
-frequency gaps (3.330 / 7.850 / 14.670 MHz) between WWV's allocations. A lone
-receiver dependent on exactly four transmitters degrades sharply when one goes
-dark.
+The world's HF time-standard transmitters form a shrinking resource, and in
+2026 CHU (Ottawa) went silent. For a **single central-US station** that loss
+hurt. CHU gave that station its only northeast azimuth and its only
+non-US-longitude path. It carried the only FSK-decoded verified UTC, DUT1 and
+leap-second data. It also filled frequency gaps (3.330 / 7.850 / 14.670 MHz)
+between WWV's allocations. A lone receiver that depends on a handful of
+transmitters degrades sharply each time one goes dark.
 
 **A network does not share that fragility, by construction:**
 
@@ -200,19 +209,18 @@ dark.
   thins coverage locally, and the common-illuminator and tomographic methods of
   §2 keep working on the transmitters that remain.
 - **Redundant absolute anchoring.** Every node carries its own GNSS VTEC
-  anchor, so the absolute scale never depended on CHU's verified-UTC stream in
-  the first place. CHU's time-code was a nice independent cross-check at one
-  site; the network's absolute scale is distributed and GNSS-backed.
+  anchor, so the absolute scale never depended on CHU's verified-UTC stream.
+  CHU's time-code served as an independent cross-check at one site. The
+  network's absolute scale stays distributed and GNSS-backed.
 
 In short: the same step that turns the instrument from a perturbation sensor
 into an imager (§2) *also* makes it robust to the attrition of the transmitter
 infrastructure it listens to. Resilience and capability come from the same
 design choice — more receivers.
 
-> **Operational note for CHU specifically:** while CHU remains at risk, stations
-> should keep its routines *reversibly disabled* rather than deleted when it
-> goes off-air — it has returned from outages before, and its decoder and path
-> geometry should remain instantly re-enablable.
+> **Operational note for CHU:** hf-timestd hears WWV, WWVH, BPM and WWVB
+> (60 kHz) today. Its CHU decoder and path geometry remain in the code, so a
+> station can re-enable them if the signal returns.
 
 ## 5. Integration with the wider ecosystem
 

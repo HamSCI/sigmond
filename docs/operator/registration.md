@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 5554c6e on 2026-11-13 — whole page re-read; `smd psws` and `smd config psws` against `--help` and psws.py, timers against the unit files, uploader unit names against bin/smd; sample outputs dated 2026-08 not re-run. Routing passages: sigmond 37c46f1 on 2026-11-13 — every spot goes to wsprdaemon.org, checked against uniform_routing.py, uploader_manifest.apply_proxying, upload.py, bin/smd `watch uploads` and wspr-recorder's hs_uploader_shim.py. Earlier: sigmond 913bfed on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 6406025 on 2026-10-10: remote-access words and the addresses the host relays checked against commands/remote.py, the wizard's switch and the appliance console panel; held packages against sink_doors.py
+> **Verified against:** sigmond f3b0c6e on 2026-11-18 — whole page re-read; the sink-switch start state and the destinations checked against `smd sink --help` and the routing code. Earlier: sigmond 5554c6e on 2026-11-13 — `smd psws` and `smd config psws` against `--help` and psws.py, timers against the unit files, uploader unit names against bin/smd; sample outputs dated 2026-08 not re-run. Routing passages: sigmond 37c46f1 on 2026-11-13 — every spot goes to wsprdaemon.org, checked against uniform_routing.py, uploader_manifest.apply_proxying, upload.py, bin/smd `watch uploads` and wspr-recorder's hs_uploader_shim.py. Earlier: sigmond 913bfed on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 6406025 on 2026-10-10: remote-access words and the addresses the host relays checked against commands/remote.py, the wizard's switch and the appliance console panel; held packages against sink_doors.py
 > **Canonical for:** getting a station's uploads accepted (PSWS, wsprnet, pskreporter, wsprdaemon; airframes.io, optional)
 
 Your station starts hearing signals the moment the install finishes. This page
@@ -493,8 +493,9 @@ reporting — start at
 
 Once its site sink switch reads `upload`, a station finished on Tuesday
 afternoon shows spots the same afternoon and its first PSWS products on
-Wednesday. A new station starts at `off` until someone runs `smd sink upload`.
-Don't judge PSWS on day one.
+Wednesday. A new station starts at `off` until someone runs `smd sink upload`. A station
+installed from the repositories rather than the USB image holds every upload the
+same way. Don't judge PSWS on day one.
 
 > **One switch that stops every upload at once.** The site sink switch decides what
 > leaves the station, and someone may have set it to send no data on purpose. Check it

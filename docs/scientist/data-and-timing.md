@@ -2,7 +2,7 @@
 
 > **Audience:** scientist
 > **Status:** current
-> **Verified against:** sigmond 3008453 on 2026-10-07 — sink writer links checked against lib/sigmond/hamsci_sink/
+> **Verified against:** sigmond f3b0c6e on 2026-11-18 — clock story and tier table re-read against hf-timestd's measurement model and chrony refclock file; sink path against hs-uploader's writer; upload destinations against hs-uploader and the client READMEs; earlier, 3008453 on 2026-10-07: sink writer links checked against lib/sigmond/hamsci_sink/. Live readings dated 2026-08-23 stay as dated history
 > **Canonical for:** where station data lands and what its timing labels mean
 
 Two questions arrive the moment a capture works: *where did it go*, and *what
@@ -30,7 +30,7 @@ read-only reading taken while writing this page.
 | Shape | Where | Who reads it | Declared as |
 |---|---|---|---|
 | **File tree** — I/Q, SigMF, HDF5, JSONL, PNG | `/var/lib/<client>/…` | you, and `filetree` uploader pipelines | `disk_writes`, promoted to `data_sinks` ([§17.4](../CLIENT-CONTRACT.md#174-backwards-compatibility-with-disk_writes-v05)) |
-| **Rows** — spots, detections, per-cycle measurements | one table in `/var/lib/sigmond/sink.db` | `hs-uploader`, which drains and ships them | `data_sinks` with `kind = "service"` ([§17.3](../CLIENT-CONTRACT.md#173-self-disclosure-data_sinks-in-inventory)) |
+| **Rows** — spots, detections, per-cycle measurements | one table in the shared sink, `/var/lib/hs-uploader/sink.db` (a station that predates it keeps `/var/lib/sigmond/sink.db`) | `hs-uploader`, which drains and ships them | `data_sinks` with `kind = "service"` ([§17.3](../CLIENT-CONTRACT.md#173-self-disclosure-data_sinks-in-inventory)) |
 | **Nothing durable** | — | — | a Tier-0 capture in your own home directory is a legitimate third answer |
 
 The split is the contract's, not a convention: §17 defines exactly two sink
@@ -46,11 +46,13 @@ your product is files, the sink is not for you** — write to
 ```text
 /var/lib/timestd/            hf-timestd: raw IQ archive, products, status
 /var/lib/event-recorder/     Tier-0 SigMF captures, one directory per job
-/var/lib/sigmond/sink.db     the shared row queue every client writes to
+/var/lib/sigmond/sink.db     the shared row queue every client writes to (older layout;
+                             new stations use /var/lib/hs-uploader/sink.db)
 /var/lib/mag-recorder/       magnetometer JSONL, one file per UTC day
 /var/lib/psk-recorder/       FT8/FT4 per-radiod state
 /var/lib/wspr-recorder/      WSPR per-reporter state and slot files
-/var/lib/hs-uploader/        the uploader's own watermarks.db (not your data)
+/var/lib/hs-uploader/        the uploader's own watermarks.db (not your data), and the
+                             shared sink.db on a station set up after that move
 /var/log/gap-hourly.tsv      the honest hourly loss sample
 ```
 
@@ -73,8 +75,18 @@ Live b4, 2026-08-23: six channels — `SHARED_2500`, `SHARED_5000`,
 `WWV_25000/20260823` by 17:00Z, i.e. 203 chunk pairs. The filename is the Unix
 epoch second of the chunk boundary and it matches the sidecar's
 `minute_boundary` exactly (`1787503800.bin.zst` ↔ `"minute_boundary":
-1787503800`). One complete day of one 24 kHz F32 channel is ~15.07 GB (see
+1787503800`). One complete day of one 24 kHz F32 channel measured ~15.07 GB that day (see
 [station-capabilities.md §Storage](station-capabilities.md#storage-per-channel-hour)).
+
+Since 2026-11-18 hf-timestd stores these chunks as F16 by default
+(`archive_dtype = "f16"`, half the bytes, zstd only). The sidecar's `dtype`
+then reads `complex-f16` instead of `complex64`, with a `scale` field and an
+`f16_check` block that measures what the narrower format cost. hf-timestd's own
+readers return complex64 either way. If you read these files with your own code,
+decode by the sidecar's `dtype` and `scale` and never assume the width. The
+sidecar below predates the change and shows `complex64`
+(source: `hf-timestd/src/hf_timestd/core/iq_codec.py`,
+`binary_archive_writer.py`).
 
 Three properties of that layout are the ones to steal:
 
@@ -225,11 +237,17 @@ CREATE INDEX idx_pending_uploads_cycle_time
 ```
 
 (source: `sqlite3 /var/lib/sigmond/sink.db ".schema pending_uploads"` on b4,
-2026-08-23.)  Since v3.70 the writer's DDL lives in hs-uploader's
+2026-08-23; b4 predates the move to `/var/lib/hs-uploader/sink.db`.)  Since v3.70 the writer's DDL lives in hs-uploader's
 `src/hs_uploader/sink/writer.py`, and sigmond carries a copy in
 [`lib/sigmond/hamsci_sink/_bundled.py`](../../lib/sigmond/hamsci_sink/_bundled.py).
 The table there gains two columns, `producer` and `local`, and the writer adds
 both to an older `sink.db` when it opens one.
+
+The writer picks the file in this order: `HAMSCI_SINK_PATH` or
+`SIGMOND_SQLITE_PATH` in the environment, then `path` in
+`/etc/hs-uploader/sink.toml`, then an existing `/var/lib/sigmond/sink.db`, then
+`/var/lib/hs-uploader/sink.db` (source: `hs-uploader/src/hs_uploader/sink/writer.py`,
+`sink_path`).
 
 Live b4, 2026-08-23, the queue held:
 
@@ -278,14 +296,32 @@ which transports exist, is
 — including the flat statement that **there is no `sqlite` → PSWS pairing**,
 so rows in the sink cannot reach PSWS at all today.
 
+### Where the data goes after it lands
+
+Rows and files leave the station by different routes, and a repo install holds
+all of them until the operator runs `smd sink upload`.
+
+| What | Where it ships | By |
+|---|---|---|
+| WSPR, FT4/FT8 and MSK144 spots | wsprdaemon.org only. It forwards them to wsprnet.org and pskreporter.info under each spot's own reporter id. Stations post to neither directly; `--wsprnet-proxy` retired on 2026-11-13 | hs-uploader's `wsprdaemon_tar` transport |
+| CODAR and HFDL arrival and capture rows | sigmondb, on the wsprdaemon.org server | the same tar transport, in its own tagged tars (`sigmondb-tar` feature) |
+| GRAPE spectrogram packages and magnetometer data | PSWS (the HamSCI Personal Space Weather Station network), as file trees | hs-uploader's `psws_dataset` transport |
+| Tier-0 captures | nowhere. They stay in the directory you chose | you |
+
+(source: `hs-uploader/README.md` §transports and `sigmondb-tar`;
+`codar-sounder/README.md` and `hfdl-recorder/README.md` on their sigmondb
+pipelines; `smd sink --help`.) The next page covers the pipeline
+declaration: [becoming-a-client.md §Shipping it upstream](becoming-a-client.md#shipping-it-upstream).
+
 ### Where not to write
 
 `/var/lib/<client>/` is for *installed clients*. A Tier-0 capture belongs in
 your own home directory or `/tmp` unless the operator has agreed otherwise in
-advance — and the reason is not tidiness: **you are sharing a disk with a
-client that deletes.** At 95 % full hf-timestd pauses writes and alerts, and
-if the disk is still ≥ 95 % ten minutes later it begins deleting the *oldest
-recordings* until the disk is back under 90 %
+advance — and the reason is not tidiness: **you are sharing a disk with
+clients that trim.** Sigmond's storage ledger asks clients to trim as a store
+fills, and at 95 % full hf-timestd pauses writes and alerts. If the disk stays
+≥ 95 % for ten minutes it begins deleting the *oldest recordings* until the
+disk is back under 90 %
 ([station-capabilities.md §Storage](station-capabilities.md#storage-per-channel-hour)).
 Ask for headroom before the event, not during it.
 
@@ -310,14 +346,16 @@ Ask for headroom before the event, not during it.
    to the GPS epoch, read at the moment the status packet is built — so
    radiod's advertised epoch is only ever as good as the host's discipline
    ([character.md §The anchor pair is not atomic](../hardware/character.md#the-anchor-pair-is-not-atomic)).
-4. **On a station running hf-timestd, that host clock is itself disciplined by
-   chrony from hf-timestd's own SHM feed**, which closes a loop: hf-timestd's
-   six-clocks table says `system_time` "inherits whatever chrony's source
-   provides — may include hf-timestd's own SHM output (feedback)", and
-   `radiod_clock` "= `system_time`" (source:
-   [`hf-timestd/docs/TIMING-PIPELINE-WIRING.md`](https://github.com/HamSCI/hf-timestd/blob/main/docs/TIMING-PIPELINE-WIRING.md)
-   §2).
-5. **hf-timestd publishes, independently of that loop, the tier its evidence
+4. **hf-timestd no longer lets its own recovered timing steer that host
+   clock.** Its measurement model names one measurand, where the sample ruler's
+   zero lies against UTC, and rules that a source recovered from the sample
+   stream may not vote on the host clock. Chrony's electorate holds only
+   sources that arrive by another path: a LAN or GPS peer, public NTP. The
+   fusion feed (`FUSE`) retired on 2026-10-22. The T6 feed (`HPPS`) stays
+   configured with `noselect`, so chrony measures it and never selects it
+   (source: `hf-timestd/docs/design/MEASUREMENT_MODEL.md` §7.1.1;
+   `hf-timestd/config/chrony-timestd-refclocks.conf`).
+5. **hf-timestd publishes, independently of the host clock, the tier its evidence
    supports and the RTP↔UTC offset that corrects radiod's epoch — so record
    which tier labelled your data**, whether or not you apply the correction,
    because the annotation is what has to travel with the sample. (§18.5's
@@ -330,31 +368,29 @@ Ask for headroom before the event, not during it.
    and so does
    [station-capabilities.md §Timing](station-capabilities.md#timing-you-can-rely-on--tiers).)
 
-Sentence 4 deserves its own paragraph, because it is the thing most likely to
-be misunderstood. On b4, live 2026-08-23 17:05Z, `chronyc sources` showed
-`#* FUSE` — chrony's *selected* reference was hf-timestd's own fusion SHM feed
-(SHM unit 1, `refid FUSE`), with `#? HPPS` (SHM unit 2, the T6 BPSK-PPS feed)
-also present but unselected; `chronyc tracking` reported `Reference ID :
-46555345 (FUSE)`. The SHM-unit mapping is hf-timestd's (source:
-[`hf-timestd/docs/DUAL_CHRONY_FEED_ARCHITECTURE.md`](https://github.com/HamSCI/hf-timestd/blob/main/docs/DUAL_CHRONY_FEED_ARCHITECTURE.md),
-current-feeds table: unit 1 `FUSE` = calibrated L2 fusion timing, unit 2
-`HPPS` = T6 BPSK-PPS via the matched-filter calibrator; the refclock lines are
-live in `/etc/chrony/conf.d/timestd-refclocks.conf` on b4). The station's
-chrony chain and why nothing may restart it is
-[timing-chain-architecture.md](../timing-chain-architecture.md) — read it as
-the design note it says it is (`Status: Design (proposed 2026-06-06)`), not as
-a description of what every station runs today.
+Sentence 4 describes a change, so check which generation of station you
+read from. Live b4 on 2026-08-23 still showed `#* FUSE`: chrony had selected
+hf-timestd's own fusion feed, and a label stamped from the host clock descended
+from the software whose accuracy you hoped to cross-check. On 2026-09-03/04 that
+loop walked two stations seconds off UTC. The measurement model then closes it
+in two moves. Fusion loses its vote (done: `FUSE` retired). The label arithmetic
+stops reading radiod's `(GPS_TIME, RTP_TIMESNAP)` pair, which survives only as
+engineering provenance. The model states that second rule as the design; this
+page has not checked how far every product implements it (source:
+`MEASUREMENT_MODEL.md` §7.1.1 and §7.2).
 
-This is not a bug and hf-timestd does not pretend otherwise — it states
-plainly that **chrony is a downstream consumer**, that its selection "reflects
-chrony's view of the source's fitness for *disciplining the host clock*, NOT
-the underlying quality of the RTP annotation", and that the chrony feed is "a
-convenience" (source: `ARCHITECTURE-FIRST-PRINCIPLES.md` §5). The consequence
-for you is narrow and practical: **`GPS_TIME` is not an independent GPS
-measurement of your samples.** It is a host-clock reading that may descend
-from the very software whose accuracy you were hoping to cross-check. Treat
-the pair as the *ruler-to-label* mapping it is, and take your accuracy claim
-from the tier and σ, never from the fact that the field is called `GPS_TIME`.
+The consequence for you stays narrow. **`GPS_TIME` is not an independent GPS
+measurement of your samples.** It reads the host clock, and the host clock's
+discipline varies by station and by day. A Tier-0 recorder that stamps with
+`rtp_to_utc()` inherits that variation, so take your accuracy claim from the
+tier and σ, never from the fact that the field carries the name `GPS_TIME`.
+
+The tiers rank registrations of the sample ruler, not clocks. A T6 registration
+fixes where the ruler's zero lies, and the same ruler then serves every
+channel. The station's chrony chain and why nothing may restart it appears in
+[timing-chain-architecture.md](../timing-chain-architecture.md). Read it as the
+design note it says it is (`Status: Design (proposed 2026-06-06)`), not as a
+description of what every station runs today.
 
 ### The tiers, in one table
 
@@ -365,14 +401,14 @@ The one-line version, for reference while you read the rest of this page:
 
 | Tier | UTC comes from | Order of magnitude |
 |---|---|---|
-| **T6** | TS-1 BPSK-PPS recovered from the IQ stream (hard-wired coax) | ns-class after chain-delay calibration |
-| **T5** | GPSDO's GPS+PPS over USB | µs to a few ms |
-| **T4** | LAN GPS-backed NTP peer | ~100 µs – few ms |
-| **T3** | WWV/WWVH/CHU tick fusion | ~0.5 – 2 ms |
+| **T6** | TS-1 BPSK-PPS recovered from the IQ stream (hard-wired coax) | ns class; 0.012 µs spread offline, not yet computed at run time |
+| **T5** | GPSDO's GPS+PPS over USB | ~1 ms |
+| **T4** | LAN GPS-backed NTP peer | ~2 ms |
+| **T3** | WWV/WWVH/BPM tick fusion (CHU fell silent in 2026) | ~0.5 – 2 ms |
 | **T2** | public NTP over the WAN | ~1 – 50 ms |
 | **T1** | GPSDO rate only, epoch frozen at the last snapshot | holdover, not a steady state |
 
-(source: `hf-timestd/docs/METROLOGY.md` §4.5 Axis T;
+(source: `hf-timestd/docs/design/MEASUREMENT_MODEL.md` §1; `hf-timestd/docs/METROLOGY.md` §4.5 Axis T;
 `ARCHITECTURE-FIRST-PRINCIPLES.md` §2, which adds **T0** — no GPSDO, wall
 clock only.)
 
@@ -694,8 +730,8 @@ exception.
 
 **1. Stamping with the host clock.** `time.time()` / `datetime.now()` at
 packet receipt is *not* your sample's time — it is when your process got
-scheduled, on a clock that on b4 is disciplined by hf-timestd's own SHM feed
-(§"The clock story", sentence 4). On the DASI002 Tier-0 run the host clock sat
+scheduled, on a clock whose discipline varies by station
+(§"The clock story", sentence 3). On the DASI002 Tier-0 run the host clock sat
 20 ms from the anchor-derived UTC ([capture-quickstart.md §The sidecar](capture-quickstart.md#the-sidecar)),
 and hf-timestd's own writer refuses to use its equivalent field for timing at
 all (`buffer_timing.py` docstring). Use `rtp_to_utc()`; keep a host-clock field

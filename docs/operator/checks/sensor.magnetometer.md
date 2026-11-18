@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 5554c6e on 2026-11-13 — whole page re-read; every message, threshold and check id checked against lib/sigmond/commands/check.py. Earlier: sigmond 783f674 on 2026-10-27 — code (lib/sigmond/commands/check.py)
+> **Verified against:** sigmond f3b0c6e on 2026-11-18 — whole page re-read; every message, threshold and check id checked against lib/sigmond/commands/check.py. Earlier: sigmond 783f674 on 2026-10-27 — code (lib/sigmond/commands/check.py)
 > **Canonical for:** what the magnetometer check in `smd check` means
 
 Check id: `sensor.magnetometer`
@@ -32,6 +32,12 @@ seconds old.
 The `mag-recorder` service stands enabled, but finds no adapter, never
 recorded a sample here, and the site profile names no magnetometer. The check
 tests that the service is enabled, not that it runs. This station simply has none. Nothing to do.
+
+**ok: `no magnetometer; dormant`**
+Bring-up installed `mag-recorder` but left it dormant, because it found no
+adapter. Nothing runs, and the magnetometer page line does not appear. After
+you plug in a sensor, `smd status` offers it under "adoptable", and
+`smd adopt mag-recorder` starts it.
 
 **FAIL: `no magnetometer adapter at /dev/ttyMAG0.  Check its USB cable.  Fix: sudo systemctl restart mag-recorder`**
 The adapter does not show at that path, yet this station once recorded

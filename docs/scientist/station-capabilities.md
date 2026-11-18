@@ -2,7 +2,7 @@
 
 > **Audience:** scientist
 > **Status:** current
-> **Verified against:** sigmond 55b9e68 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
+> **Verified against:** sigmond f3b0c6e on 2026-11-18 — timing tiers re-read against hf-timestd's measurement model, storage against the F16 default and the storage ledger; live readings dated 2026-08-23 stay as dated history
 > **Canonical for:** the DASI2 station capability envelope for a new client
 
 Every number below is cited to code, to a doc, or to a dated live reading on
@@ -97,9 +97,12 @@ last-writer-wins, the same model as gain and AGC (source:
 S16BE (2), Opus (3), F32LE (4), AX25 (5, packet — not a sample format), F16LE
 (6), Opus-VoIP (7), F32BE (8), F16BE (9), µ-law (10) and A-law (11) (source:
 `ka9q-python/ka9q/types.py::Encoding`, which must match `ka9q-radio/src/rtp.h`).
-F32LE is what the station's own archive
-channels use (source: `/etc/hf-timestd/timestd-config.toml`, `encoding = "F32"`;
-confirmed on the wire as `[107] encoding 4 (f32le)`, live b4 2026-08-23).
+hf-timestd asks radiod for F32LE on the wire (source: `/etc/hf-timestd/timestd-config.toml`,
+`encoding = "F32"`; confirmed as `[107] encoding 4 (f32le)`, live b4 2026-08-23).
+Since 2026-11-18 hf-timestd then stores its raw IQ on disk as F16 by default
+(`archive_dtype = "f16"`, half the bytes); readers still receive complex64
+(source: `hf-timestd/config/timestd-config.toml.template`). Wire format and
+disk format differ, so state which one you mean.
 
 ⚠ **The create path does not verify what you asked for.** On the *create* branch
 `ensure_channel` accepts the channel on frequency match alone: a sample-rate or
@@ -204,23 +207,25 @@ all — and in every case record to disk during the event and process afterwards
 
 ## Timing you can rely on — tiers
 
-The station knows UTC through a ranked set of sources; the authority manager
-picks the highest one whose health probe passes, and the losers become witnesses
-that cross-check it (source: `hf-timestd/docs/METROLOGY.md` §4.5 "Selection,
-Cross-Check, and Transition Rules"). Uncertainties below are the (A1, T) column
-— A1 meaning the RX888's ADC is disciplined by the GPSDO, which is the DASI2
-configuration:
+The station registers its sample counter against UTC through ranked
+estimators. The authority manager picks the highest one whose health probe
+passes, and the losers become witnesses that cross-check it. The tiers rank
+registrations, not clocks: each names one method of fixing where the sample
+ruler's zero lies against UTC, with its own uncertainty (source:
+`hf-timestd/docs/design/MEASUREMENT_MODEL.md` §1, the estimator table; selection
+rules in `hf-timestd/docs/METROLOGY.md` §4.5). The uncertainties below assume
+the RX888's ADC runs from the GPSDO (A1), the DASI2 configuration:
 
 | Tier | Source | Uncertainty (A1) | Needs |
 |---|---|---|---|
-| **T6** | TS-1 HF-injected BPSK-PPS recovered sample-precise from the IQ stream | **~ns** (after chain-delay calibration) | TS-1 injector + detection lock + calibrated chain delay |
-| **T5** | GPS + PPS delivered over USB from the LBE-1421 (USB-NMEA) | **~µs to a few ms** (USB-bus-jitter floored) | GPSDO on USB |
-| **T4** | host clock chronyed to a LAN GPS+PPS time server | ~100 µs – few ms | reachable GPS-backed NTP peer |
-| **T3** | UTC recovered from WWV/WWVH/CHU tick fusion | ~0.5 – 2 ms | ≥ 2 stations detected + ionospheric model |
+| **T6** | TS-1 HF-injected BPSK-PPS recovered sample-precise from the IQ stream | **~ns class**: 0.012 µs spread offline; the station does not yet compute that figure at run time | TS-1 injector + detection lock + calibrated chain delay |
+| **T5** | GPS + PPS delivered over USB from the LBE-1421 (USB-NMEA) | **~1 ms** (USB bus scheduling sets the floor) | GPSDO on USB |
+| **T4** | host clock chronyed to a LAN GPS+PPS time server | ~2 ms | reachable GPS-backed NTP peer |
+| **T3** | UTC recovered from WWV/WWVH/BPM tick fusion (CHU fell silent in 2026) | ~0.5 – 2 ms, propagation-limited | ≥ 2 stations detected + ionospheric model |
 | **T2** | host clock chronyed to public NTP over the WAN | ~1 – 50 ms | internet, stratum ≤ 3 |
 | **T1** | ADC rate locked, no UTC discipline past the last `RTP_TIMESNAP` | constant offset at snapshot | GPSDO only |
 
-(source: `hf-timestd/docs/METROLOGY.md` §4.5, Axis T table.)
+(source: `hf-timestd/docs/design/MEASUREMENT_MODEL.md` §1, estimator table; `hf-timestd/docs/METROLOGY.md` §4.5, Axis T table.)
 
 **Availability is not guaranteed.** T3 is gated on a fresh `fusion_status.json`
 and "can be (and currently is, in the field) unavailable"; its ±0.5 ms figure
@@ -283,7 +288,7 @@ measured **96 kB/s · 345 MB/h at 12 kHz complex float32** (source:
 [§What "good" cost](../EVENT-CLIENT-PLAYBOOK.md#what-good-cost-for-calibration)).
 
 **And the measured tie-point.** hf-timestd's archive channels are `iq`, **24000
-Hz**, `encoding = "F32"` (source: `/etc/hf-timestd/timestd-config.toml`
+Hz**, `encoding = "F32"` on the wire (source: `/etc/hf-timestd/timestd-config.toml`
 `[recorder.channel_defaults]` and `[recorder.channel_group.timestd]`, live b4
 2026-08-23), which the table says is 16.59 GB/day raw. On disk, one complete UTC
 day (2026-08-22, all 288 five-minute files) of one such channel came to
@@ -295,16 +300,25 @@ day (2026-08-22, all 288 five-minute files) of one such channel came to
 2026-08-23) — so **zstd buys about 9 % on band-limited HF IQ**. Budget from the
 raw formula and treat compression as rounding error.
 
+**F16 changes this for hf-timestd's archive only.** From 2026-11-18 hf-timestd
+stores raw IQ as F16 by default, half the bytes of the F32 figures above, so
+the 15.07 GB/day tie-point halves in rough terms. No one has measured the new
+per-day figure on disk yet; budget from the F32 formula and treat F16 as
+headroom. Your own recorder gets the full F32 rate unless you convert it.
+
 Two consequences for your capture window:
 
 - **Do the arithmetic before you book the disk.** A 96 kHz channel for a ±4 h
   eclipse window is ~22 GB; the same channel for a week is ~465 GB.
-- **You are sharing a disk with a client that deletes.** At 95 % full hf-timestd
-  pauses all writes and alerts; if the disk is *still* ≥ 95 % ten minutes later
-  it begins deleting the oldest recordings until the disk is back under 90 %
-  (source: `hf-timestd/src/hf_timestd/core/resource_guardian.py`, via
-  [day-2.md §3](../operator/day-2.md#3-disk--df--h-)). Ask the operator for
-  headroom before the event, not during it.
+- **You are sharing a disk with clients that trim.** Sigmond keeps a storage
+  ledger (`smd storage status`; the `sigmond-storage.timer` pass runs every
+  two minutes) that measures each store and asks clients to trim as a disk
+  fills. hf-timestd's own guard also pauses writes at 95 % full, and if the disk
+  stays ≥ 95 % for ten minutes it deletes the oldest recordings until usage
+  falls under 90 % (source: `hf-timestd/src/hf_timestd/core/resource_guardian.py`).
+  An operator can add an archive drive (`smd archive add`), and hf-timestd's
+  `timestd-archive.timer` then copies raw IQ there before deleting it. Ask the
+  operator for headroom before the event, not during it.
 
 ## AGC and gain — science posture
 
@@ -390,11 +404,13 @@ from a live one.
   `ka9q-radio/docs/SDR/rx888.md`), and b4 is a local-RX888-only station. A new
   observation is a new *channel* on the existing radiod plus a client, never a
   second front end.
-- **Nothing leaves the host by default.** b4's radiod publishes with `ttl = 0`
+- **Nothing leaves the host by default.** Two separate facts. First, b4's radiod publishes with `ttl = 0`
   — "loopback-only (single-host default, safe on every network)"; setting it to
   1 is only safe behind an IGMP-aware switch (source:
   `/etc/radio/radiod@AC0G-B4.conf:21-27`, live 2026-08-23; confirmed on the wire
   as `[19] TTL 0`). **Your client runs on the station**, not on your laptop.
+  Second, uploads wait: a station installed from the repos holds all uploads
+  until the operator runs `smd sink upload`.
 - **No Wi-Fi.** Clients subscribe to radiod over multicast, which Wi-Fi handles
   badly, and the appliance does not configure it at all (source:
   [`../hardware/shopping-list.md`](../hardware/shopping-list.md);
@@ -404,7 +420,7 @@ from a live one.
   [`../operator/remote-access.md`](../operator/remote-access.md)). You cannot
   reach a station from outside without going through that tunnel.
 - **Nanosecond timing needs hardware that may be absent.** T6 requires a TS-1
-  injector, an optional part; without it the best tier is T5 at µs-to-ms class
+  injector, an optional part; without it the best tier is T5, about 1 ms
   (source: [`../hardware/shopping-list.md`](../hardware/shopping-list.md)
   §Optional; `hf-timestd/docs/METROLOGY.md` §4.5). Check what the station has
   before you promise a result that depends on it.

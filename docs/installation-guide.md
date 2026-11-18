@@ -1,11 +1,16 @@
 # Sigmond Installation Guide
 
-Tested on: **Debian 13 (trixie)**, kernel 6.12.74, April 2026.
+> **Audience:** operator, contributor
+> **Status:** reference; the canonical bare-metal path is [install-bare-metal.md](install-bare-metal.md)
+> **Verified against:** sigmond f3b0c6e on 2026-11-18
+> **Canonical for:** the manual install, Proxmox passthrough from inside a VM, and the `/opt/git/sigmond` namespace
+
+Written on **Debian 13 (trixie)**, kernel 6.12.74, April 2026; the commands rechecked in November 2026.
 
 > **Start elsewhere (2026-11-08).**  For a station on your own Linux machine, follow
 > [install-bare-metal.md](install-bare-metal.md); `smd bringup` now does most of what this guide
 > describes, and it leaves your kernel command line (`isolcpus`) alone unless you opt in.  For a
-> dedicated mini-PC from the USB image, follow
+> dedicated mini-PC from the Proxmox USB image, follow
 > [sigmond-appliance INSTALL.md](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md).
 > This guide stays as the reference for running a step by hand.
 
@@ -14,8 +19,9 @@ Tested on: **Debian 13 (trixie)**, kernel 6.12.74, April 2026.
 ## Overview
 
 Sigmond ("Dr. SigMonD") is the installer and lifecycle manager for the HamSCI
-SDR observation suite. The `smd` command coordinates radiod (ka9q-radio),
-wspr-recorder, psk-recorder, and hf-timestd on a shared SDR receiver.
+SDR observation suite. The `smd` command coordinates radiod (ka9q-radio) and
+the clients that share its receiver: wspr-recorder, psk-recorder, hf-timestd,
+mag-recorder and the rest of the DASI2 set.
 
 ---
 
@@ -118,13 +124,13 @@ sudo apt-get install -y git python3-pip python3-venv chrony \
 Sigmond and its sibling dependency **ka9q-python** both live under
 `/opt/git/sigmond/`. The relative path `../ka9q-python` referenced in
 `pyproject.toml` resolves to `/opt/git/sigmond/ka9q-python` when sigmond
-is at the canonical `/opt/git/sigmond/sigmond` location.
+is at the canonical `/opt/git/sigmond/sigmond` location. `install.sh` finds or
+clones ka9q-python there itself, so you only need to clone sigmond:
 
 ```bash
 sudo mkdir -p /opt/git/sigmond
 sudo chown $USER /opt/git/sigmond
-git clone https://github.com/HamSCI/sigmond.git     /opt/git/sigmond/sigmond
-git clone https://github.com/HamSCI/ka9q-python.git /opt/git/sigmond/ka9q-python
+git clone https://github.com/HamSCI/sigmond.git /opt/git/sigmond/sigmond
 ```
 
 The directory layout must look like this:
@@ -138,11 +144,10 @@ The directory layout must look like this:
 After install.sh runs, the whole tree is owned by the system user
 `sigmond` (members of group `sigmond` get write access).
 
-> **Bug note (tracked):** `pyproject.toml` uses a hard-coded relative path
-> `../ka9q-python` under `[tool.uv.sources]`. If ka9q-python is absent the
-> install fails immediately with:
-> `error: Distribution not found at: file:///opt/git/sigmond/ka9q-python`
-> The fix is to clone ka9q-python alongside sigmond before running `install.sh`.
+> **Note:** `pyproject.toml` uses a relative path `../ka9q-python` under
+> `[tool.uv.sources]`. If you build the venv by hand and ka9q-python is absent, `uv` fails with
+> `error: Distribution not found at: file:///opt/git/sigmond/ka9q-python`.
+> `install.sh` prevents this by placing ka9q-python first.
 
 ---
 
@@ -159,7 +164,8 @@ The script will:
 2. Confirm git and Python 3.11+ are present (installs them if not)
 3. Create FHS directories: `/etc/sigmond/`, `/var/lib/sigmond/`,
    `/var/log/sigmond/`
-4. Write `/etc/sigmond/catalog.toml` (component registry)
+4. Read the component catalog from the repo's `etc/catalog.toml`
+   (`/etc/sigmond/catalog.toml` holds host-specific overrides only)
 5. Write `/etc/sigmond/topology.toml` (all components disabled by default)
 6. Install `uv` (fast Python package manager) to `/usr/local/bin/`
 7. Build `/opt/git/sigmond/sigmond/venv` with `sigmond[tui]` (Textual + Rich)
@@ -196,7 +202,7 @@ smd --help
 
 ```bash
 # List all available components from the catalog
-smd list --catalog
+smd component list --catalog
 
 # Check service status (all disabled at this point — that's expected)
 smd status
@@ -205,14 +211,8 @@ smd status
 smd admin diag
 ```
 
-Expected `smd admin diag` output on a fresh install (no components enabled yet):
-
-```
-✓  network: wsprnet.org reachable
-   deps.conf not found at /home/wsprdaemon/...   ← expected until components installed
-```
-
-The `deps.conf` notice is normal at this stage.
+On a fresh install `smd admin diag` warns that no topology file lists components yet and
+reports which network sites answer. Those warnings are normal until you install components.
 
 ---
 
@@ -220,15 +220,15 @@ The `deps.conf` notice is normal at this stage.
 
 **Installing a component enables it** in `/etc/sigmond/topology.toml` — you
 don't edit topology by hand first. The core DASI2 clients (hf-timestd,
-wspr-recorder, psk-recorder, mag-recorder) are the default station; the
-additional clients (codar-sounder, hf-tec, hfdl-recorder, meteor-scatter)
-are installed at your discretion.
+wspr-recorder, psk-recorder, mag-recorder, gmag-webui, meteor-scatter,
+hamsci-physics, hfdl-recorder, codar-sounder and station-web) make up the
+default station; hf-tec and superdarn-sounder are installed at your discretion.
 
 ### Option A — Guided bring-up (recommended)
 
 ```bash
 smd bringup dasi2                 # core station: install + configure + start
-smd bringup dasi2 --with-optional # also install the discretionary clients
+smd bringup dasi2 --with-optional # also install hf-tec and superdarn-sounder
 ```
 
 **You do not need the hardware attached.** Bring-up warns about each missing
@@ -257,7 +257,7 @@ smd install radiod
 smd install wspr-recorder
 smd install psk-recorder
 smd install hf-timestd
-smd install hfdl-recorder         # discretionary — installs AND enables it
+smd install hf-tec                # discretionary — installs AND enables it
 ```
 
 Pass `--no-enable` to install without enabling (stage config first); take a
@@ -309,9 +309,9 @@ enabled = false        # set true if you want WSPR audio capture
 | `smd admin log <client>` | Follow logs for a client |
 | `smd admin diag` | Run cross-component diagnostics |
 | `smd admin validate` | Check cross-client harmonization rules |
-| `smd list` | Show per-component status (git ref, upstream divergence, version policy) |
-| `smd component update [<name>]` | Pull latest code per topology version policy and reapply (was `smd list --update`; root) |
-| `smd list --catalog` | Show full component catalog (what could be installed) |
+| `smd component list` | Show per-component status (git ref, upstream divergence, version policy) |
+| `smd component update [<name>]` | Pull latest code per topology version policy and reapply (root) |
+| `smd component list --catalog` | Show full component catalog (what could be installed) |
 
 ---
 
@@ -378,7 +378,7 @@ for d in /opt/git/sigmond/*/; do
 done
 ```
 
-Verify with `smd list --catalog` — every previously-installed
+Verify with `smd component list --catalog` — every previously-installed
 client should still show as installed (the symlinks at
 `/usr/local/bin/<client>` now resolve through the new path).
 
@@ -413,8 +413,8 @@ client should still show as installed (the symlinks at
 
 ```
 /etc/sigmond/
-├── catalog.toml        — component registry (do not edit)
-└── topology.toml       — which components are enabled (edit this)
+├── catalog.toml        — host-specific catalog overrides, if any (the full catalog is etc/catalog.toml in the repo)
+└── topology.toml       — which components are enabled
 
 /opt/git/sigmond/sigmond/
 ├── venv/               — Python venv with sigmond[tui] + ka9q-python (prod)
@@ -424,6 +424,5 @@ client should still show as installed (the symlinks at
 /usr/local/bin/smd      — symlink to the repo's bin/smd
 /usr/local/bin/uv       — fast Python package manager (installed by install.sh)
 
-~/sigmond/              — source repo (smd runs from here)
-~/ka9q-python/          — sibling dependency (editable install)
+/opt/git/sigmond/ka9q-python/ — sibling dependency (editable install)
 ```

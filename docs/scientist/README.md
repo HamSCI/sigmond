@@ -2,7 +2,7 @@
 
 > **Audience:** scientist
 > **Status:** current
-> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
+> **Verified against:** sigmond f3b0c6e on 2026-11-18 — page links and claims re-read against the pages they point to
 > **Canonical for:** the scientist's table of contents
 
 You have a signal in mind — a beacon, an eclipse experiment, a time
@@ -46,8 +46,9 @@ the more serious choice.
 
 ## What the station will not do for you
 
-One RX888 per host, nothing leaves the host by default, no Wi-Fi, no
-inbound ports, nanosecond timing needs hardware (TS-1) that may be
+One RX888 per host, no Wi-Fi, no inbound ports. radiod's stream never
+leaves the host, and a station installed from the repos holds every upload
+until the operator runs `smd sink upload`. Beyond that, nanosecond timing needs hardware (TS-1) that may be
 absent, and you are one client among several on a shared channel — the
 full list with sources is
 [station-capabilities.md §What the station cannot do](station-capabilities.md#what-the-station-cannot-do).

@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** pointer
-> **Verified against:** n/a
+> **Verified against:** sigmond f3b0c6e on 2026-11-18 — pointer only; the link target exists
 > **See instead:** [../hardware/shopping-list.md](../hardware/shopping-list.md)
 
 The parts list is shared with the scientist path, so it lives one level up in

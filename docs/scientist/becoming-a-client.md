@@ -2,7 +2,7 @@
 
 > **Audience:** scientist
 > **Status:** current
-> **Verified against:** sigmond 913bfed on 2026-10-23 — governed pipelines checked against hs-uploader gate.py and lib/sigmond/sink_carryover.py; earlier, at 3008453 on 2026-10-07: sink writer links checked against lib/sigmond/hamsci_sink/
+> **Verified against:** sigmond f3b0c6e on 2026-11-18 — sink path against hs-uploader's writer, source and transport lists against hs-uploader's pipeline_factory.py, PSWS recorder map against lib/sigmond/psws.py; earlier, 913bfed on 2026-10-23: governed pipelines against hs-uploader gate.py and lib/sigmond/sink_carryover.py
 > **Canonical for:** graduating a capture to a sigmond client (Tier 1)
 
 [Tier 0](capture-quickstart.md) ends with bytes on a disk and a person who
@@ -224,8 +224,9 @@ What the code above is really doing, from the writer's own docstring
 hs-uploader's `sink/writer.py`):
 
 - **One queue table for everybody.** Rows go into `pending_uploads` in
-  `/var/lib/sigmond/sink.db` as `(target_db, target_table, schema_version,
-  payload_json, queued_at)`. Your row is JSON, so **the uploader owns schema
+  the shared sink as `(target_db, target_table, schema_version,
+  payload_json, queued_at)`. The sink lives at `/var/lib/hs-uploader/sink.db`;
+  a station that already held `/var/lib/sigmond/sink.db` keeps that file. Your row is JSON, so **the uploader owns schema
   translation, not you** — that is what keeps a producer decoupled from the
   upstream's column shape.
 - **`mode` is the per-mode key** (`wspr`, `psk`, `timestd`, …) and `database`
@@ -239,12 +240,15 @@ hs-uploader's `sink/writer.py`):
   bump it when a field changes meaning; a pipeline declares
   `accepted_schema_versions`, so an unversioned change is how you silently
   stop being shipped.
-- **It is a no-op when it cannot write.** With `SIGMOND_SQLITE_PATH` unset and
-  `/var/lib/sigmond` not writable, the writer becomes a silent no-op by design
+- **It is a no-op when it cannot write.** With no sink path set in the
+  environment or in `/etc/hs-uploader/sink.toml`, and neither
+  `/var/lib/hs-uploader` nor an existing `/var/lib/sigmond/sink.db` writable,
+  the writer becomes a silent no-op by design
   — a client running standalone, outside a sigmond install, stays safe instead
   of erroring on every flush. The trap: a hardened systemd unit does exactly
-  that to itself. `ProtectSystem=strict` without `/var/lib/sigmond` in
-  `ReadWritePaths` makes the directory read-only, the Writer no-ops, and every
+  that to itself. `ProtectSystem=strict` without the sink's directory in
+  `ReadWritePaths` (`/var/lib/hs-uploader`, or `/var/lib/sigmond` on an older
+  station) makes the directory read-only, the Writer no-ops, and every
   row is dropped before it is queued, with a healthy-looking unit. The comment
   saying so is in
   [meteor-scatter's unit](https://github.com/HamSCI/meteor-scatter/blob/main/systemd/meteor-scatter@.service),
@@ -290,12 +294,13 @@ callsign or a key path. A pipeline whose required identity is missing is
 Declaring pipelines makes your client a *governed* client: once a station has
 the sink switch files, hs-uploader sends its pipelines only while its switch,
 `/etc/hs-uploader/sinks/<client>.toml`, reads `upload`. With no switch file, the
-pipelines stay held. The next `smd align` (the manifest step) gives a client
+pipelines stay held. A station installed from the repos also holds every
+upload until the operator runs `smd sink upload`. The next `smd align` (the manifest step) gives a client
 installed after the carry-over its switch file, by the carry-over's table
 (usually `upload`), under the site
 switch.
 
-**What exists today** (`hs_uploader/pipeline_factory.py`, 2026-08-23):
+**What exists today** (`hs_uploader/pipeline_factory.py`, re-read 2026-11-18):
 
 | Source `type` | Reads |
 |---|---|
@@ -305,9 +310,9 @@ switch.
 
 | Transport `type` | Ships to |
 |---|---|
-| `wsprnet` | wsprnet.org |
-| `pskreporter` | pskreporter.info |
-| `wsprdaemon_tar` | wsprdaemon.org (SFTP/FTP tar) |
+| `wsprnet` | wsprnet.org (stays in the library; a sigmond station does not use it for spots) |
+| `pskreporter` | pskreporter.info (same) |
+| `wsprdaemon_tar` | wsprdaemon.org (SFTP/FTP tar). Carries every WSPR, FT4/FT8 and MSK144 spot; wsprdaemon.org forwards them to wsprnet.org and pskreporter.info. A pipeline that reads a `sigmondb` source needs a `tar_tag`, so its tar never shares a name with a spot tar |
 | `psws_dataset` | PSWS, by SFTP, **as a file tree** |
 | `heartbeat_sftp` | the fleet heartbeat endpoint |
 
@@ -318,8 +323,8 @@ cannot be shipped to PSWS at all.
 
 And the identity placeholders will not save you either. `{station_id}` /
 `{instrument_id}` are added to the substitution map **only** for a client
-sigmond already knows as a PSWS recorder — today `hf-timestd` and
-`mag-recorder`, hard-coded in `psws.RECORDERS` (`lib/sigmond/psws.py`;
+sigmond already knows as a PSWS recorder — today `hf-timestd`,
+`hamsci-physics` and `mag-recorder`, hard-coded in `psws.RECORDERS` (`lib/sigmond/psws.py`;
 `uploader_manifest.resolve_tokens`). For anybody else the keys are not in the
 map at all, so the substitution pass never sees them, never records them as
 missing, and **writes the literal string `{instrument_id}` straight into
@@ -328,7 +333,14 @@ because the pipeline then runs against a nonsense destination. (The
 skip-with-a-warning behaviour that PER-SITE-SETUP describes applies to a
 *declared* PSWS recorder whose id is merely unset.)
 
-**Today you ship your own files**: write them, arrange the PSWS-side
+**Rows can reach one other destination: sigmondb.** A client that produces
+timing or arrival rows can ship them through the `wsprdaemon_tar` transport
+to sigmondb on the wsprdaemon.org server, as `codar-sounder` and
+`hfdl-recorder` do (their `deploy.toml` files hold the pipelines
+`codar-sigmondb-*` and `hfdl-sigmondb-*`). The server's ingest must know your
+table first, so ask the fleet admin before you rely on it.
+
+**For PSWS you ship your own files**: write them, arrange the PSWS-side
 registration yourself, and treat upstream delivery as your problem, not the
 station's. This is
 [docs-gap ledger row 3a](../contributor/docs-gap-ledger.md); the fix it names

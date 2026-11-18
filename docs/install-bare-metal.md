@@ -1,9 +1,11 @@
 # Installing a station on your own Linux machine
 
 > **Audience:** operator
-> **Status:** current, 2026-11-08 (sigmond fc1320d)
-> **The other way:** to turn a dedicated mini-PC into a station from the USB image (Proxmox host
-> plus a decoder VM), follow the appliance guide,
+> **Status:** current
+> **Verified against:** sigmond f3b0c6e on 2026-11-18
+> **Canonical for:** installing sigmond on a machine you already run (no Proxmox)
+> **The other way:** to turn a dedicated mini-PC into a station from the Proxmox USB image (Proxmox
+> host plus a decoder VM), follow the appliance guide,
 > [sigmond-appliance INSTALL.md](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md).
 
 This guide installs sigmond from its repositories onto a Debian machine you already run: no USB
@@ -17,7 +19,9 @@ each; this page puts them in order and says what each one does to your machine.
 - **An account in the `sudo` group.**  You run every command as yourself; sigmond asks for root
   through sudo when it needs it.  Never type `sudo smd`: smd refuses it.
 - **The hardware** on the machine's own USB: the RX888, the GPSDO, and the magnetometer if you
-  have one.  Bring-up warns about, and asks before it goes on without, an RX888 it cannot find.
+  have one.  You may install without them: bring-up warns about each missing device, installs its
+  components dormant (installed, not started), and goes on.  `smd adopt` starts them once the
+  device arrives (section 6).  Add `--require-hardware` to make bring-up stop instead.
   The [shopping list](hardware/shopping-list.md) names the models.
 - **No public IPv4 address on the machine.**  Bring-up refuses a host it could expose to the
   internet.  If you mean it, `sudo touch /etc/sigmond/allow-public-ip` lifts the refusal.
@@ -49,8 +53,10 @@ smd bringup dasi2 --callsign AC0G --grid EM38ww --reporter AC0G/S \
 Use your own callsign, grid, reporter ID and PSWS ids (section 4 says where they come from).
 `--dry-run` shows every step first.
 `--non-interactive` accepts radiod's defaults; fine-tune clients afterwards with
-`smd config edit`.  `dasi2` gives a local radiod, hf-timestd, WSPR, FT4/FT8, meteor scatter and
-the magnetometer; `client` decodes from radiods on other machines (section 7).
+`smd config edit`.  The `dasi2` profile gives a local radiod and the core clients: hf-timestd,
+wspr-recorder, psk-recorder, mag-recorder, gmag-webui, meteor-scatter, hamsci-physics,
+hfdl-recorder, codar-sounder and station-web.  `--with-optional` adds hf-tec and superdarn-sounder.
+The `client` profile decodes from radiods on other machines (section 7).
 
 What bring-up does to your machine:
 
@@ -118,12 +124,20 @@ uploads were held get set aside, outside the spools, rather than sent.  `smd sin
 while GRAPE or the magnetometer is packaging a day's data, and says so; run it again a few minutes
 later.
 
+Every WSPR, FT4/FT8 and MSK144 spot goes to wsprdaemon.org alone.  It forwards them to
+wsprnet.org and pskreporter.info; your station posts to neither.  GRAPE and magnetometer
+packages go to PSWS.
+
 ## 6. Check the station
 
 ```bash
 smd status        # every service, with each client's version, channels and issues
 smd check         # the station's own checks
 ```
+
+If you installed without some hardware, `smd status` lists the device under "adoptable:" once
+you plug it in.  Then run `smd adopt <name>` with the name `smd status` printed; it shows its plan
+and asks first.  `smd adopt` starts the device's components; nothing else does.
 
 ## 7. Use a radiod on another machine
 
@@ -146,8 +160,8 @@ smd align            # what would change to reach the latest blessed release; ch
 smd align --apply    # move to it, rebuild what needs it, restart what is stale
 ```
 
-`smd align` moves sigmond's components to the latest blessed release, the same release the USB
-image stations run.  On your machine it reports `host: none — a repo install on this machine; no
+`smd align` moves sigmond's components to the latest blessed release ("sigmond vN"), the same
+release the Proxmox USB image stations run.  On your machine it reports `host: none — a repo install on this machine; no
 Proxmox host to align`; that line is expected.  It may also offer to install
 `sigmond-location-check`, a helper script the image carries; take it.  `sigmond-site-timing`
 lives in sigmond itself: `/usr/local/sbin/sigmond-site-timing` links to
@@ -172,6 +186,10 @@ packages.  After a kernel update, reboot as usual; radiod and the clients start 
 
 ## 9. Where next
 
+- Disk space: `smd storage status` shows each store's fill and what each client holds.  Sigmond's
+  storage ledger (`sigmond-storage.timer`) asks clients to trim when a store fills.  To keep raw IQ
+  longer, attach a USB archive drive with `smd archive add` (it erases the drive); hf-timestd's
+  archiver then copies raw IQ to it.  `smd archive status` shows the result.
 - Day-to-day commands: the README's [Command reference](../README.md#command-reference).
 - Something wrong: `smd admin diag`, and the README's [Debugging](../README.md#debugging) section.
 - Adding a client later: the README's

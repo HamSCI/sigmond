@@ -2,7 +2,7 @@
 
 > **Audience:** all
 > **Status:** current
-> **Verified against:** sigmond 0340629 on 2026-10-10 — the remote-access entry checked against operator/remote-access.md; the other entries as of 978c80a
+> **Verified against:** sigmond f3b0c6e on 2026-11-18
 > **Canonical for:** the map of sigmond/docs
 
 Reading-order map. ★ = canonical — when two docs disagree, the ★ one wins.
@@ -12,7 +12,21 @@ Front door for each audience: [docs/README.md](README.md).
 
 | Doc | What it gives you |
 |---|---|
-| [README.md](README.md) | The front door — pick your audience (operator / scientist / contributor) and it sends you to the right subtree |
+| [README.md](README.md) | The front door — pick your audience (installer / operator / scientist / contributor / administrator) and it sends you to the right subtree |
+
+## 0a. Install a station
+
+| Doc | What it gives you |
+|---|---|
+| [sigmond-appliance INSTALL.md](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md) ★ | The Proxmox USB image path: gather the facts, write the stick, the two boots, the setup wizard, the first check, and moving or reflashing a station |
+| [install-bare-metal.md](install-bare-metal.md) ★ | The bare-metal path: `install.sh`, `smd bringup`, PSWS ids, releasing uploads, checking, and `smd align` |
+| [install-quickstart.md](install-quickstart.md), [installation-guide.md](installation-guide.md), [greenfield-runbook.md](greenfield-runbook.md) | Reference for doing a bare-metal step by hand (see section 3) |
+
+## 0b. Administer stations (fleet administrator)
+
+| Doc | What it gives you |
+|---|---|
+| [admin/README.md](admin/README.md) ★ | The fleet administrator's front page |
 
 ## 1. Operator (host a station)
 
@@ -30,6 +44,7 @@ Front door for each audience: [docs/README.md](README.md).
 | [operator/do-not-touch.md](operator/do-not-touch.md) ★ | The guard rails: the seventeen things an operator must not do on a station — `sudo smd`, `apt`/`pip`/`git pull`, a client's own `install.sh`, `smd install ka9q-radio`, `smd apply`, `smd config <client> edit`, hand-edits to `/etc/radio` or `/etc/sigmond`, CPU/VM changes, moving without `--reconfigure` — each with the cited reason and what to do if you already did it, plus what you may do freely |
 | [operator/hardware.md](operator/hardware.md) (pointer) | Redirects to `hardware/shopping-list.md` — the parts list is shared with the scientist path |
 | [operator/install.md](operator/install.md) (pointer) | Redirects to sigmond-appliance's `INSTALL.md`, plus what to expect from the ~45-minute install |
+| [operator/satellite-link.md](operator/satellite-link.md) | The satellite-link guard (`[link_schedule]`) for stations whose internet comes and goes, and what its probe costs |
 
 ## 2. Scientist (record a signal)
 
@@ -37,7 +52,7 @@ Front door for each audience: [docs/README.md](README.md).
 |---|---|
 | [scientist/README.md](scientist/README.md) ★ | The scientist's table of contents: the five-page reading order with time estimates, the Tier 0 vs Tier 1 table, what to get from the fleet admin before you touch a station, what the station will not do for you, and links to the worked example and the hardware page |
 | [EVENT-CLIENT-PLAYBOOK.md](EVENT-CLIENT-PLAYBOOK.md) ★ | Decision playbook for standing up a receiving client on short notice (eclipse, meteor shower, unannounced experiment) |
-| [ADD-A-CLIENT.md](ADD-A-CLIENT.md) | Checklist for writing a new contract-conformant client repo so it appears in `smd list`/the TUI |
+| [ADD-A-CLIENT.md](ADD-A-CLIENT.md) | Checklist for writing a new contract-conformant client repo so it appears in `smd component list`/the TUI |
 | [STATION-NETWORK-CAPABILITIES.md](STATION-NETWORK-CAPABILITIES.md) | What a coordinated mesh of DASI2 stations delivers scientifically — spatial + modal diversity, resilience to losing any one transmitter |
 | [SCINTILLATION-MONITORING.md](SCINTILLATION-MONITORING.md) | Design note + implementation plan for adding S4/σ_φ/Doppler ionospheric-scintillation observables |
 | [scientist/station-capabilities.md](scientist/station-capabilities.md) ★ | The DASI2 station capability envelope for a new client: the frequency/preset/sample-rate/encoding menu radiod will actually serve, how many channels you may add and how to measure the load, the T6–T1 timing tiers and where the tier is recorded, storage per channel-hour with the measured tie-point, the front-end AGC caveat, what "a gap" means when radiod zero-fills, and what the station cannot do |
@@ -71,9 +86,10 @@ Front door for each audience: [docs/README.md](README.md).
 | [radionet.md](radionet.md) | Joining several stations' decoder VMs into one site radio network (VXLAN between the hosts, streams cross only when joined): `sigmond-radionet setup` on each host, `smd radionet status` in the VM |
 | [ports.md](ports.md) | Every port a station's decoder VM and Proxmox host listen on, which ones the host forwards to the LAN, and the 8090–8099 range reserved for ka9q-radio's own services |
 | [native-binaries.md](native-binaries.md) | Convention for how a client ships/builds native (C/C++/Fortran) deps it depends on (dumphfdl, mag-usb, wsprd/jt9, PHaRLAP) |
-| [greenfield-runbook.md](greenfield-runbook.md) ★ | End-to-end bare-host-to-recording-station operational walkthrough: order of operations + host tuning |
-| [install-quickstart.md](install-quickstart.md) | Short operator-focused guide to getting `smd` running via `install.sh` |
-| [installation-guide.md](installation-guide.md) | Fuller installation guide: Proxmox passthrough, networking, host capacity |
+| [install-bare-metal.md](install-bare-metal.md) ★ | Installing a station on your own Linux machine with `install.sh` and `smd bringup` (the canonical bare-metal path) |
+| [greenfield-runbook.md](greenfield-runbook.md) | Reference: the phases of a bare-host install done by hand, plus host tuning |
+| [install-quickstart.md](install-quickstart.md) | Reference: what `install.sh` does, step by step |
+| [installation-guide.md](installation-guide.md) | Reference: the manual install, Proxmox passthrough from inside a VM, the `/opt/git/sigmond` namespace |
 | [install-redesign.md](install-redesign.md) | Station patterns, hardware-aware install, install-implies-enable vocabulary, 3-step IA |
 | [install-orchestration-design.md](install-orchestration-design.md) | TUI-driven, contract-ordered bring-up design (phases A–C, shipped) |
 | [HOST-CAPACITY-PLANNING.md](HOST-CAPACITY-PLANNING.md) | Open design discussion on workload tiers and matching client cost to host topology |

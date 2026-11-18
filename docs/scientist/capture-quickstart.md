@@ -2,7 +2,7 @@
 
 > **Audience:** scientist
 > **Status:** current
-> **Verified against:** sigmond 2cd11c4 on 2026-08-24 — walk-through fixes (live DASI002 + code/docs); `smd timing --json` surface added to the judge-age guidance
+> **Verified against:** sigmond f3b0c6e on 2026-11-18 — `smd timing --json` and `smd storage` checked against `smd --help`; storage and timing text re-read against hf-timestd; the dated run of 2026-08-23 on DASI002 stays as recorded
 > **Canonical for:** the Tier-0 capture recipe
 
 **Tier 0 is capture only.** You create one `radiod` channel, you write its bytes
@@ -56,10 +56,11 @@ station:
    Also ask for disk headroom for the whole window, with margin: at 95 % full
    the station's timing client pauses all writes and alerts, and if the disk is
    still ≥ 95 % ten minutes later it begins deleting the oldest recordings until
-   the disk is back under 90 %
+   the disk is back under 90 %. Sigmond's storage ledger (`smd storage status`)
+   also asks clients to trim as a store fills
    ([station-capabilities.md §Storage](station-capabilities.md#storage-per-channel-hour)).
-3. **Know which station, and pick a testbed.** AC0G/B4 is a production station
-   carrying four clients; DASI002 is a plumbing testbed with **no antenna** —
+3. **Know which station, and pick a testbed.** AC0G/B4 is a shared station
+   carrying several clients, so treat it as live and coordinate before you touch it; DASI002 is a plumbing testbed with **no antenna** —
    its samples are noise, which makes it perfect for proving a pipeline and
    useless for proving a signal. Develop on the testbed, deploy on the real
    station.
@@ -988,7 +989,8 @@ block gained:
 ```
 
 Read that, and the point of the exercise is immediate: DASI002 was on **T3** —
-WWV/WWVH/CHU tick fusion — with **σ ≈ 3.2 ms** and its GPSDO in **holdover**
+WWV/WWVH/CHU tick fusion at the time (CHU has since gone silent, so T3 now
+hears WWV, WWVH and BPM) — with **σ ≈ 3.2 ms** and its GPSDO in **holdover**
 ([station-capabilities.md §Timing](station-capabilities.md#timing-you-can-rely-on--tiers)).
 The `utc` field in the same sidecar prints microseconds. The capture is worth
 milliseconds. Only the judge line tells you which.
@@ -1147,11 +1149,12 @@ one ~40 ms dropped block can invalidate ±25.6 s of a GRAPE-style spectrogram.
 - **No footprint on the station.** The channel expired by itself; nothing was
   enabled, installed, or written outside your home directory.
 
-Three rules about where to write, which matter more on a production station
+Three rules about where to write, which matter more on a shared station
 than a testbed:
 
 - **Never `/var/lib`.** `/var/lib/sigmond/`, `/var/lib/timestd/`,
-  `/var/lib/event-recorder/` belong to the station's own clients, and at 95 %
+  `/var/lib/event-recorder/` belong to the station's own clients (new stations
+  also keep `/var/lib/hs-uploader/` for the shared sink), and at 95 %
   full hf-timestd's disk guardian pauses all writes and alerts — then, if the
   disk is still ≥ 95 % ten minutes later, begins deleting the oldest recordings
   from `/var/lib/timestd/` on its own authority until the disk is back under
@@ -1159,7 +1162,7 @@ than a testbed:
   ([station-capabilities.md §Storage](station-capabilities.md#storage-per-channel-hour)).
   Your home directory, or a directory the operator agreed to.
 - **Budget the disk for the whole window before you start**, and tell the
-  operator the number. 12 kHz IQ F32 is 345.6 MB/h; 96 kHz is 2.76 GB/h.
+  operator the number. 12 kHz IQ F32 is 345.6 MB/h; 96 kHz is 2.76 GB/h. Your recorder writes the F32 wire format as it arrives. hf-timestd's F16 default (since 2026-11-18) applies to its own archive only.
 - **Do not process during the event.** Record now, analyse later — the load you
   add to radiod is the load that breaks a neighbour's client, and the deadline
   you are spending is 20 ms.

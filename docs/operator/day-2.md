@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 5554c6e on 2026-11-13 — whole page re-read; verbs and flags against `smd <verb> --help`, archive section against commands/archive.py and hf-timestd b7f5a56 (archiver and prune timers), update section against bin/smd and update.py; sample outputs dated 2026-08 not re-run. Routing passages: sigmond 0d9e879 on 2026-11-13 — every spot goes to wsprdaemon.org, checked against uniform_routing.py, uploader_manifest.apply_proxying, upload.py, bin/smd `watch uploads` and wspr-recorder's hs_uploader_shim.py. Earlier: sigmond 913bfed on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 007bf72 on 2026-10-10: remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; held packages against sink_doors.py
+> **Verified against:** sigmond f3b0c6e on 2026-11-18 — storage ledger, F16 raw IQ, `smd archive add --upgrade` and dormant components checked against `smd <verb> --help`, commands/archive.py, hf-timestd's README and its ledger gate (b4fed24e); the dated 2026-08 sample outputs were not re-run. Earlier: sigmond 5554c6e on 2026-11-13 — verbs and flags against `smd <verb> --help`, archive section against commands/archive.py and hf-timestd b7f5a56 (archiver and prune timers), update section against bin/smd and update.py; sample outputs dated 2026-08 not re-run. Routing passages: sigmond 0d9e879 on 2026-11-13 — every spot goes to wsprdaemon.org, checked against uniform_routing.py, uploader_manifest.apply_proxying, upload.py, bin/smd `watch uploads` and wspr-recorder's hs_uploader_shim.py. Earlier: sigmond 913bfed on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 007bf72 on 2026-10-10: remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; held packages against sink_doors.py
 > **Canonical for:** day-2 operation — what healthy looks like, the weekly check, updates, power loss
 
 The station is meant to be boring. It runs itself, it restarts itself after a
@@ -77,8 +77,8 @@ systemd unit with a ✓ or ✗, then adds the CPU-affinity summary, the timing
 judge, and the network check.
 
 **A few ✗ and ⚠ are normal.** Here is real, lightly trimmed output from
-**AC0G/B4** — a healthy production station, and the fleet
-[canary](glossary.md) — captured 2026-08-23:
+**AC0G/B4** — a healthy production station, and one of the two
+[canary](glossary.md) stations — captured 2026-08-23:
 
 ```text
 sudo: a password is required
@@ -259,6 +259,11 @@ That is why dasi002's `smd status` has no `wspr-recorder`, `psk-recorder` or
 HF antenna**, so its spot recorders were switched off on purpose rather than
 uninstalled, to keep a testbed out of the public databases.
 
+**A third state: dormant.** Bring-up installs a component whose hardware does
+not answer (no RX888, no GPSDO, no magnetometer) but starts nothing. `smd
+status` lists it under "adoptable", and `smd adopt <name>` starts it after you
+plug the hardware in. A dormant component prints no unit block until then.
+
 **The command that shows both** — `[VM]`:
 
 ```bash
@@ -323,7 +328,7 @@ lines like:
 `smd component update` is on the forbidden list — it pulls every repository and
 then runs a full `smd apply` ([do-not-touch.md](do-not-touch.md#the-table)).
 Updates are decided by your fleet admin and taken through the
-[canary](glossary.md) station first
+[canary](glossary.md) stations first
 ([below](#updates--who-decides-and-what-you-run)). The same output also carries
 an **upload readiness** block, which is covered next.
 
@@ -414,9 +419,15 @@ explanation sits in the closing blockquote of
 
 ### 3. Disk — `df -h /`
 
-The one number that can quietly destroy data. hf-timestd records raw IQ
-continuously and manages its own eviction, but it also has percentage-based
-safety nets for when *something else* fills the disk
+The one number that can quietly destroy data. Two layers watch it. Sigmond's
+*storage ledger* (`sigmond-storage.timer`, every two minutes) measures each
+store, shares the space between clients, and asks each one to trim when a store
+fills. `smd storage status` shows what it sees and what it asked. While a fresh
+ledger manages hf-timestd, the ledger decides retention, and hf-timestd's
+percentage rules below step aside, except the 95 % emergency rule. On a station
+without the ledger, hf-timestd's rules decide everything. hf-timestd records
+raw IQ continuously and manages its own eviction, with percentage-based safety
+nets for when *something else* fills the disk
 (`hf-timestd/src/hf_timestd/core/resource_guardian.py`):
 
 | `Use%` on `/` | What happens |
@@ -473,6 +484,13 @@ budget over-counts. `hf-timestd/INSTALLATION.md` — the source behind
 two days of recording. The ~2.7× disagreement is
 [docs-gap ledger row 20](../contributor/docs-gap-ledger.md); neither upstream
 number has been corrected yet.
+
+**Raw IQ now takes half the bytes.** From 2026-11-18 hf-timestd stores raw IQ
+in half precision (F16) by default, where it used to store complex64
+(`[recorder] archive_dtype`). Every reader still receives complex64. The
+per-day figures on this page come from complex64 stations, so a station on
+F16 writes roughly half of them. Re-measure on your own station before you
+size a drive.
 
 #### Keeping more days: a rule of thumb for an external drive
 
@@ -531,11 +549,15 @@ as fast as one without.  `/etc/sigmond/archive.toml` records which drive it is.
 From a script, name the drive and the answer: `smd archive add --device sdb
 --confirm sdb`.  `--dry-run` shows what `add` would run and changes nothing.
 
-**After a reinstall.**  A new image starts with no archive settings, but the
+**After a reinstall.**  A fresh install starts with no archive settings, but the
 drive keeps its data.  `smd check` says so, and `smd archive add --device sdb`
 re-attaches it: a drive already labelled `SIGMOND-ARCHIVE` is never erased
 (only `--format` erases it).  `add` keeps a copy of `archive.toml` and the health
-baseline on the drive, in `.sigmond/`, and brings them back.
+baseline on the drive, in `.sigmond/`, and brings them back. `add` also links
+and starts hf-timestd's archiver units when a station lacks them, which
+happens on a station installed before 2026-11-13. On a drive attached earlier,
+`smd archive add --upgrade` brings the automount, the archiver keys and the
+health baseline up to date without formatting it.
 
 Once the drive stands mounted, the archiver (`timestd-archive.timer`, every
 ten minutes, at idle priority) copies each closed raw IQ file onto it in half
@@ -639,7 +661,7 @@ fleet admin says a release is out and `smd update` answers
 `host is current`, **tell them rather than assuming**. `smd version` prints the
 actual commit of every component, and that is the number that settles it.
 
-**Held components.** A station fresh from an image holds each component at
+**Held components.** A station fresh from the USB image holds each component at
 its blessed pin, the exact combination the nested test has seen. `smd update`
 then names the held components and moves none of them. A line such as
 `nothing to do — 2 component(s) HELD (…); the rest of the host is current`
@@ -657,8 +679,11 @@ To actually perform it: `smd update --apply`. **Do this only when your fleet
 admin tells you the release is blessed.** Leave `smd update --latest` alone
 too: it takes every component to the newest code on its main branch, past any
 blessed release, and serves test stations. That is not bureaucracy — the fleet
-runs every release through one [canary](glossary.md) station (today, AC0G/B4) before anyone
+runs every release through two [canary](glossary.md) stations, one Proxmox station and one bare-metal station, before anyone
 else takes it, so a bad build breaks one station instead of all of them.
+
+What your administrator does, and how a release moves from the canaries to the
+fleet, has its own page: [docs/admin/README.md](../admin/README.md).
 
 **Fleet-outward (the admin pushes).** Your fleet admin may roll the update to
 you instead, one host at a time, canary first. It is the same mechanism running
@@ -699,7 +724,7 @@ updates since install (13):
 written once, at install time, and nothing ever updates it — so after any
 update it states something false. dasi002 reads `v3.20` while running
 v3.31-era components (`CONTRIBUTING.md` §3). Quote it when asked, because it
-tells your admin which image you started from; never read it as "what I am
+tells your admin which release you started from; never read it as "what I am
 running now."
 
 ### Three things never to do by hand

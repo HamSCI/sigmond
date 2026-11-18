@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** current
-> **Verified against:** sigmond 2cd11c4 on 2026-08-24 — docs
+> **Verified against:** sigmond f3b0c6e on 2026-11-18 — docs, checked against `scripts/docs-*.py`, `lib/sigmond/docs_index.py` and the CI workflow
 > **Canonical for:** how docs are organised and kept true across the HamSCI/DASI2 repos
 
 ## 1. Where things live
@@ -24,6 +24,7 @@ that its repo's INDEX.md links by an explicit `.md` link.  A link to a
 directory indexes nothing.  So a page missing from INDEX.md drops out of
 the operator's view, and shows only under "Show everything".  A repo with
 no INDEX.md shows every page outside `archive/` and `superpowers/`.
+`smd admin docs index` gathers these facts for station-web (`lib/sigmond/docs_index.py`).
 
 ## 2. One canonical page per topic
 
@@ -67,6 +68,8 @@ convention) when you want `scripts/docs-freshness.py` to check the page
 automatically — it matches `[0-9a-f]{7,40}` and does not resolve tags, so
 a tag name there is invisible to the checker (the page is silently
 skipped, not flagged) even though it's fine as a human-readable qualifier.
+The checker accepts the sha of the last content edit or that commit's first
+parent, because an author cannot know the sha of the commit still being written.
 `Canonical for` names the one topic this page owns; pointer pages replace
 it with `See instead:`. A third kind of page is neither: it is listed
 un-starred in an `INDEX.md` (§2) because it does not own a single topic
@@ -165,7 +168,12 @@ docs:
 ```bash
 python3 ../sigmond/scripts/docs-linkcheck.py docs README.md
 python3 ../sigmond/scripts/docs-freshness.py docs README.md
+python3 ../sigmond/scripts/docs-conformance.py .      # does the repo carry its docs surface?
 ```
+
+`docs-conformance.py` checks that a client repo has `docs/INDEX.md` with a
+`Verified against:` header, `docs/REQUIREMENTS.md`, and a `docs-check.yml`
+that calls sigmond's reusable workflow.
 
 `docs-linkcheck.py` is stdlib-only and exits non-zero on the first broken
 relative link or missing anchor, so it's safe to run in CI or before a

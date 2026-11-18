@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** current
-> **Verified against:** sigmond 2cd11c4 on 2026-08-24 — code + commands run in the checkout (`smd component list` re-verified, exit 0)
+> **Verified against:** sigmond f3b0c6e on 2026-11-18 — code + commands run in the checkout (`smd component list`, `smd version`, the doc checks and `pytest --collect-only`)
 > **Canonical for:** setting up and testing a development environment for the suite
 
 This page gets a fresh clone of `sigmond` to a state where you can run `smd`,
@@ -28,6 +28,7 @@ station or the build host.
 Sigmond and its sibling repos (`ka9q-python`, `ka9q-radio`, `hs-uploader`,
 `wspr-recorder`, `psk-recorder`, `hf-timestd`, `mag-recorder`,
 `meteor-scatter`, `gpsdo-monitor`, `hf-tec`/`hamsci-dsp`, `codar-sounder`,
+`hfdl-recorder`, `station-web`, `gmag-webui`, `hamsci-physics`,
 `sigmond-appliance`, …) are cloned **flat, as siblings, under one parent
 directory** — this checkout lives at `.../repos/sigmond` next to
 `.../repos/ka9q-python`. That layout is not just convenience:
@@ -46,7 +47,7 @@ the layout wrong (e.g. a copy sitting in an unrelated scratch directory)
 and `uv sync` fails immediately with:
 
 ```
-error: Failed to generate package metadata for `ka9q-python==3.24.0 @ editable+../ka9q-python`
+error: Failed to generate package metadata for `ka9q-python==3.27.0 @ editable+../ka9q-python`
 Caused by: Distribution not found at: file:///…/ka9q-python
 ```
 
@@ -136,17 +137,12 @@ the run still reports green — the gap that let the TUI suite go
 unexercised in CI from June to August 2026 unnoticed. Installing the `tui`
 extra (either dev-venv path above) makes the banner go away.
 
-`tests/test_docs_links.py` needs the "Clone layout" section's sibling
-checkouts to actually be present, not just `ka9q-python` — it link-checks
-this repo's whole doc surface, and at least one page links across a repo
-boundary (`docs/STATION-NETWORK-CAPABILITIES.md` → `hf-timestd/docs/PHYSICS.md`).
-Clone (or symlink) `hf-timestd` as a sibling too, or that one test fails
-with `broken -> ../../hf-timestd/docs/PHYSICS.md` even though nothing is
-actually wrong with the link — it's a layout gap, not a doc defect (the
-real `/home/mjh/hamsci/repos/sigmond` checkout, a true sibling of
-`hf-timestd`, passes this test cleanly). The fix is the same as the
-`ka9q-python` case above: put the missing sibling where the test expects
-it.
+`tests/test_docs_links.py` link-checks this repo's whole doc surface. A link
+into another HamSCI repo, such as `docs/STATION-NETWORK-CAPABILITIES.md` →
+`hf-timestd/docs/PHYSICS.md`, points at GitHub. The checker maps such a link to
+the sibling checkout when that checkout sits next to `sigmond/`, and skips the
+link otherwise. A missing sibling therefore costs coverage, never a failure.
+Clone the siblings the layout section lists if you want those links checked.
 
 **What CI runs** (`.github/workflows/test.yml`): `pip install pytest
 textual`, then `PYTHONPATH=lib python -m pytest tests/ -q` on Python 3.11.
@@ -157,12 +153,13 @@ of 1273 tests (all of `test_bringup.py`, `test_timing.py`,
 `test_wizard_dispatch.py`, `test_instance.py`, `test_catalog_prune.py`,
 `test_timing_show.py`), two of which were already failing for weeks.
 `pytest` collects both styles; `unittest discover` only one. **Don't
-revert CI to `unittest discover`.**
+revert CI to `unittest discover`.** The suite now holds about 8,300 tests
+(`.venv/bin/pytest tests --collect-only -q`).
 
 ## Docs checks
 
-Four checks exist today and run against this repo's `docs/`, `README.md`,
-`CONTRIBUTING.md`, and `CLAUDE.md`:
+Five checks exist today. Four run against this repo's `docs/`, `README.md`,
+`CONTRIBUTING.md`, and `CLAUDE.md`; the fifth checks a client repo:
 
 - **`scripts/docs-linkcheck.py`** — stdlib-only relative-Markdown-link and
   `#anchor` checker; exits non-zero on the first broken link:
@@ -183,7 +180,15 @@ Four checks exist today and run against this repo's `docs/`, `README.md`,
   clean — `docs-freshness: 0 stale page(s)` — so silence never has to be
   read as "did nothing" instead of "ran and found nothing".
 
-All four run in CI via
+- **`scripts/docs-conformance.py`** — checks that a repo carries the
+  documentation surface the contract expects of a client: `docs/INDEX.md` with a
+  `Verified against:` header, `docs/REQUIREMENTS.md`, and a
+  `.github/workflows/docs-check.yml` that calls the shared workflow. The rules
+  live in `lib/sigmond/docs_conformance.py`. Run it as
+  `python3 scripts/docs-conformance.py <repo-root>`; it exits 1 and names each
+  missing piece.
+
+The first four run in CI via
 [`.github/workflows/docs-check.yml`](../../.github/workflows/docs-check.yml)
 on every push and PR (reusable as
 `HamSCI/sigmond/.github/workflows/docs-check.yml@main` for the other suite

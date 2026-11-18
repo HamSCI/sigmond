@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 5554c6e on 2026-11-13 — whole page re-read; marks, check ids, page names and the two generic FAIL texts checked against lib/sigmond/commands/check.py. Earlier: sigmond 783f674 on 2026-10-27 — code (lib/sigmond/commands/check.py)
+> **Verified against:** sigmond f3b0c6e on 2026-11-18 — whole page re-read; marks, check ids, page names and the two generic FAIL texts checked against lib/sigmond/commands/check.py. Earlier: sigmond 783f674 on 2026-10-27 — code (lib/sigmond/commands/check.py)
 > **Canonical for:** the explanation pages behind the lines of `smd check`
 
 `smd check` prints one line per thing it looks at. Each line carries a mark:
@@ -30,6 +30,15 @@ Run `smd check` in the VM. Commands on these pages run in the VM.
 | `platform.receiver-page` | receiver page | platform.receiver-page.md |
 | `platform.station-pages` | station pages | platform.station-pages.md |
 | `platform.magnetometer-page` | magnetometer page | platform.magnetometer-page.md |
+
+## On a radiod-only host
+
+A host with the radiod-only role prints a different list. It shows one line
+per radiod, labelled `radiod <id>`, and no decode, upload or page lines. Each
+line names the first part that fails: the card missing from the USB bus, the
+unit not active, a status name that does not resolve, a radiod that publishes
+with `ttl 0` or on `lo` (fix: `smd admin radiod publish`), or sample loss in
+the journal. See [radiod-only.md](../radiod-only.md).
 
 ## When a check cannot run
 
