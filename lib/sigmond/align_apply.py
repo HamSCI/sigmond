@@ -17,7 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from sigmond.align import AHEAD_NOTE, LIBRARIES_FIRST, RADIOD, RAW_BASE, Item, Release
+from sigmond.align import (AHEAD_NOTE, FULL_SHA_RE, LIBRARIES_FIRST, RADIOD, RAW_BASE,
+                           RELEASE_TAG_RE, Item, Release, target_label)
 from sigmond.doctor import _sha_equal
 
 APPLIANCE_REPO = "https://github.com/HamSCI/sigmond-appliance"
@@ -40,7 +41,23 @@ def _run(run: Callable, argv: list, where, what: str, timeout: int, **kw):
 
 
 def verify_release(rel: Release, run: Callable = subprocess.run) -> None:
-    """The release tag must point at the manifest's appliance_commit."""
+    """The release tag must point at the manifest's appliance_commit.
+
+    A release candidate has no tag on GitHub yet, so nothing can point at
+    it; it is checked for what it can show instead: a release-format tag, a
+    full appliance_commit and a components block.  Each component commit
+    must still turn up in its repo after the fetch, as for any release
+    (`_move`)."""
+    if rel.candidate:
+        label = target_label(rel)
+        if not RELEASE_TAG_RE.match(rel.tag or ""):
+            raise ApplyError(f"{label}: not a release tag: {rel.tag!r}")
+        if not rel.appliance_commit or not FULL_SHA_RE.match(rel.appliance_commit):
+            raise ApplyError(f"{label}: manifest records no full appliance_commit — "
+                             f"cannot read image files at it")
+        if not rel.components:
+            raise ApplyError(f"{label}: manifest has no components block")
+        return
     if not rel.appliance_commit:
         raise ApplyError(f"release {rel.tag}: manifest records no appliance_commit — cannot verify it")
     r = _run(run, ["git", "ls-remote", APPLIANCE_REPO, f"refs/tags/{rel.tag}",
@@ -728,8 +745,9 @@ def record_history(rel: Release, steps: list, *, history: Callable[[dict], None]
     has come out."""
     for step in steps:
         if step.outcome in _LOGGED_OUTCOMES or getattr(step, "built", False):
+            what = target_label(rel) if rel.candidate else rel.tag
             history({"at": now(),
-                     "what": f"smd align --apply {rel.tag}: {step.component} {step.outcome} {step.detail}"})
+                     "what": f"smd align --apply {what}: {step.component} {step.outcome} {step.detail}"})
 
 
 def record(rel: Release, steps: list, *, manifest_path: Path,
@@ -739,12 +757,19 @@ def record(rel: Release, steps: list, *, manifest_path: Path,
     marker are written only when no step failed, was skipped or was
     refused — the same condition as exit 0, so the records never claim
     more than happened; a history line is appended for each component
-    that moved, installed, or failed, whichever way the run came out."""
+    that moved, installed, or failed, whichever way the run came out.
+
+    A release candidate never reaches ``manifest_path``: that file holds
+    the blessed manifest this station adopted, and doctor, the heartbeat
+    and the provenance report read it as such.  aligned.json names the candidate
+    with ``"candidate": true``; the next blessed alignment rewrites the
+    whole record, and the mark goes with it."""
     manifest_path = Path(manifest_path)
     aligned_path = Path(aligned_path)
     ok = not any(s.outcome in _BLOCKING_OUTCOMES for s in steps)
     if ok:
-        _atomic_write_keeping_prev(manifest_path, rel.manifest_text)
+        if not rel.candidate:
+            _atomic_write_keeping_prev(manifest_path, rel.manifest_text)
         aligned_path.parent.mkdir(parents=True, exist_ok=True)
         record_dict = {
             "release": rel.tag,
@@ -753,6 +778,9 @@ def record(rel: Release, steps: list, *, manifest_path: Path,
             "components": dict(rel.components),
             "left": {s.component: s.detail for s in steps if s.outcome == "left"},
         }
+        if rel.candidate:
+            record_dict["candidate"] = True
+            record_dict["manifest_file"] = rel.manifest_path
         # Final review / I2 (B): this rewrite must not erase a live block a
         # prior restart stage wrote — --no-restart and a failed staleness
         # read both return without ever writing a new one, so without this
@@ -763,11 +791,28 @@ def record(rel: Release, steps: list, *, manifest_path: Path,
         except (OSError, ValueError):
             old = None
         if (isinstance(old, dict) and old.get("release") == rel.tag
+                and bool(old.get("candidate")) == rel.candidate
                 and isinstance(old.get("live"), dict)):
             record_dict["live"] = old["live"]
         aligned_path.write_text(json.dumps(record_dict, indent=2) + "\n")
 
     record_history(rel, steps, history=history, now=now)
+
+
+def alignment_summary(aligned_path: Path = ALIGNED_RECORD) -> Optional[str]:
+    """One line on what the station last aligned to, from aligned.json:
+    ``aligned to blessed v3.91 (smd align <at>)`` or ``on candidate v3.92,
+    not blessed (smd align <at>)``.  None when there is no readable record."""
+    try:
+        doc = json.loads(Path(aligned_path).read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict) or not doc.get("release"):
+        return None
+    at = doc.get("at") or "?"
+    if doc.get("candidate"):
+        return f"on candidate {doc['release']}, not blessed (smd align {at})"
+    return f"aligned to blessed {doc['release']} (smd align {at})"
 
 
 def record_live(aligned_path: Path, live: dict) -> None:

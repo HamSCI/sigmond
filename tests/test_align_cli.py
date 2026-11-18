@@ -51,14 +51,25 @@ def run(live, dirty=None, files=None, recorded="v3.36", release=REL, no_cost=Tru
         mock.patch.object(smd, "_align_radiod_built_at", return_value=None),
         mock.patch.object(smd, "_align_live_state",
                           return_value=(live, dirty or {}, origins or {}, errors or {})),
-        mock.patch("sigmond.align.image_file_drift", return_value=files or [
-            {"path": "/usr/local/sbin/sigmond-site-timing", "status": "current", "note": ""}]),
+        (mock.patch("sigmond.align.image_file_drift", files) if callable(files) else
+         mock.patch("sigmond.align.image_file_drift", return_value=files or [
+             {"path": "/usr/local/sbin/sigmond-site-timing", "status": "current", "note": ""}])),
         mock.patch("sigmond.align.recorded_release", return_value=recorded),
     ]
     if isinstance(release, Exception):
         patches.append(mock.patch("sigmond.align.fetch_release", side_effect=release))
     else:
         patches.append(mock.patch("sigmond.align.fetch_release", return_value=release))
+    if ns.get("manifest"):
+        # --manifest: a candidate never reaches fetch_release.
+        patches[-1] = mock.patch("sigmond.align.fetch_release",
+                                 side_effect=AssertionError("a candidate fetched a Release"))
+        patches.append(mock.patch("sigmond.align.load_candidate", side_effect=release)
+                       if isinstance(release, Exception) else
+                       mock.patch("sigmond.align.load_candidate", return_value=release))
+    # Never the real /etc/sigmond-appliance/aligned.json.
+    patches.append(mock.patch("sigmond.align_apply.alignment_summary",
+                              return_value=ns.pop("last_alignment", None)))
     # Never the real catalog (Fix round 1 / I-2) — unless the test has
     # already put its own in place.
     import sigmond.catalog
@@ -637,7 +648,7 @@ def _no_real_record_live():
 def run_apply(*, apply=True, allow_rollback=False, max_bytes=None, release=APPLY_REL,
              live=None, need_root=False, verify_error=None, ancestor=lambda c, a, b: True,
              apply_plan_result=None, target_has_align=True, base="/opt/git/sigmond",
-             no_cost=True, no_restart=False, target_supports=True):
+             no_cost=True, no_restart=False, target_supports=True, manifest=None):
     """Drives `smd align --apply` (or the flag-without-apply guard) with
     every side-effecting collaborator patched. Returns (rc, out, mocks) —
     `mocks` is the dict of the patched callables, for call-order/arg
@@ -646,7 +657,7 @@ def run_apply(*, apply=True, allow_rollback=False, max_bytes=None, release=APPLY
                                           "ka9q-radio": "401992c"}
     args = argparse.Namespace(release=None, base=base, no_cost=no_cost, apply=apply,
                               allow_rollback=allow_rollback, max_bytes=max_bytes,
-                              no_restart=no_restart)
+                              no_restart=no_restart, manifest=manifest)
 
     m_need_root = mock.Mock(return_value=need_root)
     m_lock = mock.Mock(side_effect=lambda reason=None: contextlib.nullcontext())
@@ -693,6 +704,10 @@ def run_apply(*, apply=True, allow_rollback=False, max_bytes=None, release=APPLY
         patches.append(mock.patch("sigmond.align.fetch_release", side_effect=release))
     else:
         patches.append(mock.patch("sigmond.align.fetch_release", return_value=release))
+    if manifest:
+        patches[-1] = mock.patch("sigmond.align.fetch_release",
+                                 side_effect=AssertionError("a candidate fetched a Release"))
+        patches.append(mock.patch("sigmond.align.load_candidate", return_value=release))
 
     out = io.StringIO()
     with contextlib.ExitStack() as st:
@@ -2734,6 +2749,14 @@ class AlignMakeLiveApplyTests(unittest.TestCase):
         m["bringup"].assert_not_called()
         self.assertEqual(rc, 0)
 
+    def test_a_candidate_record_never_makes_the_blessed_release_a_no_op(self):
+        # A canary aligned to CANDIDATE v3.53; v3.53 is then blessed with the
+        # same commits.  The plain align must still write the blessed records.
+        rc, out, m = self._quiet_run(dict(_LIVE_PASSED), aligned_release="CANDIDATE v3.53")
+        self.assertNotIn("nothing to do", out)
+        m["record"].assert_called_once()
+        self.assertFalse(m["record"].call_args[0][0].candidate)
+
     def test_no_live_block_is_not_a_no_op(self):
         rc, out, m = self._quiet_run(None)
         self.assertNotIn("nothing to do", out)
@@ -4013,3 +4036,114 @@ class AlignDeployBuildTests(unittest.TestCase):
         src = (REPO / "bin" / "smd").read_text()
         self.assertIn("deploy_build=lambda name, repo: _align_deploy_build(name, repo, base)",
                       src)
+
+
+CAND_REL = align.Release(tag="v3.92", manifest_text="candidate manifest",
+                         appliance_commit="a" * 40,
+                         components={"sigmond": "daba1f6", "hf-timestd": "5c8196d",
+                                     "ka9q-radio": "401992c"},
+                         candidate=True, manifest_path="/srv/build/v3.92.manifest.txt")
+
+
+class AlignCandidateCliTests(unittest.TestCase):
+    """`smd align --manifest PATH`: a canary aligns to an unblessed candidate."""
+
+    LIVE = {"sigmond": "daba1f6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"}
+
+    def test_parser_takes_manifest(self):
+        args = smd._build_parser().parse_args(["align", "--manifest", "/x/m.txt"])
+        self.assertEqual(args.manifest, "/x/m.txt")
+        self.assertIsNone(args.release)
+
+    def test_manifest_and_release_are_mutually_exclusive(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
+            smd._build_parser().parse_args(
+                ["align", "--manifest", "/x/m.txt", "--release", "v3.91"])
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_dry_run_labels_the_target_candidate(self):
+        files = mock.Mock(return_value=[])
+        host_line = mock.Mock(return_value="  host: (stub)")
+        with mock.patch.object(smd, "_align_host_line", host_line):
+            rc, out = run(self.LIVE, release=CAND_REL, manifest="/srv/build/v3.92.manifest.txt",
+                          recorded="v3.91", files=files)
+        self.assertIn("against CANDIDATE v3.92 (not blessed)", out)
+        self.assertNotIn("blessed v3.92", out.replace("(not blessed)", ""))
+        self.assertIn("candidate manifest: /srv/build/v3.92.manifest.txt", out)
+        # No tag on GitHub yet: image files are read at the candidate's commit.
+        files.assert_called_once_with("a" * 40)
+        self.assertIs(host_line.call_args.kwargs["candidate"], True)
+
+    def test_a_bad_candidate_exits_2(self):
+        rc, out = run({}, release=align.LookupError_("candidate v3.92: manifest has no "
+                                                     "usable components block"),
+                      manifest="/x/m.txt")
+        self.assertEqual(rc, 2)
+        self.assertIn("cannot establish the target", out)
+
+    def test_dry_run_shows_the_last_alignment_as_candidate(self):
+        rc, out = run(self.LIVE, recorded="v3.53",
+                      last_alignment="on candidate v3.92, not blessed (smd align 2026-11-17T00:00:00Z)")
+        self.assertIn("against blessed v3.53", out)
+        self.assertIn("last alignment: on candidate v3.92, not blessed", out)
+
+    def test_apply_labels_the_target_and_records_a_candidate(self):
+        rc, out, mocks = run_apply(release=CAND_REL, manifest="/srv/build/v3.92.manifest.txt",
+                                   live=self.LIVE,
+                                   apply_plan_result=[align_apply.Step("sigmond", "current")])
+        self.assertIn("aligning to CANDIDATE v3.92 (not blessed)", out)
+        mocks["verify"].assert_called_once()
+        self.assertTrue(mocks["verify"].call_args[0][0].candidate)
+        mocks["record"].assert_called()
+        self.assertTrue(mocks["record"].call_args[0][0].candidate)
+
+    def test_reexec_carries_the_manifest_not_a_release(self):
+        boot = align_apply.Step("sigmond", "moved", "459bee6 -> daba1f6", 100)
+        rc, out, mocks = run_apply(release=CAND_REL, manifest="/srv/build/v3.92.manifest.txt",
+                                   live={"sigmond": "459bee6", "hf-timestd": "5c8196d",
+                                         "ka9q-radio": "401992c"},
+                                   apply_plan_result=[boot])
+        mocks["execv"].assert_called_once()
+        argv = mocks["execv"].call_args[0][1]
+        self.assertNotIn("--release", argv)
+        i = argv.index("--manifest")
+        self.assertEqual(argv[i + 1], "/srv/build/v3.92.manifest.txt")
+        self.assertIn(mock.call("/opt/git/sigmond", "daba1f6", "--manifest"),
+                      mocks["target_supports"].call_args_list)
+
+    def test_no_reexec_into_an_smd_without_manifest(self):
+        boot = align_apply.Step("sigmond", "moved", "459bee6 -> daba1f6", 100)
+        rc, out, mocks = run_apply(release=CAND_REL, manifest="/srv/build/v3.92.manifest.txt",
+                                   live={"sigmond": "459bee6", "hf-timestd": "5c8196d",
+                                         "ka9q-radio": "401992c"},
+                                   apply_plan_result=[boot], target_supports=False)
+        mocks["execv"].assert_not_called()
+
+    def test_aligned_release_marks_a_candidate_record(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "aligned.json"
+            with mock.patch.object(align_apply, "ALIGNED_RECORD", p):
+                p.write_text(json.dumps({"release": "v3.92", "candidate": True}))
+                self.assertEqual(smd._align_aligned_release(), "CANDIDATE v3.92")
+                self.assertEqual(smd._align_record_key(CAND_REL), "CANDIDATE v3.92")
+                p.write_text(json.dumps({"release": "v3.92"}))
+                self.assertEqual(smd._align_aligned_release(), "v3.92")
+
+    def test_host_line_names_a_candidate_host(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "host-aligned.json"
+            p.write_text(json.dumps({"release": "v3.92", "at": "T", "candidate": True}))
+            same = smd._align_host_line("v3.92", path=p, version_path=Path(d) / "none",
+                                        candidate=True)
+            self.assertIn("CANDIDATE v3.92 (not blessed)", same)
+            self.assertNotIn("available", same)
+            # A blessed host while the VM targets the candidate: run pm-align on it.
+            p.write_text(json.dumps({"release": "v3.91", "at": "T"}))
+            behind = smd._align_host_line("v3.92", path=p, version_path=Path(d) / "none",
+                                          candidate=True)
+            self.assertIn("CANDIDATE v3.92 (not blessed) available: run pm-align "
+                          "--manifest PATH --release-tag v3.92", behind)
+            p.write_text(json.dumps({"release": "v3.92", "at": "T", "candidate": True}))
+            # The blessed v3.92 asks for a blessed pm-align run.
+            blessed = smd._align_host_line("v3.92", path=p, version_path=Path(d) / "none")
+            self.assertIn("v3.92 available: run pm-align on the host", blessed)

@@ -6414,6 +6414,15 @@ def cmd_version(args) -> int:
         # and test-update-v3.sh all capture this output and parse that
         # list.  --hashes prints it on a terminal too.
         detail_only=detail, standing=standing, image=image))
+    # What `smd align` last recorded, after everything the image build and
+    # `smd fleet` parse: a station on a release candidate says so here.
+    try:
+        from sigmond.align_apply import alignment_summary
+        last = alignment_summary()
+    except Exception:
+        last = None
+    if last:
+        print(f'\nalignment:  {last}')
     return 0
 
 
@@ -7677,13 +7686,36 @@ def _align_live_state(base: str):
 
 
 def _align_aligned_release():
-    """The release aligned.json records, or None when it is absent or unreadable."""
+    """The release aligned.json records, or None when it is absent or
+    unreadable.  A candidate record comes back as `CANDIDATE <tag>`, so it
+    never equals a blessed tag (`_align_record_key`): a plain align to the
+    blessed release of the same number still writes the blessed records."""
     import json
     from sigmond import align_apply
     try:
-        return json.loads(align_apply.ALIGNED_RECORD.read_text()).get('release')
+        doc = json.loads(align_apply.ALIGNED_RECORD.read_text())
+        rel = doc.get('release')
     except (OSError, ValueError, AttributeError):
         return None
+    if rel and doc.get('candidate'):
+        return f'CANDIDATE {rel}'
+    return rel
+
+
+def _align_record_key(rel) -> str:
+    """What `_align_aligned_release` returns once ``rel`` is recorded."""
+    return f'CANDIDATE {rel.tag}' if getattr(rel, 'candidate', False) else rel.tag
+
+
+def _align_target(args):
+    """The release `smd align` aligns to: a local candidate manifest
+    (--manifest), else a published GitHub Release (--release, or the
+    latest).  Raises align.LookupError_."""
+    from sigmond import align
+    path = getattr(args, 'manifest', None)
+    if path:
+        return align.load_candidate(path)
+    return align.fetch_release(getattr(args, 'release', None))
 
 
 def _align_aligned_live():
@@ -7700,7 +7732,7 @@ def _align_aligned_live():
 
 def _align_host_line(release_tag, path=Path('/etc/sigmond-appliance/host-aligned.json'),
                      version_path=Path('/etc/sigmond-appliance/version'),
-                     appliance: bool = True) -> str:
+                     appliance: bool = True, candidate: bool = False) -> str:
     """The Proxmox host's level as the VM knows it: pm-align's record, pushed
     in by pm-align itself (``push_record``, scripts/proxmox/pm-align.py);
     failing that, the install-time version (the wizard stamps it in). The
@@ -7716,15 +7748,25 @@ def _align_host_line(release_tag, path=Path('/etc/sigmond-appliance/host-aligned
     without pm-align's record it says so instead of sending the operator to
     run pm-align on a host that does not exist; with a record (an appliance
     VM that lost its marker) it reports the record and the missing marker
-    (two-layer design, 2026-11-08 §1, decision 2)."""
+    (two-layer design, 2026-11-08 §1, decision 2).
+
+    ``candidate``: the VM's target is a release candidate.  pm-align marks
+    a candidate host record ``"candidate": true``; the host matches only a
+    target of the same tag and the same kind."""
     import json
     _QUIET_TUNNEL = ('applied', 'current', 'skipped', 'n/a')
+    target = f'CANDIDATE {release_tag} (not blessed)' if candidate else release_tag
+    how = (f'run pm-align --manifest PATH --release-tag {release_tag} on the host'
+           if candidate else 'run pm-align on the host')
     try:
         doc = json.loads(path.read_text())
         if isinstance(doc, dict):
             rel, at = doc.get('release', '?'), doc.get('at', '?')
-            tail = ('' if rel == release_tag
-                    else f' — {release_tag} available: run pm-align on the host')
+            host_cand = bool(doc.get('candidate'))
+            tail = ('' if rel == release_tag and host_cand == candidate
+                    else f' — {target} available: {how}')
+            if host_cand:
+                rel = f'CANDIDATE {rel} (not blessed)'
             tunnel = doc.get('tunnel')
             if tunnel is not None and tunnel not in _QUIET_TUNNEL:
                 tail += f' — tunnel: {tunnel}'
@@ -7740,7 +7782,7 @@ def _align_host_line(release_tag, path=Path('/etc/sigmond-appliance/host-aligned
     except OSError:
         v = 'unknown'
     return (f'  host: {v} (install-time) — never aligned; '
-            f'{release_tag} available: run pm-align on the host')
+            f'{target} available: {how}')
 
 
 _ALIGN_LIVE_CHECKS = ('units_stable', 'authority_fresh', 'heartbeat_sent')
@@ -9218,7 +9260,7 @@ def _align_apply(args) -> int:
     with lifecycle_lock(reason='align'):
         base = getattr(args, 'base', None) or '/opt/git/sigmond'
         try:
-            rel = align.fetch_release(getattr(args, 'release', None))
+            rel = _align_target(args)
         except align.LookupError_ as exc:
             print(f'smd align --apply: cannot establish the target — {exc}')
             return 2
@@ -9227,6 +9269,9 @@ def _align_apply(args) -> int:
         except align_apply.ApplyError as exc:
             print(f'smd align --apply: {exc}')
             return 2
+        if rel.candidate:
+            print(f'smd align --apply — aligning to {align.target_label(rel)} '
+                  f'from {rel.manifest_path}')
 
         live, dirty, origins, errors = _align_live_state(base)
         catalog = {}
@@ -9314,7 +9359,13 @@ def _align_apply(args) -> int:
             # target that predates align itself).
             reexec = (boot.outcome == 'moved'
                       and _align_target_has_align(base, sigmond_item.target)
-                      and _align_target_skips_missing(base, sigmond_item.target))
+                      and _align_target_skips_missing(base, sigmond_item.target)
+                      # A candidate re-execs only into an smd that reads
+                      # --manifest; an older one would fetch a blessed
+                      # release instead.
+                      and (not rel.candidate
+                           or _align_target_supports(base, sigmond_item.target,
+                                                     '--manifest')))
             if reexec:
                 # This process is about to replace itself — nothing after
                 # os.execv runs, so the sigmond move goes into HISTORY now
@@ -9343,9 +9394,11 @@ def _align_apply(args) -> int:
                 # the lock first; the child then exits "another lifecycle
                 # operation is in progress" having only moved sigmond — safe
                 # (nothing else was touched), and a re-run resumes from there.
+                target_argv = (['--manifest', str(Path(rel.manifest_path).resolve())]
+                               if rel.candidate else ['--release', rel.tag])
                 os.execv(sys.executable,
                         [sys.executable, str(Path(base) / 'sigmond' / 'bin' / 'smd'),
-                         'align', '--apply', '--release', rel.tag, *passthrough])
+                         'align', '--apply', *target_argv, *passthrough])
                 return 0   # os.execv never returns on success; only reached under test
             if boot.outcome == 'moved':
                 print(f'sigmond moved to {sigmond_item.target}, whose smd align '
@@ -9505,7 +9558,7 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
     changed = any(s.outcome in ('moved', 'installed') or getattr(s, 'built', False)
                   for s in move_steps)
     refreshed = any(s.outcome == 'refreshed' for s in image_steps)
-    if (not changed and not refreshed and _align_aligned_release() == rel.tag
+    if (not changed and not refreshed and _align_aligned_release() == _align_record_key(rel)
             and _align_live_passed(prior_live)):
         try:
             quiet = not _align_staleness(base, _align_services(), catalog or None)['stale']
@@ -9594,7 +9647,7 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
     for step in restart_steps:
         if step.outcome in ('restarted', 'failed'):
             history({'at': now(),
-                     'what': f'smd align --apply {rel.tag}: {step.component} {step.outcome}'
+                     'what': f'smd align --apply {_align_record_key(rel)}: {step.component} {step.outcome}'
                              + (f' {step.detail}' if step.detail else '')})
     steps = steps + restart_steps
 
@@ -9739,18 +9792,24 @@ def cmd_align(args) -> int:
     import socket
     base = getattr(args, 'base', None) or '/opt/git/sigmond'
     try:
-        rel = align.fetch_release(getattr(args, 'release', None))
+        rel = _align_target(args)
     except align.LookupError_ as exc:
         print(f'smd align: cannot establish the target — {exc}')
         return 2
     live, dirty, origins, errors = _align_live_state(base)
     plan = align.plan_align(rel, live, dirty, errors, local=_locally_managed())
     plan, skip_missing = _align_missing_notes(plan, args)
-    print(f'smd align — {socket.gethostname()} against blessed {rel.tag} '
+    print(f'smd align — {socket.gethostname()} against {align.target_label(rel)} '
           f'(dry run: nothing changes)')
+    if rel.candidate:
+        print(f'  candidate manifest: {rel.manifest_path}')
     recorded = align.recorded_release()
     print(f'  install-time release: {recorded or "unknown"}   '
           f'(the image this VM was first installed from)')
+    from sigmond import align_apply as _aa_rec
+    last = _aa_rec.alignment_summary()
+    if last:
+        print(f'  last alignment: {last}')
     print('  components:')
     catalog = {}
     if not getattr(args, 'no_cost', False):
@@ -9822,7 +9881,8 @@ def cmd_align(args) -> int:
         print(f'    {it.component:<16} {line}')
     if rate_limited:
         print(f'  commit distances skipped: {rate_limited}')
-    files = align.image_file_drift(rel.tag)
+    # A candidate has no tag on GitHub yet: read its files at its commit.
+    files = align.image_file_drift(rel.appliance_commit if rel.candidate else rel.tag)
     from sigmond import align_apply as _aa
     files.append(_aa.site_timing_link_state(Path(base) / 'sigmond'))
     stale = [f for f in files if f['status'] in ('differs', 'absent')]
@@ -9855,7 +9915,8 @@ def cmd_align(args) -> int:
           f"{len(stale)} file{'s' if len(stale) != 1 else ''} to refresh, "
           f"{stale_now} service{'s' if stale_now != 1 else ''} to restart")
     from sigmond.provenance import is_appliance_install
-    print(_align_host_line(rel.tag, appliance=is_appliance_install()))
+    print(_align_host_line(rel.tag, appliance=is_appliance_install(),
+                           candidate=rel.candidate))
     if unverified:
         names = ', '.join(f['path'] for f in unverified)
         print(f"  {len(unverified)} file{'s' if len(unverified) != 1 else ''} "
@@ -18317,6 +18378,15 @@ def cmd_status(args) -> int:
 
     _heading('status')
     any_bad = False
+    if _HAS_SIGMOND_LIB:
+        try:
+            from sigmond.align_apply import alignment_summary
+            _last_align = alignment_summary()
+        except Exception:
+            _last_align = None
+        if _last_align:
+            (_warn if _last_align.startswith('on candidate') else _info)(
+                f'release: {_last_align}')
 
     # Group by component for display
     by_component: dict[str, list[UnitRef]] = {}
@@ -30896,8 +30966,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser('align',
         help='how far this station sits from the latest blessed appliance '
              'release (dry run unless --apply)')
-    p.add_argument('--release', help='compare against this blessed release tag '
-                                     '(default: the latest)')
+    target = p.add_mutually_exclusive_group()
+    target.add_argument('--release', help='compare against this blessed release tag '
+                                          '(default: the latest)')
+    target.add_argument('--manifest', metavar='PATH',
+                        help='align to an UNBLESSED release candidate: the local '
+                             'release manifest the rig wrote (canary stations, '
+                             'before the bless); recorded as a candidate, never '
+                             'as the blessed manifest')
     p.add_argument('--base', help='component checkout root (default /opt/git/sigmond)')
     p.add_argument('--no-cost', action='store_true',
                    help='skip the per-component commit-distance lookups')

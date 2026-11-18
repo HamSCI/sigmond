@@ -185,6 +185,17 @@ smd align --verify — aligned v3.83 at 2026-10-29T13:03:05Z (live record)
 
 Look for `VALID` on both lines. The gaps line counts lost-sample events. Zero is the goal. The uploads line reports any backlog. Old dead letters are failed uploads that the queue gave up on. Their dates show whether new ones still arrive. Here the newest is two days old, so none arrived since.
 
+### Canary stations: smd align --manifest
+
+A canary station runs a release before the bless. The rig writes the candidate's manifest beside the image, and no GitHub Release exists yet. Copy that file to the station, then point align at it instead of at `--release`:
+
+```
+smd align --manifest /root/sigmond-appliance-v3.92-20261116-release.manifest.txt
+smd align --manifest /root/sigmond-appliance-v3.92-20261116-release.manifest.txt --apply
+```
+
+Every line that names the target reads `CANDIDATE v3.92 (not blessed)`. Align checks what it can without a Release: the tag, the full appliance commit, the components block, and, as always, each component commit in its own repo. After `--apply`, `aligned.json` marks the station as on the candidate. `smd status`, `smd version` and a later `smd align` say `on candidate v3.92, not blessed`. Align never writes a candidate into `/etc/sigmond-appliance/manifest.txt`, the blessed manifest, so `smd doctor` keeps measuring drift against the last blessed release. Once the release is blessed, a plain `smd align --apply` moves the station onto it and clears the mark. On a Proxmox canary, run the host side as root on the host, with the same file: `pm-align --manifest PATH --release-tag v3.92 [--apply]`. Its record in `host-aligned.json` then says `"candidate": true`.
+
 ## smd admin viewers
 
 Use this to find the local web pages of the station and see whether each one runs.

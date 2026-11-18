@@ -83,6 +83,19 @@ class Release:
     components: dict
     draft: bool = False
     prerelease: bool = False
+    # A release candidate read from a local manifest file (`smd align
+    # --manifest`): no GitHub Release stands behind it yet.  Canaries align
+    # to it before the bless; nothing records it as blessed.
+    candidate: bool = False
+    manifest_path: Optional[str] = None
+
+
+def target_label(rel: Release) -> str:
+    """How every output line names the target: `blessed v3.92`, or
+    `CANDIDATE v3.92 (not blessed)` for a release candidate."""
+    if rel.candidate:
+        return f"CANDIDATE {rel.tag} (not blessed)"
+    return f"blessed {rel.tag}"
 
 
 def _preamble(text: str, key: str) -> Optional[str]:
@@ -131,6 +144,51 @@ def fetch_release(tag: Optional[str] = None, urlopen: Optional[Callable] = None,
     return Release(tag=tag_name, manifest_text=text,
                    appliance_commit=_preamble(text, "appliance_commit"),
                    components=components)
+
+
+FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def load_candidate(path: str) -> Release:
+    """A release candidate from the local manifest file at ``path`` -- the
+    file the rig writes beside the image (``sigmond-appliance-<tag>-<date>-
+    release.manifest.txt``), before any GitHub Release exists.
+
+    The same checks as a fetched release, minus the Release itself: the
+    components block parses and every row is well formed, the preamble
+    names a release tag (appliance_tag, else image_version), and the
+    preamble's appliance_commit is a full commit (image files are read at
+    it).  Any failure refuses the whole file."""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(_MAX_BODY + 1)
+    except OSError as exc:
+        raise LookupError_(f"cannot read candidate manifest {path}: {exc}") from exc
+    if len(raw) > _MAX_BODY:
+        raise LookupError_(f"candidate manifest {path} is larger than {_MAX_BODY} bytes")
+    text = raw.decode("utf-8", "replace")
+    tag = _preamble(text, "appliance_tag") or _preamble(text, "image_version")
+    if tag is None:
+        raise LookupError_(f"candidate manifest {path} names no appliance_tag or image_version")
+    if not RELEASE_TAG_RE.match(tag):
+        raise LookupError_(f"candidate manifest {path}: not a release tag: {tag!r}")
+    image_version = _preamble(text, "image_version")
+    if image_version is not None and image_version != tag:
+        raise LookupError_(f"CANDIDATE {tag} (not blessed): image_version {image_version!r} does not "
+                           f"match appliance_tag {tag!r}")
+    components = _parse_manifest_components(text)
+    if not components:
+        raise LookupError_(f"CANDIDATE {tag} (not blessed): manifest has no usable components block "
+                           f"(missing or truncated)")
+    for name, sha in components.items():
+        if not COMPONENT_NAME_RE.match(name) or not SHA_RE.match(sha):
+            raise LookupError_(
+                f"CANDIDATE {tag} (not blessed): manifest entry {name!r} {sha!r} is malformed")
+    commit = _preamble(text, "appliance_commit")
+    if commit is None or not FULL_SHA_RE.match(commit):
+        raise LookupError_(f"CANDIDATE {tag} (not blessed): appliance_commit {commit!r} is not a full commit")
+    return Release(tag=tag, manifest_text=text, appliance_commit=commit,
+                   components=components, candidate=True, manifest_path=str(path))
 
 
 def _release_from_api(tag: Optional[str], urlopen, timeout: float) -> tuple:

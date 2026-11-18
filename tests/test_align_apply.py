@@ -44,6 +44,83 @@ class VerifyReleaseTests(unittest.TestCase):
             align_apply.verify_release(rel(commit=None), ls_remote([f"{C}\trefs/tags/v3.53\n"]))
 
 
+def cand(commit=C, tag="v3.92", components=None):
+    return align.Release(tag=tag, manifest_text="candidate manifest\n", appliance_commit=commit,
+                         components={"sigmond": "daba1f6"} if components is None else components,
+                         candidate=True, manifest_path="/srv/build/m.txt")
+
+
+def _no_git(argv, **kw):
+    raise AssertionError(f"a candidate ran {argv}")
+
+
+class VerifyCandidateTests(unittest.TestCase):
+    def test_candidate_needs_no_github_release(self):
+        align_apply.verify_release(cand(), _no_git)
+
+    def test_candidate_without_full_commit_refuses(self):
+        for commit in (None, "4a92fbd"):
+            with self.assertRaises(align_apply.ApplyError) as cm:
+                align_apply.verify_release(cand(commit=commit), _no_git)
+            self.assertIn("CANDIDATE v3.92 (not blessed)", str(cm.exception))
+
+    def test_candidate_without_components_refuses(self):
+        with self.assertRaises(align_apply.ApplyError):
+            align_apply.verify_release(cand(components={}), _no_git)
+
+    def test_candidate_with_a_bad_tag_refuses(self):
+        with self.assertRaises(align_apply.ApplyError):
+            align_apply.verify_release(cand(tag="main"), _no_git)
+
+
+class RecordCandidateTests(unittest.TestCase):
+    def _record(self, rel, tmp, steps=None):
+        manifest_path = Path(tmp) / "manifest.txt"
+        aligned_path = Path(tmp) / "aligned.json"
+        history = []
+        align_apply.record(rel, steps or [align_apply.Step("sigmond", "moved", "a -> b", 1)],
+                           manifest_path=manifest_path, aligned_path=aligned_path,
+                           history=history.append, now=lambda: "2026-11-18T00:00:00Z")
+        return manifest_path, aligned_path, history
+
+    def test_candidate_never_writes_the_blessed_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "manifest.txt").write_text("blessed v3.91\n")
+            manifest_path, aligned_path, history = self._record(cand(), tmp)
+            self.assertEqual(manifest_path.read_text(), "blessed v3.91\n")
+            self.assertFalse(manifest_path.with_name("manifest.txt.prev").exists())
+            data = json.loads(aligned_path.read_text())
+            self.assertEqual(data["release"], "v3.92")
+            self.assertIs(data["candidate"], True)
+            self.assertEqual(data["manifest_file"], "/srv/build/m.txt")
+            self.assertEqual(history[0]["what"],
+                             "smd align --apply CANDIDATE v3.92 (not blessed): sigmond moved a -> b")
+            self.assertEqual(align_apply.alignment_summary(aligned_path),
+                             "on candidate v3.92, not blessed (smd align 2026-11-18T00:00:00Z)")
+
+    def test_a_later_blessed_align_overwrites_the_candidate_mark(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, aligned_path, _ = self._record(cand(), tmp)
+            json_doc = json.loads(aligned_path.read_text())
+            json_doc["live"] = {"complete": True}
+            aligned_path.write_text(json.dumps(json_doc))
+            blessed = align.Release(tag="v3.92", manifest_text="blessed v3.92\n",
+                                    appliance_commit=C, components={"sigmond": "daba1f6"})
+            manifest_path, aligned_path, _ = self._record(blessed, tmp)
+            self.assertEqual(manifest_path.read_text(), "blessed v3.92\n")
+            data = json.loads(aligned_path.read_text())
+            self.assertNotIn("candidate", data)
+            self.assertNotIn("manifest_file", data)
+            # The candidate's restart block described the candidate's run.
+            self.assertNotIn("live", data)
+            self.assertEqual(align_apply.alignment_summary(aligned_path),
+                             "aligned to blessed v3.92 (smd align 2026-11-18T00:00:00Z)")
+
+    def test_summary_without_a_record_is_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(align_apply.alignment_summary(Path(tmp) / "absent.json"))
+
+
 class _FakeGit:
     """Records every argv it's called with; answers by the git subcommand
     (found by scanning for the literal "git" token, then skipping any

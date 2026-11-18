@@ -480,3 +480,69 @@ class ClassifyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+CANDIDATE = MANIFEST.replace("v3.53", "v3.92")
+
+
+class LoadCandidateTests(unittest.TestCase):
+    """`smd align --manifest PATH`: the rig's local manifest, before the bless."""
+
+    def _load(self, text):
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "sigmond-appliance-v3.92-20261116-release.manifest.txt")
+            with open(p, "w") as f:
+                f.write(text)
+            return align.load_candidate(p), p
+
+    def test_candidate_parses_and_says_so(self):
+        rel, path = self._load(CANDIDATE)
+        self.assertTrue(rel.candidate)
+        self.assertEqual(rel.tag, "v3.92")
+        self.assertEqual(rel.appliance_commit, "4a92fbdbcce497035994e76636689d84f7ffe967")
+        self.assertEqual(rel.components["hf-timestd"], "5c8196d")
+        self.assertEqual(rel.manifest_path, path)
+        self.assertEqual(rel.manifest_text, CANDIDATE)
+
+    def test_label_names_a_candidate_not_blessed(self):
+        rel, _ = self._load(CANDIDATE)
+        self.assertEqual(align.target_label(rel), "CANDIDATE v3.92 (not blessed)")
+        blessed = align.Release(tag="v3.91", manifest_text="", appliance_commit=None,
+                                components={})
+        self.assertEqual(align.target_label(blessed), "blessed v3.91")
+
+    def test_missing_components_block_refuses(self):
+        text = CANDIDATE.split("components (live):")[0]
+        with self.assertRaises(align.LookupError_) as cm:
+            self._load(text)
+        self.assertIn("components", str(cm.exception))
+
+    def test_malformed_component_row_refuses(self):
+        with self.assertRaises(align.LookupError_) as cm:
+            self._load(CANDIDATE.replace("5c8196d", "NOT-A-SHA"))
+        self.assertIn("malformed", str(cm.exception))
+
+    def test_bad_tag_refuses(self):
+        with self.assertRaises(align.LookupError_):
+            self._load(CANDIDATE.replace("v3.92", "v3.92-rc1"))
+
+    def test_no_tag_refuses(self):
+        text = "\n".join(l for l in CANDIDATE.splitlines()
+                         if not l.startswith(("appliance_tag:", "image_version:")))
+        with self.assertRaises(align.LookupError_):
+            self._load(text)
+
+    def test_tag_disagreement_refuses(self):
+        with self.assertRaises(align.LookupError_):
+            self._load(CANDIDATE.replace("image_version: v3.92", "image_version: v3.91"))
+
+    def test_short_appliance_commit_refuses(self):
+        with self.assertRaises(align.LookupError_) as cm:
+            self._load(CANDIDATE.replace("4a92fbdbcce497035994e76636689d84f7ffe967", "4a92fbd"))
+        self.assertIn("appliance_commit", str(cm.exception))
+
+    def test_unreadable_file_refuses(self):
+        with self.assertRaises(align.LookupError_):
+            align.load_candidate("/nonexistent/candidate.manifest.txt")

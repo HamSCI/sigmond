@@ -129,6 +129,15 @@ class Release:
     vm6proxy_sha256: Optional[str] = None
     # From v3.72 #23 the build records the IPv4 relay's hash too.
     vm4relay_sha256: Optional[str] = None
+    # A release candidate (--manifest PATH --release-tag vX.Y): read from the
+    # rig's local manifest before any GitHub Release exists.  Canary only.
+    candidate: bool = False
+
+
+def label(rel: Release) -> str:
+    """How every line names the target: the tag, or for a release candidate
+    `CANDIDATE vX.Y (not blessed)`."""
+    return f"CANDIDATE {rel.tag} (not blessed)" if rel.candidate else rel.tag
 
 
 @dataclass
@@ -222,6 +231,41 @@ def fetch_release(tag: Optional[str] = None, *, urlopen: Callable = urllib.reque
     return Release(tag_name, pre["appliance_commit"], pre["wizard_commit"],
                    pre["firstboot_sha256"], text, pre.get("vm6proxy_sha256"),
                    pre.get("vm4relay_sha256"))
+
+
+def load_candidate(path: str, tag: str) -> Release:
+    """A release candidate from the rig's local manifest file at ``path``,
+    named ``tag`` (--release-tag; the tag does not exist on GitHub yet).
+
+    The same preamble checks as fetch_release: full appliance_commit and
+    wizard_commit, a well-formed firstboot_sha256 and relay hashes, and an
+    image_version equal to ``tag``.  fetch_sources then reads the same raw
+    files at those commits and checks firstboot against its hash, so a
+    candidate meets every check a blessed release does except the Release
+    itself."""
+    if not _RELEASE_TAG.match(tag or ""):
+        raise PmAlignError(f"--release-tag {tag!r} is not a release tag (vX.Y or vX.Y.Z)")
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise PmAlignError(f"cannot read candidate manifest {path}: {exc}") from exc
+    name = f"CANDIDATE {tag} (not blessed)"
+    pre = _preamble(text)
+    if pre.get("image_version") != tag:
+        raise PmAlignError(f"{name}: manifest says image_version "
+                           f"{pre.get('image_version')!r}, not {tag}")
+    for key in ("appliance_commit", "wizard_commit"):
+        if not _FULL_SHA.match(pre.get(key, "")):
+            raise PmAlignError(f"{name}: {key} {pre.get(key)!r} is not a full commit")
+    if not re.match(r"^[0-9a-f]{64}$", pre.get("firstboot_sha256", "")):
+        raise PmAlignError(f"{name}: firstboot_sha256 missing or malformed")
+    for key in ("vm6proxy_sha256", "vm4relay_sha256"):
+        val = pre.get(key)
+        if val is not None and not re.match(r"^[0-9a-f]{64}$", val):
+            raise PmAlignError(f"{name}: {key} {val!r} is malformed")
+    return Release(tag, pre["appliance_commit"], pre["wizard_commit"],
+                   pre["firstboot_sha256"], text, pre.get("vm6proxy_sha256"),
+                   pre.get("vm4relay_sha256"), candidate=True)
 
 
 def _release_from_api(tag: Optional[str], urlopen: Callable) -> tuple:
@@ -1040,6 +1084,10 @@ def write_record(root: Path, rel: Release, written: list, now: str, *, tunnel: s
     doc = {"release": rel.tag, "appliance_commit": rel.appliance_commit,
            "wizard_commit": rel.wizard_commit, "at": now, "files_written": written,
            "tunnel": tunnel}
+    # A candidate says so; a blessed alignment writes the record afresh,
+    # so the mark leaves with the next blessed run.
+    if rel.candidate:
+        doc["candidate"] = True
     tmp = p.with_name(p.name + ".tmp")
     tmp.write_text(json.dumps(doc, indent=2) + "\n")
     os.replace(tmp, p)
@@ -1688,7 +1736,7 @@ def _do_apply(changes: list, rel: Release, root: Path, run, now, *, src: Sources
     for path in written:
         _say(f"  wrote {path}")
     _say(f"  backup: {backup_dir}")
-    _say(f"  record: {record}")
+    _say(f"  record: {record}" + (f" (marks {label(rel)})" if rel.candidate else ""))
     # Always push, even when nothing above changed and the record already
     # existed -- the VM may have been reinstalled since the last alignment.
     _say(f"  recorded (VM copy: {_apply_record_push(record, vmid, run=run)})")
@@ -1767,7 +1815,14 @@ def main(argv=None, *, root: Path = Path("/"), urlopen: Callable = urllib.reques
     run = run or subprocess.run
     now = now or datetime.now(timezone.utc)
     ap = argparse.ArgumentParser(prog="pm-align", description=__doc__.splitlines()[0])
-    ap.add_argument("--release", help="a blessed tag (default: the latest)")
+    target = ap.add_mutually_exclusive_group()
+    target.add_argument("--release", help="a blessed tag (default: the latest)")
+    target.add_argument("--manifest", metavar="PATH",
+                        help="align to an UNBLESSED release candidate: the rig's local "
+                             "release manifest (canary hosts, before the bless); needs "
+                             "--release-tag")
+    ap.add_argument("--release-tag", dest="release_tag", metavar="vX.Y",
+                    help="with --manifest: the candidate's tag")
     ap.add_argument("--apply", action="store_true",
                     help="write the refresh set, as root, then pair the decoder VM with this "
                          "host (on a host with no sudo that installs sudo)")
@@ -1787,6 +1842,10 @@ def main(argv=None, *, root: Path = Path("/"), urlopen: Callable = urllib.reques
         if not sep or not port.isdigit():
             _say(f"pm-align: --heartbeat-dest must be HOST:PORT, got {args.heartbeat_dest!r}")
             return 2
+
+    if (args.manifest is None) != (args.release_tag is None):
+        _say("pm-align: --manifest and --release-tag go together")
+        return 2
 
     if args.status:
         _print_status(root)
@@ -1809,14 +1868,17 @@ def main(argv=None, *, root: Path = Path("/"), urlopen: Callable = urllib.reques
 
     vmid = host_vmid(root)
     try:
-        rel = fetch_release(args.release, urlopen=urlopen)
+        if args.manifest is not None:
+            rel = load_candidate(args.manifest, args.release_tag)
+        else:
+            rel = fetch_release(args.release, urlopen=urlopen)
         src = fetch_sources(rel, vmid=vmid, urlopen=urlopen)
         notes = []
         changes = plan_files(desired_files(src, vmid, notes), root)
     except PmAlignError as exc:
         _say(f"pm-align: cannot establish the target — {exc}")
         return 2
-    _say(f"pm-align: this host against {rel.tag} (VM {vmid})")
+    _say(f"pm-align: this host against {label(rel)} (VM {vmid})")
     for ch in changes:
         _say(f"  {ch.state:8} {ch.file.path}   ({ch.file.source})")
     note = topology_note(root)

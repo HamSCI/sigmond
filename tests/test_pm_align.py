@@ -3376,3 +3376,110 @@ def test_pm_align_still_never_runs_qm_set():
     assert any("qm set, of any kind" in line for line in pm_align.NOT_TOUCHED)
     src = (REPO / "scripts" / "proxmox" / "pm-align.py").read_text()
     assert '"qm", "set"' not in src and "'qm', 'set'" not in src
+
+
+# ---------------------------------------------------------------------------
+# Release candidates: pm-align --manifest PATH --release-tag vX.Y (canary hosts)
+
+def _cand_manifest(tag="v3.92"):
+    fb = hashlib.sha256(FB.replace("@@VERSION@@", tag).encode()).hexdigest()
+    return _manifest(sha=fb).replace("v3.53", tag)
+
+
+def _cand_file(tmp_path, text=None):
+    p = tmp_path / "sigmond-appliance-v3.92-20261116-release.manifest.txt"
+    p.write_text(_cand_manifest() if text is None else text)
+    return p
+
+
+def _no_releases(routes):
+    """Raw files answer; any GitHub Release lookup fails the test."""
+    inner = _urlopen({k: v for k, v in routes.items()
+                      if k not in ("/releases/latest", "https://dl/m")})
+
+    def op(req, timeout=None):
+        url = req if isinstance(req, str) else req.full_url
+        assert "/releases" not in url, f"a candidate asked for a Release: {url}"
+        return inner(req, timeout)
+    return op
+
+
+def test_load_candidate_takes_commits_from_the_file_and_the_tag_from_the_flag(tmp_path):
+    rel = pm_align.load_candidate(str(_cand_file(tmp_path)), "v3.92")
+    assert rel.candidate is True
+    assert (rel.tag, rel.appliance_commit, rel.wizard_commit) == ("v3.92", "a" * 40, "d" * 40)
+    assert pm_align.label(rel) == "CANDIDATE v3.92 (not blessed)"
+
+
+def test_load_candidate_refuses_a_tag_the_manifest_does_not_name(tmp_path):
+    with pytest.raises(pm_align.PmAlignError, match="image_version"):
+        pm_align.load_candidate(str(_cand_file(tmp_path)), "v3.93")
+
+
+def test_load_candidate_refuses_a_malformed_manifest(tmp_path):
+    with pytest.raises(pm_align.PmAlignError, match="wizard_commit"):
+        pm_align.load_candidate(str(_cand_file(tmp_path, _cand_manifest().replace(
+            "d" * 40, "daba1f6"))), "v3.92")
+    with pytest.raises(pm_align.PmAlignError, match="firstboot_sha256"):
+        pm_align.load_candidate(str(_cand_file(tmp_path, "\n".join(
+            l for l in _cand_manifest().splitlines()
+            if not l.startswith("firstboot_sha256")))), "v3.92")
+    with pytest.raises(pm_align.PmAlignError, match="not a release tag"):
+        pm_align.load_candidate(str(_cand_file(tmp_path)), "main")
+    with pytest.raises(pm_align.PmAlignError, match="cannot read"):
+        pm_align.load_candidate(str(tmp_path / "absent.txt"), "v3.92")
+
+
+def test_candidate_sources_come_from_the_same_raw_files(tmp_path):
+    rel = pm_align.load_candidate(str(_cand_file(tmp_path)), "v3.92")
+    src = pm_align.fetch_sources(rel, vmid=100, urlopen=_no_releases(_source_routes()))
+    assert "echo v3.92" in src.firstboot          # rendered with --release-tag, hash checked
+
+
+def test_manifest_and_release_tag_go_together(tmp_path, capsys):
+    assert pm_align.main(["--manifest", str(_cand_file(tmp_path))], root=tmp_path) == 2
+    assert pm_align.main(["--release-tag", "v3.92"], root=tmp_path) == 2
+    assert "go together" in capsys.readouterr().out
+
+
+def test_manifest_and_release_are_mutually_exclusive(tmp_path, capsys):
+    with pytest.raises(SystemExit) as exc:
+        pm_align.main(["--manifest", str(_cand_file(tmp_path)), "--release-tag", "v3.92",
+                       "--release", "v3.91"], root=tmp_path)
+    assert exc.value.code == 2
+
+
+def test_main_candidate_dry_run_labels_the_target(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(pm_align, "fetch_release", lambda *a, **k: pytest.fail("fetched a Release"))
+    monkeypatch.setattr(pm_align, "fetch_sources", lambda rel, vmid, urlopen=None: _src())
+    rc = pm_align.main(["--manifest", str(_cand_file(tmp_path)), "--release-tag", "v3.92"],
+                       root=tmp_path)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "pm-align: this host against CANDIDATE v3.92 (not blessed) (VM" in out
+
+
+def test_main_candidate_with_a_malformed_manifest_exits_2(tmp_path, capsys):
+    bad = _cand_file(tmp_path, "image_version: v3.92\n")
+    rc = pm_align.main(["--manifest", str(bad), "--release-tag", "v3.92"], root=tmp_path)
+    assert rc == 2
+    assert "cannot establish the target" in capsys.readouterr().out
+
+
+def test_main_candidate_apply_marks_the_record_and_a_blessed_run_clears_it(tmp_path, monkeypatch,
+                                                                         capsys):
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    monkeypatch.setattr(pm_align, "fetch_sources", lambda rel, vmid, urlopen=None: _src())
+    record = tmp_path / "etc/sigmond-appliance/host-aligned.json"
+    rc = pm_align.main(["--apply", "--manifest", str(_cand_file(tmp_path)),
+                        "--release-tag", "v3.92"], root=tmp_path, run=_fake_run([]))
+    assert rc == 0
+    doc = json.loads(record.read_text())
+    assert doc["release"] == "v3.92" and doc["candidate"] is True
+    assert "marks CANDIDATE v3.92 (not blessed)" in capsys.readouterr().out
+
+    monkeypatch.setattr(pm_align, "fetch_release", lambda tag=None, urlopen=None:
+                        pm_align.Release("v3.92", "a" * 40, "d" * 40, "f" * 64, ""))
+    assert pm_align.main(["--apply"], root=tmp_path, run=_fake_run([])) == 0
+    doc = json.loads(record.read_text())
+    assert doc["release"] == "v3.92" and "candidate" not in doc
