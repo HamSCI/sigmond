@@ -93,3 +93,11 @@ def test_install_own_units_copies_changed_only(env):
     assert sorted(p.name for p in ud.iterdir()) == [
         "sigmond-a.service", "sigmond-b.timer", "sigmond-c.path"]
     assert units.install_own_units(repo, ud) == []
+
+
+def test_templated_timer_needs_no_enablement(env):
+    base, _, ud = env
+    _comp(base, "foo", '[systemd]\ntemplated_units = ["foo-x@.timer"]\n')
+    (ud / "foo-x@.timer").write_text("x")
+    assert _items(env, {"foo": True}, is_enabled=lambda n: False) == []
+    assert _items(env, {"foo": False}, is_enabled=lambda n: True) == []

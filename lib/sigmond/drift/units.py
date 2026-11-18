@@ -81,13 +81,15 @@ def unit_items(base: Path, enabled: Mapping[str, bool], *,
                     out.append(Item("unit", "fault", u,
                                     f"{name} declares {u}; not installed in "
                                     f"{unit_dir}", _APPLY))
-                elif u.endswith(".timer") and not is_enabled(u):
+                elif (u.endswith(".timer") and "@." not in u
+                      and not is_enabled(u)):
                     out.append(Item("unit", "fault", u,
                                     f"{name} timer {u} is installed but not "
                                     "enabled", f"smd enable {name}"))
         else:
             for u in units:
-                if _exists(unit_dir, u) and is_enabled(u):
+                if ("@." not in u and _exists(unit_dir, u)
+                        and is_enabled(u)):
                     out.append(Item(
                         "unit", "drift", u,
                         f"{u} is enabled; topology disables {name}",
@@ -122,6 +124,8 @@ def install_own_units(sigmond_repo: Path, unit_dir: Path, *,
         try:
             with os.fdopen(fd, "wb") as f:
                 f.write(src.read_bytes())
+                f.flush()
+                os.fsync(f.fileno())
             os.chmod(tmp, 0o644)
             os.replace(tmp, dst)
         except BaseException:

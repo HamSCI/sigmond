@@ -12,7 +12,7 @@ REL = align.Release(tag="v3.53", manifest_text="m", appliance_commit="a" * 40,
                     components={"sigmond": "daba1f6"})
 
 
-def _drive(wrote, dry=False):
+def _drive(wrote, dry=False, outcome="current"):
     calls = []
 
     def fake_run(argv, **kw):
@@ -33,7 +33,7 @@ def _drive(wrote, dry=False):
             smd, "_align_run",
             lambda argv, *, run, timeout, action, **kw: run(argv)))
         st.enter_context(mock.patch("sigmond.align_apply.apply_plan",
-                                    return_value=[align_apply.Step("sigmond", "current")]))
+                                    return_value=[align_apply.Step("sigmond", outcome)]))
         with contextlib.redirect_stdout(out):
             smd.cmd_align(_apply_args(tmp, apply=not dry))
     return calls, out.getvalue(), tmp
@@ -57,4 +57,9 @@ def test_align_apply_no_reload_when_nothing_written():
 
 def test_dry_run_installs_nothing():
     calls, _, _ = _drive(["x.timer"], dry=True)
+    assert not [c for c in calls if c[0] == "install"]
+
+
+def test_blocked_sigmond_step_installs_nothing():
+    calls, _, _ = _drive(["x.timer"], outcome="failed")
     assert not [c for c in calls if c[0] == "install"]

@@ -9442,7 +9442,12 @@ def _align_apply(args) -> int:
             steps = align_apply.apply_plan(rel, items, ctx)
 
         steps = steps + extra_steps
-        steps = steps + _align_own_units(Path(base) / 'sigmond')
+        # Not under an smd in an unknown state: a blocked sigmond step (dirty
+        # or unmoved checkout) must not land its unit files as root units.
+        # A failed unit copy blocks restarts like any other failed step.
+        if not any(s.component == 'sigmond' and s.outcome in _ALIGN_BLOCKING
+                   for s in steps):
+            steps = steps + _align_own_units(Path(base) / 'sigmond')
         return _align_make_live(args, rel, steps, base=base, catalog=catalog, now=_now)
 
 
