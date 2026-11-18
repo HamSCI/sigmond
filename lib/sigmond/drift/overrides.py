@@ -16,6 +16,7 @@ yields nothing.
 
 from __future__ import annotations
 
+import re
 import tomllib
 from pathlib import Path
 from typing import Mapping
@@ -23,6 +24,7 @@ from typing import Mapping
 from sigmond import decoder_choice
 from sigmond.drift.model import Item
 
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SUFFIXES = ("_jt9", "_wsprd", "_binary")
 _NAMES = ("decoder_jt9", "decoder_path")
 
@@ -51,6 +53,10 @@ def _walk(table: Mapping, prefix: str = ""):
         dotted = f"{prefix}{key}"
         if isinstance(val, dict):
             yield from _walk(val, dotted + ".")
+        elif isinstance(val, list):
+            for n, item in enumerate(val):
+                if isinstance(item, dict):
+                    yield from _walk(item, f"{dotted}[{n}].")
         elif (isinstance(val, str) and val.strip()
               and _is_choice_key(str(key))):
             yield dotted, val
@@ -98,9 +104,11 @@ def _pin_items(path: Path, manifest: Mapping[str, str], out: list) -> None:
         return
     for comp in sorted(pins):
         pin = pins[comp]
-        if not isinstance(pin, str) or not pin.strip():
+        if not isinstance(pin, str):
             continue
         pin = pin.strip().lower()
+        if not _SHA_RE.match(pin):
+            continue  # smd ignores it too
         want = manifest.get(comp)
         if want is None:
             out.append(Item(
@@ -110,6 +118,8 @@ def _pin_items(path: Path, manifest: Mapping[str, str], out: list) -> None:
                 f"remove the {comp} pin from {path}"))
             continue
         want = str(want).strip().lower()
+        if not want:
+            continue  # manifest commit unknown
         if not (pin.startswith(want) or want.startswith(pin)):
             out.append(Item(
                 "override", "drift", f"pin:{comp}",

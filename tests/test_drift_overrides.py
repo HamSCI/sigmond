@@ -53,6 +53,20 @@ def test_pin_differing_from_manifest_is_drift(tmp_path):
     assert [i.subject for i in got] == ["pin:b", "pin:c"]
 
 
+def test_junk_pin_and_empty_manifest_sha_ignored(tmp_path):
+    (tmp_path / "p.toml").write_text(
+        '[pins]\na = "abc"\nb = "' + "b" * 40 + '"\n')
+    assert _run(tmp_path, {}, manifest={"a": "zzz", "b": ""}) == []
+
+
+def test_override_inside_array_of_tables(tmp_path):
+    got = _run(tmp_path, _cfg(
+        tmp_path, '[[receivers]]\nname = "a"\n[[receivers]]\n'
+                  'decoder_path = "/x/jt9"\n'))
+    assert [i.subject for i in got] == [
+        "AC0G-ND.toml:receivers[1].decoder_path"]
+
+
 def test_operator_override_is_drift(tmp_path):
     (tmp_path / "co.toml").write_text(
         '[decoders]\nimplementation = "ubersdr"\noperator_override = true\n')
