@@ -1,5 +1,5 @@
-"""A fresh install starts with the site sink switch at `off`; a configured
-host never gets the block (tasks/plan-sink-control.md §10.3 item 2)."""
+"""A fresh install starts with the site sink switch at `upload`; a configured
+host never gets the block."""
 import os
 import subprocess
 import textwrap
@@ -36,12 +36,12 @@ def run_uploads_toml(conf_mark: Path) -> str:
                           text=True, timeout=30).stdout
 
 
-def test_fresh_host_writes_the_off_block(tmp_path):
+def test_fresh_host_writes_the_upload_block(tmp_path):
     out = run_uploads_toml(tmp_path / ".configured")          # mark absent
     up = tomllib.loads(out)["uploads"]
-    assert up["enabled"] is False
-    assert up["mode"] == "discard"
-    assert "smd sink upload" in up["reason"]
+    assert up["enabled"] is True
+    assert up["mode"] == "upload"
+    assert up["reason"].startswith("new station")
 
 
 def test_configured_host_writes_no_block(tmp_path):
@@ -62,18 +62,18 @@ def test_the_profile_carries_the_block_and_installs_through_profile_install():
     assert 'base64 -d > /etc/sigmond/site-profile.toml"' not in text
 
 
-def test_the_summary_tells_a_fresh_install_how_to_set_the_switch_to_upload():
+def test_the_summary_tells_a_fresh_install_its_uploads_are_on():
     text = WIZARD.read_text()
     summary = text[text.index("SUMMARY=$(cat <<SEOF"):text.index("SEOF\n)")]
     assert "$SINK_NOTE" in summary
     note = text[text.index('SINK_NOTE=""'):text.index("SUMMARY=$(cat <<SEOF")]
-    assert "smd sink upload" in note
+    assert "smd sink off" in note
     # Only a fresh install (a non-empty UPLOADS_TOML) gets the note.
     for uploads, shown in (("", False), ("x", True)):
         out = subprocess.run(["bash", "-c", f"set -u\nUPLOADS_TOML={uploads!r}\n{note}"
                               'printf %s "$SINK_NOTE"'],
                              capture_output=True, text=True, timeout=30).stdout
-        assert ("smd sink upload" in out) is shown, (uploads, out)
+        assert ("smd sink off" in out) is shown, (uploads, out)
 
 
 def test_the_mark_is_defined_and_the_block_is_built_before_the_wizard_writes_it():

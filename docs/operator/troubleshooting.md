@@ -172,9 +172,11 @@ for about three minutes.
    ([registration.md §6](registration.md#6-confirming-everything-flows)).
 2. **You are searching the wrong identity.** The reporter ID is whatever the
    wizard recorded, which may not be what you remember typing.
-3. **The site sink switch holds uploads back.** A new station starts at `off`
-   until someone runs `smd sink upload`. A station with no antenna, or one still
-   under construction, stays out of the public databases on purpose.
+3. **The site sink switch holds uploads back.** A new station starts at
+   `upload`, but someone may have set it to `off` or `fill` since (a station with
+   no antenna, or one still under construction, stays out of the public
+   databases on purpose). `smd sink status` shows it; `smd sink upload` turns
+   it back on.
 4. **wsprdaemon.org has not forwarded them.** Your station does not post to
    wsprnet itself. It sends its spots to wsprdaemon.org, which forwards them to
    wsprnet under your reporter ID. For now the server forwards only the spots
@@ -234,9 +236,10 @@ smd sink status
 
 *Good:* `✓ site sink: upload (store and send)`. *Silent on purpose:*
 `⚠ site sink: hold (legacy) — stores for a while and sends no data; … — no HF antenna; no PSWS station/instrument ids`,
-DASI002's answer and correct for that station. A new station answers
+DASI002's answer and correct for that station. A new station
+installed before uploads defaulted on answers
 `⚠ site sink: off — no data ships and no backlog builds — new station: …` until
-someone checks it and runs `smd sink upload`.
+someone runs `smd sink upload`.
 
 On a station with the sink switch files (sink control step 2b part 2) the same
 answers read `⚠ site sink: fill (store and send nothing); set … by … — <reason>`
