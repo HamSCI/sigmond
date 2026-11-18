@@ -111,9 +111,51 @@ def test_bad_exception_entries_skipped_and_capped(tmp_path, caplog):
         "\n[[exception]]\n" + good.replace('"test"', '"forever"') +
         "\n[[exception]]\n" + good.replace('reason = "r"\n', "") +
         "\n[[exception]]\n" + good.replace("2026-11-05", "2026-12-25") +
-        "\n[[exception]]\n" + good)
+        "\n[[exception]]\n" + good.replace("k:ok", "k:ok2"))
     with caplog.at_level(logging.WARNING, "sigmond.drift.exceptions"):
         got = ex.load(p, NOW)
     assert len(got) == 2
     assert got[0].until == date(2026, 12, 1)  # clamped to start + 30
     assert len(caplog.records) == 4
+
+
+def test_odd_characters_round_trip(tmp_path):
+    p = tmp_path / "e.toml"
+    odd = 'a\x00b\x1b[31m\x7f café \U0001F600 "q" \\ \n\t'
+    ex.accept(p, "k:a", reason=odd, by="rób\x01", test=False,
+              until=None, now=NOW)
+    p.read_bytes().decode("ascii")
+    got = ex.load(p, NOW)
+    assert got[0].reason == odd and got[0].by == "rób\x01"
+
+
+def test_accept_refuses_unparsable_file(tmp_path):
+    p = tmp_path / "e.toml"
+    p.write_text("[[exception]\nbroken")
+    before = p.read_bytes()
+    with pytest.raises(ex.ExceptionsFileError, match="e.toml"):
+        ex.accept(p, "k:a", reason="r", by="b", test=False, until=None,
+                  now=NOW)
+    assert p.read_bytes() == before
+
+
+def test_accept_backs_up_when_entries_skipped(tmp_path, caplog):
+    p = tmp_path / "e.toml"
+    p.write_text('[[exception]]\nkey = "k:x"\nkind = "bogus"\n')
+    old = p.read_bytes()
+    with caplog.at_level(logging.WARNING, "sigmond.drift.exceptions"):
+        ex.accept(p, "k:a", reason="r", by="b", test=False, until=None,
+                  now=NOW)
+    assert (tmp_path / "e.toml.bak").read_bytes() == old
+    assert any(".bak" in r.getMessage() for r in caplog.records)
+    assert [e.key for e in ex.load(p, NOW)] == ["k:a"]
+
+
+def test_duplicate_keys_later_wins(tmp_path, caplog):
+    p = tmp_path / "e.toml"
+    ent = ('[[exception]]\nkey = "k:a"\nreason = "%s"\nby = "b"\n'
+           'kind = "test"\nstart = 2026-11-01\nuntil = 2026-11-05\n')
+    p.write_text(ent % "one" + ent % "two")
+    with caplog.at_level(logging.WARNING, "sigmond.drift.exceptions"):
+        got = ex.load(p, NOW)
+    assert [e.reason for e in got] == ["two"] and len(caplog.records) == 1

@@ -25,6 +25,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import os
+import shutil
 import tempfile
 import tomllib
 from dataclasses import dataclass
@@ -63,22 +64,35 @@ def _as_date(v) -> date:
     return v
 
 
+class ExceptionsFileError(RuntimeError):
+    """The exceptions file exists but cannot be parsed."""
+
+
 def load(path: Path, now: datetime) -> list:
-    """Read the file; skip bad entries (one warning each); clamp to the cap."""
-    path = Path(path)
+    """Read the file; skip bad entries (one warning each); clamp to the cap.
+
+    A duplicate key keeps the later entry, with one warning.
+    """
+    return _load(Path(path))[0]
+
+
+def _load(path: Path):
+    """Return (entries, skipped_count, fatal_error_or_None)."""
     try:
         with open(path, "rb") as fh:
             data = tomllib.load(fh)
     except FileNotFoundError:
-        return []
+        return [], 0, None
     except (OSError, tomllib.TOMLDecodeError) as exc:
         log.warning("drift exceptions: cannot read %s: %s", path, exc)
-        return []
+        return [], 0, exc
     raw = data.get("exception", [])
     if not isinstance(raw, list):
-        log.warning("drift exceptions: 'exception' is not an array of tables")
-        return []
+        exc = ValueError("'exception' is not an array of tables")
+        log.warning("drift exceptions: %s: %s", path, exc)
+        return [], 0, exc
     out: list = []
+    skipped = 0
     for n, ent in enumerate(raw, 1):
         try:
             if not isinstance(ent, dict):
@@ -98,6 +112,7 @@ def load(path: Path, now: datetime) -> list:
                 raise ValueError("until before start")
         except ValueError as exc:
             log.warning("drift exceptions: skipping entry %d: %s", n, exc)
+            skipped += 1
             continue
         cap = start + timedelta(days=MAX_DAYS[kind])
         if until > cap:
@@ -106,13 +121,29 @@ def load(path: Path, now: datetime) -> list:
                         MAX_DAYS[kind], cap)
             until = cap
         out.append(Exception_(kind=kind, start=start, until=until, **fields))
-    return out
+    seen: dict = {}
+    for e in out:
+        if e.key in seen:
+            log.warning("drift exceptions: duplicate key %s; the later "
+                        "entry wins", e.key)
+        seen[e.key] = e
+    return list(seen.values()), skipped, None
 
 
 def _q(s: str) -> str:
-    s = s.replace("\\", "\\\\").replace('"', '\\"')
-    s = s.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-    return f'"{s}"'
+    """TOML basic string, pure ASCII: every odd character becomes \\u."""
+    out = []
+    for ch in s:
+        o = ord(ch)
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif o < 0x20 or o == 0x7f or o > 0x7e:
+            out.append(f"\\u{o:04X}" if o <= 0xFFFF else f"\\U{o:08X}")
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
 
 
 def _write(path: Path, excs: list) -> None:
@@ -162,7 +193,17 @@ def accept(path: Path, key: str, *, reason: str, by: str, test: bool,
         until = cap
     exc = Exception_(key=key, reason=reason, by=by, kind=kind,
                      start=start, until=until)
-    kept = [e for e in load(path, now) if e.key != key]
+    existing, skipped, fatal = _load(path)
+    if fatal is not None:
+        raise ExceptionsFileError(
+            f"{path} cannot be parsed ({fatal}); fix or move it, "
+            "nothing was written")
+    if skipped:
+        bak = path.with_name(path.name + ".bak")
+        shutil.copyfile(path, bak)
+        log.warning("drift exceptions: %d bad entries were dropped from "
+                    "the rewrite; the old file is kept as %s", skipped, bak)
+    kept = [e for e in existing if e.key != key]
     kept.append(exc)
     _write(path, kept)
     return exc
