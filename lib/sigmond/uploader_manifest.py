@@ -855,10 +855,10 @@ def collect_pipelines(topology: Optional[Topology] = None,
             pipelines.append(rendered)
     if check_features:
         warn_hidden_pipelines(topology, is_running)
-    return apply_receivers(
+    return apply_cycle_gate(apply_receivers(
         apply_sender_key(apply_merge(apply_proxying(pipelines, coord), target),
                          features),
-        declared_receivers(receivers, call))
+        declared_receivers(receivers, call)), wspr_receivers(receivers))
 
 
 def _pin_psws_key(rendered: dict, client: str) -> dict:
@@ -953,6 +953,54 @@ def apply_receivers(pipelines: list, ids: list) -> list:
         t = p.get("transport")
         if isinstance(t, dict) and t.get("type") == "wsprdaemon_tar":
             p = dict(p, transport=dict(t, **{RECEIVERS_KEY: list(ids)}))
+        out.append(p)
+    return out
+
+
+#: hs-uploader's wspr_cycle key for the receivers whose noise rows must all
+#: land before a cycle ships (``pipeline_factory``; matched on ``rx_call``).
+EXPECTED_REPORTERS_KEY = "expected_reporters"
+
+
+def wspr_receivers(receivers: list) -> list:
+    """The reporter ids (display form, sorted) of the uploading receivers
+    that run wspr-recorder into this station's sink, when there are two or
+    more; otherwise ``[]``.
+
+    ⛔ AC0G-B2, 2026-11-18: B1A and B1B commit each cycle about a second
+    apart.  Without the list the wspr_cycle source shipped a cycle on the
+    first receiver's commit and its cursor passed the second's rows, so
+    wsprdaemon.org got 275 of B1A's ~1,400 spots in 3 h.  A receiver that
+    runs no wspr-recorder never writes a noise row, so naming it would hold
+    every cycle to the backstop; one receiver alone has nothing to race."""
+    from .bringup import _REPORTER_KEYED
+    from .receivers import effective_clients
+    ids: dict = {}
+    for r in receivers or ():
+        if not r.uploads:
+            continue
+        if "wspr-recorder" not in effective_clients(r, _REPORTER_KEYED):
+            continue
+        try:
+            k = parse_user_reporter_id(r.reporter_id)
+        except ValueError:
+            continue
+        ids.setdefault(k, display_reporter_id(k))
+    return sorted(ids.values()) if len(ids) >= 2 else []
+
+
+def apply_cycle_gate(pipelines: list, ids: list) -> list:
+    """Put ``expected_reporters = ids`` on every wspr_cycle source, so the
+    cycle waits for each receiver (or the backstop).  A source that names
+    its own list keeps it.  No ids writes nothing.  Pure."""
+    if not ids:
+        return list(pipelines)
+    out = []
+    for p in pipelines:
+        s = p.get("source")
+        if (isinstance(s, dict) and s.get("type") == "wspr_cycle"
+                and not s.get(EXPECTED_REPORTERS_KEY)):
+            p = dict(p, source=dict(s, **{EXPECTED_REPORTERS_KEY: list(ids)}))
         out.append(p)
     return out
 

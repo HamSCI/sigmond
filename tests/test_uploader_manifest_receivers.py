@@ -35,6 +35,9 @@ KFS = [Receiver("KFS/OMNI", radiod="kfs-omni-status.local"),
 DEPLOY = """
 [[hs_uploader.pipeline]]
 name = "wspr-wsprdaemon"
+[hs_uploader.pipeline.source]
+type = "wspr_cycle"
+start_at = "now"
 [hs_uploader.pipeline.transport]
 type = "wsprdaemon_tar"
 receiver = "{call_pathsafe}"
@@ -138,3 +141,69 @@ def test_the_key_matches_what_hs_uploader_READS():
         pytest.skip("no hs-uploader checkout to compare against")
     assert f'spec.get("{um.RECEIVERS_KEY}")' in src.read_text(), \
         f"hs-uploader does not read {um.RECEIVERS_KEY}"
+
+
+# ---- the cycle gate: expected_reporters on the wspr_cycle source --------
+
+def _wspr_source(out):
+    return next(p for p in out if p["name"] == "wspr-wsprdaemon")["source"]
+
+
+def test_b2_waits_for_both_receivers_before_a_cycle_ships(monkeypatch, tmp_path):
+    """⛔ AC0G-B2, 2026-11-18: without the list, the cycle shipped on the
+    first receiver's commit and the other's rows never left."""
+    src = _wspr_source(_collect(monkeypatch, tmp_path, B2, "AC0G/B2"))
+    assert src["expected_reporters"] == ["AC0G/B1A", "AC0G/B1B"]
+
+
+def test_kfs_main_waits_for_its_four(monkeypatch, tmp_path):
+    src = _wspr_source(_collect(monkeypatch, tmp_path, KFS, "KFS-MAIN"))
+    assert src["expected_reporters"] == ["KFS/NW", "KFS/OMNI", "KFS/SE",
+                                         "KFS/SW"]
+
+
+def test_the_gate_survives_the_render(monkeypatch, tmp_path):
+    doc = tomllib.loads(_render(_collect(monkeypatch, tmp_path, B2,
+                                         "AC0G/B2")))
+    src = next(p for p in doc["pipeline"]
+               if p["name"] == "wspr-wsprdaemon")["source"]
+    assert src["expected_reporters"] == ["AC0G/B1A", "AC0G/B1B"]
+
+
+def test_one_receiver_has_nothing_to_race(monkeypatch, tmp_path):
+    out = _collect(monkeypatch, tmp_path, [Receiver("AC0G/B1A", radiod=A)],
+                   "AC0G/B2")
+    assert "expected_reporters" not in _wspr_source(out)
+
+
+def test_a_receiver_without_wspr_is_not_waited_for():
+    """It never writes a noise row, so naming it would hold every cycle to
+    the backstop."""
+    rx = [Receiver("AC0G/B1A", radiod=A,
+                   clients=("psk-recorder", "wspr-recorder")),
+          Receiver("AC0G/B1B", radiod=B, clients=("psk-recorder",))]
+    assert um.wspr_receivers(rx) == []
+    rx.append(Receiver("AC0G/B1C", radiod="c-status.local"))
+    assert um.wspr_receivers(rx) == ["AC0G/B1A", "AC0G/B1C"]
+
+
+def test_a_receiver_that_does_not_upload_is_not_waited_for():
+    rx = B2 + [Receiver("AC0G/B1C", radiod="c-status.local", upload=False)]
+    assert um.wspr_receivers(rx) == ["AC0G/B1A", "AC0G/B1B"]
+
+
+def test_a_source_with_its_own_list_keeps_it():
+    pipes = [{"name": "w", "source": {"type": "wspr_cycle",
+                                      "expected_reporters": ["X/Y"]}}]
+    assert um.apply_cycle_gate(pipes, ["A/B", "C/D"]) == pipes
+
+
+def test_the_gate_key_matches_what_hs_uploader_READS():
+    """⛔ CROSS-REPO: hs-uploader's pipeline_factory reads
+    ``expected_reporters`` off the wspr_cycle source.  Skips without an
+    hs-uploader checkout."""
+    src = (Path(__file__).resolve().parents[2] / "hs-uploader" / "src" /
+           "hs_uploader" / "pipeline_factory.py")
+    if not src.exists():
+        pytest.skip("no hs-uploader checkout to compare against")
+    assert f'spec.get("{um.EXPECTED_REPORTERS_KEY}")' in src.read_text()
