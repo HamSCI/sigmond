@@ -92,7 +92,7 @@ description = "Leo Bodnar GPSDO health monitor + mDNS advertiser"
 
 [component.hf-timestd]
 enabled = true
-description = "HF time-standard analyzer (WWV/WWVH/CHU/BPM) — suite timing authority"
+description = "HF time-standard analyzer (WWV/WWVH/BPM/WWVB) — suite timing authority"
 # hf-timestd manages its own systemd units via its own deploy mechanism.
 # smd install will verify the service is running but does not install hf-timestd.
 managed = false

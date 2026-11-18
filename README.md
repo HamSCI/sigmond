@@ -47,7 +47,8 @@ rather than through radiod.
 - **Additional clients:** `hf-tec`, `superdarn-sounder`.
 
 Decoded spots and products land in a **shared SQLite sink**
-(`/var/lib/sigmond/sink.db`), and `hs-uploader` ships them upstream.  WSPR,
+(`/var/lib/hs-uploader/sink.db`; stations installed before v3.70 keep
+`/var/lib/sigmond/sink.db`), and `hs-uploader` ships them upstream.  WSPR,
 FT4/FT8 and MSK144 spots go to wsprdaemon.org, which forwards copies to
 wsprnet.org and pskreporter.info; GRAPE and magnetometer products go to
 PSWS / HamSCI.
@@ -66,8 +67,9 @@ lifecycle, CPU-pinning, and the shared sink.
 **Hardware:**
 - An HF antenna
 - An [RX-888](https://github.com/ka9q/ka9q-radio) (or other SDR supported by ka9q-radio)
-- A GPS disciplined oscillator (e.g. Leo Bodnar GPSDO) providing 10 MHz + PPS
-- A Linux computer (Debian 12+ or Ubuntu 22.04+)
+- A GPS disciplined oscillator providing 10 MHz + PPS (the shopping list names the Leo Bodnar LBE-1421)
+- An x86-64 computer with at least 16 GB of RAM, internal NVMe storage and wired Ethernet;
+  for bare metal, Debian 13 (the install target; Debian 12 or Ubuntu 22.04+ also run)
 
 Full list with models, what is optional, and what B4 runs:
 [docs/hardware/shopping-list.md](docs/hardware/shopping-list.md)
@@ -128,16 +130,28 @@ magnetometer for mag-recorder).  Bring-up writes them to
 `/etc/sigmond/site-profile.toml` and into each recorder's config;
 `smd config psws` sets them later.
 `dasi2`, the default profile, gives you a local radiod, hf-timestd (GRAPE),
-WSPR, FT4/FT8, meteor scatter, HFDL and CODAR timing, and the magnetometer.  `base` stops at radiod
-and timing; `client` decodes from radiods on other machines; see "Decode-only host"
-below.  Bring-up skips, with a warning, anything
-whose hardware it cannot find on the USB bus.
+WSPR, FT4/FT8, meteor scatter, HFDL and CODAR timing, the magnetometer, the science
+products (hamsci-physics) and the station's web pages (station-web, gmag-webui).
+`base` gives radiod, hf-timestd and station-web; `client` decodes from radiods on
+other machines (see "Decode-only host" below); `radiod-only` runs radiod (and gpsdo-monitor) for a
+decoder host elsewhere on the LAN; `wd` replaces a WsprDaemon station (WSPR and FT8/FT4
+spots from its own radiod, plus ka9q-web).
+Bring-up installs a component whose hardware it cannot find on the USB bus (the
+magnetometer, the GPSDO) **dormant**: installed and enabled in topology, but not started.
+`smd adopt` starts it once the hardware appears.  A missing RX888 gives a warning, or
+stops bring-up with `--require-hardware`.
+
+A station installed from these repositories sends nothing upstream until you release
+its uploads with `smd sink upload` (bring-up asks on a terminal).  Until then it keeps
+FT8 spots 1 h and WSPR spots 24 h.
 
 Bring-up also sets up remote access when it runs on bare metal.  It runs
 `sigmond-rac activate`, which registers the machine with the gateway and
 starts its tunnel.  A Proxmox appliance VM skips this step, because its host
 carries the machine's remote access.  If registration fails, bring-up still
-finishes, and a retry timer keeps trying.
+finishes.  A retry timer keeps trying after a failure that can pass (the gateway
+unreachable); after one that cannot (no station name, an old tunnel still running),
+bring-up prints the `sigmond-rac activate` command to run once it is fixed.
 
 The machine's remote-access name puts the callsign and the hostname together
 in upper case, as in `AC0G-SIGMA` or `AC0G-B2`.  A hostname that already starts
@@ -329,25 +343,31 @@ smd component list --catalog
 ```
 ━━━ catalog — known clients ━━━
 
-  Servers (2)
-    ✓  ka9q-radio             ka9q-radio SDR daemon — receives and multicasts RF channels
-    ✓  ka9q-web               Web interface for ka9q-radio (radiod status UI)
+  Servers (3)
+    ·  gmag-webui             HamSCI magnetometer real-time web dashboard (gmag_webui; browser reads mag-usb's WebSocket feed)
+    ·  ka9q-radio             ka9q-radio SDR daemon — receives and multicasts RF channels
+    ·  ka9q-web               Web interface for ka9q-radio (radiod status UI)
 
-  Clients (8)
-    ✓  codar-sounder          Opportunistic ionospheric sounder using CODAR chirp transmissions  contract=0.8
-    ✓  hf-tec                 HF PRN-coded beacon recorder for ionospheric specification  contract=0.8
-    ✓  hf-timestd             HF time-standard analyzer (WWV/WWVH/CHU/BPM)  contract=0.8
-    ✓  hfdl-recorder          HFDL (High Frequency Data Link) recorder — one dumphfdl subprocess per band  contract=0.8
-    ✓  mag-recorder           RM3100 magnetometer recorder + PSWS uploader  contract=0.8
-    ✓  meteor-scatter         Meteor-scatter ping recorder/decoder (jt9 --msk144)  contract=0.7
-    ✓  psk-recorder           FT4/FT8 spot recorder for PSKReporter  contract=0.8
-    ✓  wspr-recorder          WSPR/FST4W audio recorder (period-aligned WAVs)  contract=0.8
+  Clients (11)
+    ·  codar-sounder          Opportunistic ionospheric sounder using CODAR chirp transmissions  contract=0.8
+    ·  hamsci-physics         Ionospheric science products (TEC/dTEC, TID, GRAPE/PSWS) from hf-timestd observations  contract=0.8
+    ·  hf-tec                 HF PRN-coded beacon recorder for ionospheric specification  contract=0.8
+    ·  hf-timestd             HF time-standard analyzer (WWV/WWVH/BPM/WWVB)  contract=0.8
+    ·  hfdl-recorder          HFDL (High Frequency Data Link) recorder — one dumphfdl subprocess per band  contract=0.8
+    ·  mag-recorder           RM3100 magnetometer recorder + PSWS uploader (non-radiod, §16 'other')  contract=0.8
+    ·  meteor-scatter         Meteor-scatter ping recorder/decoder (jt9 --msk144)  contract=0.8
+    ·  psk-recorder           FT4/FT8 spot recorder for PSKReporter  contract=0.8
+    ·  station-web            Station status, documentation and data reports; timing and science pages where hf-timestd runs  contract=0.8
+    ·  superdarn-sounder      Passive SuperDARN coherent-radar monitor (detection / identification)  contract=0.8
+    ·  wspr-recorder          WSPR/FST4W audio recorder (period-aligned WAVs)  contract=0.8
 
   Infra (3)
-    ✓  gpsdo-monitor          Leo Bodnar GPSDO health monitor + mDNS advertiser
-    ✓  igmp-querier           Robust IGMP querier for radiod multicast on home switches
-    ✓  sigmond-rac            Remote Access Channel (frpc reverse tunnel)
+    ·  gpsdo-monitor          Leo Bodnar GPSDO health monitor + mDNS advertiser
+    ·  igmp-querier           Robust IGMP querier so radiod multicast survives on home-network switches
+    ·  sigmond-rac            Remote Access Channel — frpc reverse tunnel to gw2.wsprdaemon.org for admin SSH/web behind NAT
 ```
+
+A `✓` marks what this host has installed, `·` what it has not.
 
 > **Setting up a new host end to end?** See the
 > [greenfield install runbook](docs/greenfield-runbook.md) for the
@@ -384,15 +404,19 @@ for your station:
 | radiod | `/etc/radio/*.conf` |
 | hf-timestd | `/etc/hf-timestd/timestd-config.toml` |
 | psk-recorder | `/etc/psk-recorder/psk-recorder-config.toml` |
-| wspr-recorder | `/etc/wspr-recorder/wspr-recorder.toml` |
+| wspr-recorder | `/etc/wspr-recorder/config.toml` |
 | mag-recorder | `/etc/mag-recorder/mag-recorder-config.toml` |
 | codar-sounder | `/etc/codar-sounder/codar-sounder-config.toml` |
 | hfdl-recorder | `/etc/hfdl-recorder/hfdl-recorder-config.toml` |
 | hf-tec | `/etc/hf-tec/hf-tec-config.toml` |
 | meteor-scatter | `/etc/meteor-scatter/meteor-scatter-config.toml` |
 
-Sigmond's own coordination config lives at `/etc/sigmond/topology.toml`.
-Copy the example to get started:
+Sigmond keeps three files of its own in `/etc/sigmond/`: `site-profile.toml`
+(the site's identity: callsign, grid, receivers, PSWS ids), `coordination.toml`
+(host identity, radiods, instances, which `smd config render` writes from the
+site profile) and `topology.toml` (which components are enabled, and the CPU
+policy).  Bring-up writes all three.  To edit topology by hand, start from the
+example:
 
 ```bash
 sudo cp /opt/git/sigmond/sigmond/etc/topology.example.toml /etc/sigmond/topology.toml
@@ -411,7 +435,7 @@ smd tui
 
 The TUI provides:
 - **Install screen** — browse and install components from the catalog
-- **Topology screen** — enable/disable components with live validation
+- **Components screen** — enable/disable components, with live validation
 - **Overview screen** — system health dashboard
 - **Logs screen** — view and filter service logs
 - **CPU affinity screen** — configure CPU core isolation
@@ -426,7 +450,8 @@ The TUI provides:
   update buttons; replaces the old separate Update screen
 - **Backup/Restore screens** — backup and restore configuration
 
-Keybindings: `t` = topology, `i` = install, `v` = validate, `q` = quit
+Keybindings: `o` = overview, `c` = CPU affinity, `r` = radiod, `a` = remote access,
+`v` = validate, `b` = backup, `R` = restore, `K` = ka9q-watch, `q` = quit
 
 ### 6. Start services
 
@@ -482,7 +507,7 @@ instance) narrows the scope.
 | `smd adopt <name>` | Adopt detected hardware or a discovered source — the only verb that starts anything; asks first (`--dry-run`, `--yes`) |
 | `smd component list [--catalog]` | Per-component status (lifecycle + git ref + version policy); `--catalog` lists what's installable |
 | `smd component update [<name>]` | Pull latest and reapply per topology version policy (root) |
-| `smd component add\|remove <name>` | Clone/remove a component repo and its topology entry |
+| `smd component add <git-url>` / `smd component remove <name>...` | Clone a component repo; remove one and its topology entry (`--purge`, `--dry-run`) |
 | `smd config show\|migrate` | Inspect or migrate coordination config |
 | `smd config init\|edit <client>` | Run a client's first-run wizard or edit flow |
 | `smd update [--apply] [--latest]` | Plan an update (dry run by default); `--apply` performs it.  `--latest` takes every component to the tip of its main branch and pins the station there; it serves test stations |
@@ -495,7 +520,7 @@ instance) narrows the scope.
 
 | Command | Description |
 |---------|-------------|
-| `smd watch <target>` | Live tail for `wspr`, `psk`, `hfdl`, `codar`, `hf-tec`, `mag`, `ka9q`, `radiod`, `uploads`, `verifier` |
+| `smd watch <target>` | Live tail for `wspr`, `psk`, `hfdl`, `codar`, `hf-tec`, `mag`, `meteor`, `superdarn`, `ka9q`, `radiod`, `uploads`, `verifier`, `usb`, `gpsdo` |
 | `smd admin log [<client>] [--files] [--level L]` | Follow journal (or `--files` for file logs); `--level` sets the client's level via `coordination.env` + SIGHUP |
 | `smd admin diag [net\|cpu-affinity\|cpu-freq]` | Network / CPU diagnostics; `cpu-freq --radiod-max-mhz N --other-max-mhz N --save` keeps the caps across reboots |
 | `smd admin validate` | Cross-client harmonization rules |
@@ -548,7 +573,8 @@ smd admin log psk-recorder --level DEBUG
 
 This writes `PSK_RECORDER_LOG_LEVEL=DEBUG` to `/etc/sigmond/coordination.env`
 and sends SIGHUP to the client's systemd units.  The client re-reads the
-environment and adjusts its logger.
+environment and adjusts its logger.  A raised level lasts 24 hours unless
+`--for DURATION` says otherwise; sigmond then restores the routine level.
 
 To set a default level for all clients (no SIGHUP — restart or SIGHUP each
 client to apply):
@@ -574,8 +600,8 @@ Checks:
 ### Check multicast / IGMP readiness
 
 ```bash
-smd admin diag net        # unprivileged; uses /proc/net/igmp state
-smd admin diag net   # adds passive raw-socket listen for queriers
+smd admin diag net --listen 0   # unprivileged; reads /proc/net/igmp state only
+smd admin diag net              # also listens 130 s for queriers (asks for root itself)
 ```
 
 Classifies your network for multi-host radiod safety and tells you
@@ -640,14 +666,16 @@ bring-up (`smd bringup dasi2 --with-optional`) or one at a time
 | Core client | What it does | Repo |
 |--------|-------------|------|
 | **radiod** | ka9q-radio SDR daemon — receives RF and multicasts IQ channels | [ka9q/ka9q-radio](https://github.com/ka9q/ka9q-radio) |
-| **hf-timestd** | HF time-standard analyzer (WWV/WWVH/CHU/BPM) — also the suite's **timing authority** (publishes the RTP↔UTC offset + tier other clients label against) | [HamSCI/hf-timestd](https://github.com/HamSCI/hf-timestd) |
+| **hf-timestd** | HF time-standard analyzer (WWV/WWVH/BPM, and WWVB at 60 kHz) — also the suite's **timing authority** (publishes the RTP↔UTC offset + tier other clients label against) | [HamSCI/hf-timestd](https://github.com/HamSCI/hf-timestd) |
 | **wspr-recorder** | WSPR/FST4W recorder + decoder — uploads to wsprdaemon.org, which forwards to wsprnet.org | [HamSCI/wspr-recorder](https://github.com/HamSCI/wspr-recorder) |
 | **psk-recorder** | FT4/FT8 spot recorder — decodes; wsprdaemon.org forwards its spots to PSKReporter | [HamSCI/psk-recorder](https://github.com/HamSCI/psk-recorder) |
 | **mag-recorder** | RM3100 magnetometer recorder (USB-I²C, non-radiod) — daily datasets to PSWS | [HamSCI/mag-recorder](https://github.com/HamSCI/mag-recorder) |
 | **meteor-scatter** | Meteor-scatter ping decoder (`jt9 --msk144`) → local sink + hs-uploader | [HamSCI/meteor-scatter](https://github.com/HamSCI/meteor-scatter) |
 | **hfdl-recorder** | HFDL (High Frequency Data Link) recorder — one `dumphfdl` subprocess per band. Sends ground-station squitter timing to wsprdaemon.org; the airframes.io feed stays off unless you turn it on | [HamSCI/hfdl-recorder](https://github.com/HamSCI/hfdl-recorder) |
 | **codar-sounder** | Opportunistic ionospheric sounder using CODAR chirp transmissions | [HamSCI/codar-sounder](https://github.com/HamSCI/codar-sounder) |
-| **hamsci-physics** | Ionospheric science products (TEC/dTEC, TID, GRAPE/PSWS) from hf-timestd observations | [mijahauan/hamsci-physics](https://github.com/mijahauan/hamsci-physics) |
+| **hamsci-physics** | Ionospheric science products (TEC/dTEC, TID, GRAPE/PSWS) from hf-timestd observations | [HamSCI/hamsci-physics](https://github.com/HamSCI/hamsci-physics) |
+| **station-web** | Station status, documentation and data reports; timing and science pages where hf-timestd runs | [mijahauan/station-web](https://github.com/mijahauan/station-web) |
+| **gmag-webui** | Real-time magnetometer web dashboard | [HamSCI/gmag_webui](https://github.com/HamSCI/gmag_webui) |
 
 | Additional client | What it does | Repo |
 |--------|-------------|------|
@@ -658,16 +686,18 @@ bring-up (`smd bringup dasi2 --with-optional`) or one at a time
 
 | Component | What it does | Repo |
 |-----------|-------------|------|
-| **igmp-querier** | IGMPv2 querier daemon — keeps multicast streams alive on LANs without a router | [HamSCI/igmp-querier](https://github.com/HamSCI/igmp-querier) |
+| **igmp-querier** | Robust IGMP querier so radiod multicast survives on home-network switches | [HamSCI/igmp-querier](https://github.com/HamSCI/igmp-querier) |
 | **sigmond-rac** | Remote Access Channel — frpc reverse tunnel to gw2.wsprdaemon.org for admin SSH/web behind NAT | [HamSCI/sigmond-rac](https://github.com/HamSCI/sigmond-rac) |
-| **gpsdo-monitor** | Leo Bodnar GPSDO health monitor + mDNS advertiser | [HamSCI/gpsdo-monitor](https://github.com/HamSCI/gpsdo-monitor) |
+| **gpsdo-monitor** | GPSDO health monitor + mDNS advertiser (Leo Bodnar and MVR GPSDOs) |
+| **ka9q-web** | Web interface for ka9q-radio (radiod status UI) | [mijahauan/ka9q-web](https://github.com/mijahauan/ka9q-web) (a fork until its audio change merges upstream) | [HamSCI/gpsdo-monitor](https://github.com/HamSCI/gpsdo-monitor) |
 
 The RF clients use [ka9q-python](https://github.com/HamSCI/ka9q-python)
 to receive RTP streams from radiod; `mag-recorder` is the exception — it
 reads its magnetometer directly over USB-I²C, not through radiod.  Each
 client runs in its own Python venv and manages its own systemd services.
 Decoded spots / products are written to the shared SQLite sink
-(`/var/lib/sigmond/sink.db`) and shipped upstream by `hs-uploader`.
+(`/var/lib/hs-uploader/sink.db`, or `/var/lib/sigmond/sink.db` on older
+stations) and shipped upstream by `hs-uploader`.
 
 > **Why a station is worth more as part of a network:** each DASI2 node already
 > carries several GPS-co-registered ionospheric instruments — `hf-timestd`
@@ -678,7 +708,7 @@ Decoded spots / products are written to the shared SQLite sink
 > distributed-aperture instrument that can *image* travelling ionospheric
 > disturbances, sense TEC gradients by differencing receivers that share a
 > transmitter, and feed tomographic TEC — and it is resilient to the steady loss
-> of the HF time standards it listens to (CHU included). See
+> of the HF time standards it listens to (CHU went silent in 2026). See
 > [**docs/STATION-NETWORK-CAPABILITIES.md**](docs/STATION-NETWORK-CAPABILITIES.md).
 
 ## How it works
@@ -717,6 +747,6 @@ checks, see [`docs/contributor/dev-setup.md`](docs/contributor/dev-setup.md) ★
 ## Project
 
 - **Authors:** Michael Hauan (AC0G), Rob Robinett (AI6VN)
-- **License:** TBD
+- **License:** MIT (see [LICENSE](LICENSE))
 - **Repo:** https://github.com/HamSCI/sigmond
 - **Part of:** [HamSCI](https://hamsci.org/) — Ham Radio Science Citizen Investigation

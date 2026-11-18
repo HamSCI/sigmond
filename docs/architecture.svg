@@ -25,17 +25,17 @@
     <g>
       <rect x="80"   y="86" width="268" height="74" rx="10" fill="#eef1f5" stroke="#aab4c0"/>
       <text x="214"  y="122" text-anchor="middle" font-size="16" font-weight="600" fill="#44515f">wsprnet.org</text>
-      <text x="214"  y="143" text-anchor="middle" font-size="11.5" fill="#74808e">WSPR spots</text>
+      <text x="214"  y="143" text-anchor="middle" font-size="11.5" fill="#74808e">WSPR spots, forwarded by wsprdaemon.org</text>
     </g>
     <g>
       <rect x="373"  y="86" width="268" height="74" rx="10" fill="#eef1f5" stroke="#aab4c0"/>
       <text x="507"  y="122" text-anchor="middle" font-size="16" font-weight="600" fill="#44515f">wsprdaemon.org</text>
-      <text x="507"  y="143" text-anchor="middle" font-size="11.5" fill="#74808e">WSPR + noise</text>
+      <text x="507"  y="143" text-anchor="middle" font-size="11.5" fill="#74808e">every spot · noise · CODAR/HFDL timing</text>
     </g>
     <g>
       <rect x="666"  y="86" width="268" height="74" rx="10" fill="#eef1f5" stroke="#aab4c0"/>
       <text x="800"  y="122" text-anchor="middle" font-size="16" font-weight="600" fill="#44515f">pskreporter.info</text>
-      <text x="800"  y="143" text-anchor="middle" font-size="11.5" fill="#74808e">FT8 / FT4</text>
+      <text x="800"  y="143" text-anchor="middle" font-size="11.5" fill="#74808e">FT8 / FT4, forwarded by wsprdaemon.org</text>
     </g>
     <g>
       <rect x="959"  y="86" width="268" height="74" rx="10" fill="#eef1f5" stroke="#aab4c0"/>
@@ -45,15 +45,19 @@
     <g>
       <rect x="1252" y="86" width="268" height="74" rx="10" fill="#eef1f5" stroke="#aab4c0"/>
       <text x="1386" y="122" text-anchor="middle" font-size="16" font-weight="600" fill="#44515f">airframes.io</text>
-      <text x="1386" y="143" text-anchor="middle" font-size="11.5" fill="#74808e">HFDL</text>
+      <text x="1386" y="143" text-anchor="middle" font-size="11.5" fill="#74808e">HFDL (optional, off by default)</text>
     </g>
   </g>
 
   <!-- upload fan: shared services -> networks -->
   <g stroke="#aab4c0" stroke-width="1.6" fill="none" marker-end="url(#arrU)">
     <path d="M620,240 L540,162"/>
-    <path d="M820,240 L800,162"/>
+    <path d="M820,240 L610,162"/>
     <path d="M1180,240 L1120,162"/>
+  </g>
+  <g stroke="#aab4c0" stroke-width="1.6" fill="none" marker-end="url(#arrU)">
+    <path d="M373,123 L351,123"/>
+    <path d="M641,123 L663,123"/>
   </g>
   <text x="980" y="205" font-size="11.5" font-style="italic" fill="#9aa6b3">uploads via hs-uploader</text>
 
@@ -66,7 +70,7 @@
 
   <!-- row labels -->
   <text x="74" y="399" transform="rotate(-90 74 399)" text-anchor="middle" font-size="12" font-weight="700" letter-spacing="2" fill="#0e7c86">CORE CLIENTS</text>
-  <text x="74" y="552" transform="rotate(-90 74 552)" text-anchor="middle" font-size="12" font-weight="700" letter-spacing="2" fill="#4a6fa5">ADDITIONAL CLIENTS</text>
+  <text x="74" y="552" transform="rotate(-90 74 552)" text-anchor="middle" font-size="12" font-weight="700" letter-spacing="2" fill="#0e7c86">MORE CLIENTS</text>
 
   <!-- == shared services strip == -->
   <g filter="url(#sh)">
@@ -100,12 +104,12 @@
     <rect x="509" y="330" width="311" height="138" rx="11" fill="#0e7c86"/>
     <text x="664" y="372" text-anchor="middle" font-size="20" font-weight="700" fill="#ffffff">wspr-recorder</text>
     <text x="664" y="400" text-anchor="middle" font-size="13" fill="#d6f1f1">WSPR / FST4W</text>
-    <text x="664" y="421" text-anchor="middle" font-size="11.5" fill="#bfe6e6">decode → wsprnet · wsprdaemon</text>
+    <text x="664" y="421" text-anchor="middle" font-size="11.5" fill="#bfe6e6">decode → wsprdaemon.org</text>
     <!-- psk-recorder -->
     <rect x="848" y="330" width="311" height="138" rx="11" fill="#0e7c86"/>
     <text x="1003" y="372" text-anchor="middle" font-size="20" font-weight="700" fill="#ffffff">psk-recorder</text>
     <text x="1003" y="400" text-anchor="middle" font-size="13" fill="#d6f1f1">FT8 / FT4</text>
-    <text x="1003" y="421" text-anchor="middle" font-size="11.5" fill="#bfe6e6">decode → pskreporter</text>
+    <text x="1003" y="421" text-anchor="middle" font-size="11.5" fill="#bfe6e6">decode → wsprdaemon.org</text>
     <!-- mag-recorder -->
     <rect x="1187" y="330" width="311" height="138" rx="11" fill="#0e7c86"/>
     <text x="1342" y="372" text-anchor="middle" font-size="20" font-weight="700" fill="#ffffff">mag-recorder</text>
@@ -115,26 +119,28 @@
 
   <!-- == ADDITIONAL CLIENTS row == -->
   <g filter="url(#sh)">
-    <rect x="170" y="492" width="311" height="120" rx="11" fill="#ffffff" stroke="#4a6fa5" stroke-width="1.6"/>
-    <text x="325" y="532" text-anchor="middle" font-size="18" font-weight="700" fill="#243b66">codar-sounder</text>
-    <text x="325" y="558" text-anchor="middle" font-size="12.5" fill="#5b6b86">CODAR HF radar</text>
-    <text x="325" y="577" text-anchor="middle" font-size="11.5" fill="#7888a3">ocean-surface / ionosphere</text>
+    <rect x="170" y="492" width="311" height="120" rx="11" fill="#0e7c86"/>
+    <text x="325" y="532" text-anchor="middle" font-size="18" font-weight="700" fill="#ffffff">codar-sounder</text>
+    <text x="325" y="558" text-anchor="middle" font-size="12.5" fill="#d6f1f1">CODAR HF radar</text>
+    <text x="325" y="577" text-anchor="middle" font-size="11.5" fill="#bfe6e6">timing rows → wsprdaemon.org</text>
 
-    <rect x="509" y="492" width="311" height="120" rx="11" fill="#ffffff" stroke="#4a6fa5" stroke-width="1.6"/>
-    <text x="664" y="532" text-anchor="middle" font-size="18" font-weight="700" fill="#243b66">hfdl-recorder</text>
-    <text x="664" y="558" text-anchor="middle" font-size="12.5" fill="#5b6b86">HFDL aircraft data</text>
-    <text x="664" y="577" text-anchor="middle" font-size="11.5" fill="#7888a3">dumphfdl → airframes.io</text>
+    <rect x="509" y="492" width="311" height="120" rx="11" fill="#0e7c86"/>
+    <text x="664" y="532" text-anchor="middle" font-size="18" font-weight="700" fill="#ffffff">hfdl-recorder</text>
+    <text x="664" y="558" text-anchor="middle" font-size="12.5" fill="#d6f1f1">HFDL aircraft data</text>
+    <text x="664" y="577" text-anchor="middle" font-size="11.5" fill="#bfe6e6">squitter timing → wsprdaemon.org</text>
 
     <rect x="848" y="492" width="311" height="120" rx="11" fill="#ffffff" stroke="#4a6fa5" stroke-width="1.6"/>
     <text x="1003" y="532" text-anchor="middle" font-size="18" font-weight="700" fill="#243b66">hf-tec</text>
     <text x="1003" y="558" text-anchor="middle" font-size="12.5" fill="#5b6b86">HF beacon TEC</text>
     <text x="1003" y="577" text-anchor="middle" font-size="11.5" fill="#7888a3">ionospheric sounding</text>
 
-    <rect x="1187" y="492" width="311" height="120" rx="11" fill="#ffffff" stroke="#4a6fa5" stroke-width="1.6"/>
-    <text x="1342" y="532" text-anchor="middle" font-size="18" font-weight="700" fill="#243b66">meteor-scatter</text>
-    <text x="1342" y="558" text-anchor="middle" font-size="12.5" fill="#5b6b86">Meteor pings</text>
-    <text x="1342" y="577" text-anchor="middle" font-size="11.5" fill="#7888a3">jt9 --msk144</text>
+    <rect x="1187" y="492" width="311" height="120" rx="11" fill="#0e7c86"/>
+    <text x="1342" y="532" text-anchor="middle" font-size="18" font-weight="700" fill="#ffffff">meteor-scatter</text>
+    <text x="1342" y="558" text-anchor="middle" font-size="12.5" fill="#d6f1f1">Meteor pings</text>
+    <text x="1342" y="577" text-anchor="middle" font-size="11.5" fill="#bfe6e6">jt9 --msk144</text>
   </g>
+
+  <text x="200" y="760" font-size="12.5" fill="#44515f">Also core: hamsci-physics (science products) · station-web and gmag-webui (station pages).   Also additional: superdarn-sounder.</text>
 
   <!-- timing-authority bus from hf-timestd -->
   <g stroke="#d9772e" stroke-width="2" stroke-dasharray="7 5" fill="none">

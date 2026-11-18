@@ -67,7 +67,7 @@ install_script  = "/opt/git/sigmond/psk-recorder/scripts/install.sh"
 
 [client.hf-timestd]
 kind            = "client"
-description     = "HF time-standard analyzer (WWV/WWVH/CHU/BPM)"
+description     = "HF time-standard analyzer (WWV/WWVH/BPM/WWVB)"
 repo            = "https://github.com/HamSCI/hf-timestd"
 uses            = ["ka9q-python"]
 requires        = ["ka9q-python", "ka9q-radio"]
