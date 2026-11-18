@@ -440,6 +440,8 @@ def _upgrade(args) -> int:
     if ar.mount_state(uuid) == "mounted":
         from ..storage.guard import seal_bare_dir
         ok(f"the bare {ar.MOUNT} beneath the drive: {seal_bare_dir(str(ar.MOUNT), mode=None)}")
+        # A drive added before the client folders existed has none (AB4EJ, 11-13).
+        _make_client_dirs(ar.MOUNT)
     _after_mount(reading, False)
     _activate_automount(uuid, direct_mount=ar.mount_state(uuid) == "mounted")
     return 0

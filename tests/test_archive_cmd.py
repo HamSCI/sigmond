@@ -311,6 +311,23 @@ def test_add_leaves_linked_archiver_units_alone(env, health, tmp_path, monkeypat
     assert ["systemctl", "enable", "--now", "timestd-archive.timer"] in env.ran
 
 
+def test_upgrade_gives_an_older_drive_its_client_folders(env, health, monkeypatch):
+    # AB4EJ 2026-11-18: a drive added 11-13 had no timestd/ folder, and the
+    # archiver's first run died on Permission denied at the drive's root.
+    me = types.SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid())
+    monkeypatch.setattr(cmd.pwd, "getpwnam",
+                        lambda u: me if u == "timestd" else (_ for _ in ()).throw(KeyError(u)))
+    monkeypatch.setattr(cmd.ar, "mount_state", lambda *a, **k: "mounted")
+    import sigmond.storage.guard as guard
+    monkeypatch.setattr(guard, "seal_bare_dir", lambda *a, **k: "sealed (test)")
+    ar.MOUNT.mkdir(parents=True, exist_ok=True)
+    ar.CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    ar.CONFIG.write_text('uuid = "abcd-1234"\nmount = "%s"\nserial = "S6XN"\n' % ar.MOUNT)
+    assert cmd.cmd_archive(_args(upgrade=True, device=None, confirm=None)) == 0
+    d = ar.MOUNT / "timestd"
+    assert d.is_dir() and d.stat().st_uid == os.getuid()
+
+
 def test_upgrade_enables_the_archiver(env, health, tmp_path, monkeypatch):
     src = _archiver_checkout(tmp_path, monkeypatch)
     ar.CONFIG.parent.mkdir(parents=True, exist_ok=True)
