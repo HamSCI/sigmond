@@ -23,12 +23,15 @@ move in progress, so a re-run after a crash finishes it (or rolls it back).
 Nothing is deleted except the copies this module made itself: old config,
 env and sources files take a ``.moved`` (or ``.retired``) suffix; state
 directories and drop-ins are copied, and the old ones stay.  Stdlib only;
-systemctl runs only through the injectable ``run``.
+systemctl runs only through the injectable ``run``.  Root never acts by path
+under a directory a service account can write: see "Root and the
+directories service users can write" below.
 """
 from __future__ import annotations
 
 import json
 import os
+import pwd
 import re
 import shutil
 import stat
@@ -41,24 +44,16 @@ from typing import Callable
 
 from .instance import (InvalidReporterId, display_reporter_id, instance_key,
                        parse_user_reporter_id, systemd_escape)
+from . import safe_write
 from .instance_rekey import BACKUP_DIR, CLIENTS
 
 MOVED_SUFFIX = ".moved"
 RETIRED_SUFFIX = ".retired"
 JOURNAL_DIR = "lib/sigmond/instance-move"
 
-# Seams for tests: a copy keeps its source's owner (the daemon runs as its
-# own user), and the journal must belong to the user smd runs as.
+# Seams for tests: the effective uid (the privilege-drop runner and the
+# rollback act on it), and the user the journal must belong to.
 _geteuid = os.geteuid
-
-
-def _chown(path, uid, gid) -> None:
-    """Give a path to uid:gid without following a symlink."""
-    os.chown(path, uid, gid, follow_symlinks=False)
-
-
-def _fchown(fd, uid, gid) -> None:
-    os.fchown(fd, uid, gid)
 
 
 def _trusted_uid() -> int:
@@ -254,16 +249,12 @@ def rewrite_env(text: str, old_key: str, old_reporter: str, new_reporter: str):
     return "".join(out), changed
 
 
-def _leftovers(path: Path, olds: set, label: str) -> list:
-    """WARN lines for a literal old id still in ``path`` (comments skipped)."""
+def _leftovers(text: str, olds: set, label: str) -> list:
+    """WARN lines for a literal old id still in ``text`` (comments skipped)."""
     warns = []
-    try:
-        lines = path.read_text().splitlines()
-    except OSError:
-        return warns
     pats = [re.compile(r"(?<![A-Za-z0-9/-])" + re.escape(o)
                        + r"(?![A-Za-z0-9/=-])") for o in olds]
-    for i, ln in enumerate(lines, 1):
+    for i, ln in enumerate(text.splitlines(), 1):
         if ln.lstrip().startswith("#"):
             continue
         if any(p.search(ln) for p in pats):
@@ -272,8 +263,8 @@ def _leftovers(path: Path, olds: set, label: str) -> list:
     return warns
 
 
-def _set_reporter_id(cfg: Path, new_id: str) -> None:
-    text = cfg.read_text()
+def _with_reporter_id(text: str, new_id: str) -> str:
+    """Config text with ``[instance] reporter_id`` set to ``new_id``."""
     data = tomllib.loads(text)
     inst = data.get("instance")
     line = f'reporter_id = "{new_id}"\n'
@@ -297,7 +288,430 @@ def _set_reporter_id(cfg: Path, new_id: str) -> None:
     else:
         new = "[instance]\n" + line + "\n" + text
     tomllib.loads(new)                       # never write a broken file
-    cfg.write_text(new)
+    return new
+
+
+# ---------------------------------------------------------------------------
+# Root and the directories service users can write
+#
+# /etc/<client>/ (wspr-recorder's install chowns it), /etc/<client>/env/,
+# /var/lib/<client>/ (chirp-recorder@.service chowns it) and /var/lib/sigmond
+# (root:sigmond 2775) can all be written by a service account, which can
+# swap any entry in them for a symlink at any moment.  So:
+# - state trees are copied, and removed on rollback, by a child running as
+#   the tree's owner (``_run_as``); root makes no mkdir, chmod, chown, utime
+#   or write under those directories, and the swap races stop mattering;
+# - config, env and sources files are read with O_NOFOLLOW and written whole
+#   through ``safe_write.write_owned`` (one directory descriptor, a fresh
+#   O_EXCL temporary file, rename over the target), already rewritten;
+# - the journal and the backups live in directories only root can write,
+#   reached by descriptor from /var/lib/sigmond, never by path.
+# ---------------------------------------------------------------------------
+
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_CHILD_ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"}
+
+
+def _run_as(uid: int, gid: int, argv: list) -> tuple:
+    """Run ``argv`` as uid:gid; returns (returncode, output).  As root it
+    drops privileges with setpriv first (the user's own supplementary
+    groups when it has a passwd entry, none otherwise), so the command can
+    do only what that user could already do.  Not root, it cannot change
+    user and runs as itself, which escalates nothing."""
+    if _geteuid() == 0 and uid != 0:
+        try:
+            pwd.getpwuid(uid)
+            groups = "--init-groups"
+        except KeyError:
+            groups = "--clear-groups"
+        argv = ["setpriv", f"--reuid={uid}", f"--regid={gid}", groups,
+                "--", *argv]
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, check=False,
+                           cwd="/", env=_CHILD_ENV, timeout=6 * 3600)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 127, str(exc)
+    return p.returncode, (p.stdout or "") + (p.stderr or "")
+
+
+def _root_only(st: os.stat_result) -> bool:
+    """A directory only root can change."""
+    return st.st_uid == 0 and not st.st_mode & 0o022
+
+
+def _lstat_at(path: Path):
+    """(lstat of ``path`` or None, fstat of its directory), looked up
+    through the directory opened with O_NOFOLLOW."""
+    pfd = os.open(path.parent, _DIR_FLAGS)
+    try:
+        parent = os.fstat(pfd)
+        try:
+            st = os.stat(path.name, dir_fd=pfd, follow_symlinks=False)
+        except FileNotFoundError:
+            st = None
+    finally:
+        os.close(pfd)
+    return st, parent
+
+
+def _copy_as_owner(src: Path, dst: Path) -> None:
+    """Copy a state tree (or drop-in directory) with ``cp -a`` running as
+    the source's owner: links stay links, mode, group and times are kept,
+    and the owner is the source's because the copy runs as it.  A
+    destination that exists aborts.  A root-owned source is copied as root
+    only when both directories are root's alone."""
+    st, sparent = _lstat_at(src)
+    if st is None:
+        raise FileNotFoundError(f"{src} vanished")
+    there, dparent = _lstat_at(dst)
+    if there is not None:
+        raise FileExistsError(f"{dst} already exists")
+    if st.st_uid == 0 and not (_root_only(sparent) and _root_only(dparent)):
+        raise OSError(f"{src} belongs to root but sits where another user "
+                      f"can write; refusing to copy it as root")
+    rc, out = _run_as(st.st_uid, st.st_gid,
+                      ["cp", "-a", "--no-dereference", "-T", "--",
+                       str(src), str(dst)])
+    if rc != 0:
+        raise OSError(f"copying {src} as uid {st.st_uid} failed: "
+                      f"{str(out).strip()[:200]}")
+
+
+def _copy_text(src: Path, dst: Path, transform: Callable = None) -> str:
+    """Read ``src`` (no link, no hard link, no stranger's file), apply
+    ``transform``, and write the result to ``dst`` in one step with the
+    source's mode and owner.  A link standing at ``dst`` is replaced,
+    never followed.  Returns the text written."""
+    got = safe_write.read_nofollow_stat(src)
+    if got is None:
+        raise FileNotFoundError(f"{src} vanished")
+    text, st = got
+    if transform is not None:
+        text = transform(text)
+    safe_write.write_owned(dst, text, mode=stat.S_IMODE(st.st_mode),
+                           owner=(st.st_uid, st.st_gid),
+                           owner_from_dir=False)
+    return text
+
+
+def _rename_at(src: Path, new_name: str) -> None:
+    """Rename ``src`` within its directory, held by descriptor."""
+    pfd = os.open(src.parent, _DIR_FLAGS)
+    try:
+        os.rename(src.name, new_name, src_dir_fd=pfd, dst_dir_fd=pfd)
+    finally:
+        os.close(pfd)
+
+
+# ---- root-only directories under /var/lib/sigmond, by descriptor ----------
+
+def _open_private(parent: Path, name: str, what: str, create: bool = False,
+                  tighten: bool = False):
+    """A descriptor on ``parent/name``, a directory the trusted user owns
+    and only it can write, or None when it is absent and ``create`` is
+    off.  Opened with O_NOFOLLOW through a descriptor on ``parent``, so a
+    link planted at either name is refused.  ``tighten`` drops group and
+    other write from a trusted directory (by descriptor) instead of
+    refusing it."""
+    try:
+        pfd = os.open(parent, _DIR_FLAGS)
+    except FileNotFoundError:
+        if not create:
+            return None
+        os.makedirs(parent, exist_ok=True)
+        pfd = os.open(parent, _DIR_FLAGS)
+    except OSError as exc:
+        raise JournalError(f"{parent}: {exc.strerror}; refusing to use it")
+    try:
+        if create:
+            try:
+                os.mkdir(name, 0o700, dir_fd=pfd)
+            except FileExistsError:
+                pass
+        try:
+            fd = os.open(name, _DIR_FLAGS, dir_fd=pfd)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            raise JournalError(f"{what} {parent / name} is not a plain "
+                               f"directory")
+    finally:
+        os.close(pfd)
+    try:
+        st = os.fstat(fd)
+        if st.st_uid != _trusted_uid():
+            raise JournalError(f"{what} {parent / name} is not owned by the "
+                               f"trusted user")
+        if st.st_mode & 0o022:
+            if not tighten:
+                raise JournalError(f"{what} {parent / name} is writable by "
+                                   f"group or other")
+            os.fchmod(fd, stat.S_IMODE(st.st_mode) & ~0o022)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _sigmond_var(var_root: Path) -> Path:
+    return Path(var_root) / "lib" / "sigmond"
+
+
+def _journal_fd(var_root: Path, create: bool = False):
+    return _open_private(_sigmond_var(var_root), Path(JOURNAL_DIR).name,
+                         "journal directory", create=create)
+
+
+def _journal_dir(var_root: Path, create: bool = False) -> Path:
+    """The journal directory's path, after the descriptor checks."""
+    fd = _journal_fd(var_root, create=create)
+    if fd is not None:
+        os.close(fd)
+    return Path(var_root) / JOURNAL_DIR
+
+
+def _journal_name(client: str, old: str) -> str:
+    return f"{client}@{old}.json"
+
+
+def _read_journal_at(dfd: int, name: str) -> dict:
+    """The journal's content, after the owner/mode checks; JournalError
+    when anything is off.  Holds no paths: the move recomputes them."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                     | os.O_CLOEXEC, dir_fd=dfd)
+    except OSError as exc:
+        raise JournalError(f"unreadable journal {name}: {exc}")
+    try:
+        with os.fdopen(fd, "r") as fh:
+            st = os.fstat(fh.fileno())
+            if not stat.S_ISREG(st.st_mode):
+                raise JournalError(f"journal {name} is not a regular file")
+            if st.st_uid != _trusted_uid():
+                raise JournalError(f"journal {name} is not owned by the "
+                                   f"trusted user")
+            if st.st_mode & 0o022:
+                raise JournalError(f"journal {name} is writable by group "
+                                   f"or other")
+            raw = fh.read(1 << 16)
+        j = json.loads(raw)
+        _valid_move(j["move"])
+        idx = [int(i) for i in j["fresh"]]
+        return {"move": j["move"], "was_enabled": bool(j["was_enabled"]),
+                "was_active": bool(j["was_active"]),
+                "stamp": re.fullmatch(r"[0-9]{8}T[0-9]{6}Z",
+                                      str(j["stamp"])).group(0),
+                "fresh": [i for i in idx if 0 <= i < 5]}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise JournalError(f"unreadable journal {name}: {exc}")
+
+
+def _journal_op(var_root: Path, fn):
+    """Run ``fn(dfd)`` on the journal directory's descriptor, or return
+    None when there is no journal directory."""
+    fd = _journal_fd(var_root)
+    if fd is None:
+        return None
+    try:
+        return fn(fd)
+    finally:
+        os.close(fd)
+
+
+def _journal_exists(var_root: Path, name: str) -> bool:
+    def look(dfd):
+        try:
+            os.stat(name, dir_fd=dfd, follow_symlinks=False)
+            return True
+        except FileNotFoundError:
+            return False
+    return bool(_journal_op(var_root, look))
+
+
+def _write_journal(var_root: Path, name: str, body: dict) -> None:
+    fd = _journal_fd(var_root, create=True)
+    try:
+        jfd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+                      | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=fd)
+        with os.fdopen(jfd, "w") as fh:
+            fh.write(json.dumps(body))
+    finally:
+        os.close(fd)
+
+
+def _drop_journal(var_root: Path, name: str) -> None:
+    def drop(dfd):
+        try:
+            os.unlink(name, dir_fd=dfd)
+        except FileNotFoundError:
+            pass
+    _journal_op(var_root, drop)
+
+
+def pending_moves(var_root: Path, errors: list = None) -> list:
+    """Moves a crash left unfinished (their journals), to resume.  A
+    journal that cannot be trusted adds a line to ``errors`` and is
+    skipped."""
+    out = []
+
+    def scan(dfd):
+        for name in sorted(n for n in os.listdir(dfd) if n.endswith(".json")):
+            try:
+                out.append(_valid_move(_read_journal_at(dfd, name)["move"]))
+            except JournalError as exc:
+                if errors is not None:
+                    errors.append(f"ERROR: journal {name}: {exc}")
+    try:
+        _journal_op(var_root, scan)
+    except (JournalError, OSError) as exc:
+        # A non-root dry run cannot read root's 0700 journal; as before,
+        # it sees no pending moves (the real run, as root, resumes them).
+        if isinstance(exc, PermissionError) and _geteuid() != 0:
+            return out
+        if errors is not None:
+            errors.append(f"ERROR: journal: {exc}")
+    return out
+
+
+# ---- backups: read without following, written only inside root's dir ------
+
+def _copy_file_at(sfd: int, name: str, dfd: int) -> None:
+    fi = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                 | os.O_CLOEXEC, dir_fd=sfd)
+    try:
+        st = os.fstat(fi)
+        if not stat.S_ISREG(st.st_mode):
+            return                       # a FIFO or device: not backed up
+        fo = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                     | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dfd)
+        try:
+            while True:
+                b = os.read(fi, 1 << 20)
+                if not b:
+                    break
+                view = memoryview(b)
+                while view:
+                    view = view[os.write(fo, view):]
+            os.fchmod(fo, stat.S_IMODE(st.st_mode))
+            os.utime(fo, ns=(st.st_atime_ns, st.st_mtime_ns))
+        finally:
+            os.close(fo)
+    finally:
+        os.close(fi)
+
+
+def _copy_entry_at(sfd: int, name: str, dfd: int) -> None:
+    """Copy entry ``name`` of directory ``sfd`` into directory ``dfd``
+    (root's own), never following a link on either side."""
+    st = os.stat(name, dir_fd=sfd, follow_symlinks=False)
+    if stat.S_ISLNK(st.st_mode):
+        os.symlink(os.readlink(name, dir_fd=sfd), name, dir_fd=dfd)
+    elif stat.S_ISREG(st.st_mode):
+        _copy_file_at(sfd, name, dfd)
+    elif stat.S_ISDIR(st.st_mode):
+        os.mkdir(name, 0o700, dir_fd=dfd)
+        s2 = os.open(name, _DIR_FLAGS, dir_fd=sfd)
+        try:
+            d2 = os.open(name, _DIR_FLAGS, dir_fd=dfd)
+            try:
+                for n in sorted(os.listdir(s2)):
+                    _copy_entry_at(s2, n, d2)
+                os.fchmod(d2, stat.S_IMODE(st.st_mode))
+            finally:
+                os.close(d2)
+        finally:
+            os.close(s2)
+
+
+def _subdir_at(dfd: int, name: str) -> int:
+    try:
+        os.mkdir(name, 0o700, dir_fd=dfd)
+    except FileExistsError:
+        pass
+    return os.open(name, _DIR_FLAGS, dir_fd=dfd)
+
+
+def _backup(srcs: list, var_root: Path, stamp: str, etc_root: Path) -> Path:
+    """Copy each existing source into BACKUP_DIR/<stamp>/<label>.  The
+    backup root is opened by descriptor and must be root's alone; a link
+    planted there aborts.  An entry already backed up under this stamp
+    (a resumed move) keeps the first copy."""
+    bpath = Path(BACKUP_DIR[len("var/"):])
+    root = _open_private(Path(var_root) / bpath.parent, bpath.name,
+                         "backup directory", create=True, tighten=True)
+    try:
+        sfd = _subdir_at(root, stamp)
+    finally:
+        os.close(root)
+    try:
+        for src in srcs:
+            parts = Path(_label(src, etc_root)).parts
+            try:
+                spfd = os.open(src.parent, _DIR_FLAGS)
+            except FileNotFoundError:
+                continue
+            try:
+                try:
+                    os.stat(src.name, dir_fd=spfd, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                fds = [sfd]
+                try:
+                    for part in parts[:-1]:
+                        fds.append(_subdir_at(fds[-1], part))
+                    try:
+                        os.stat(parts[-1], dir_fd=fds[-1],
+                                follow_symlinks=False)
+                        continue                     # backed up already
+                    except FileNotFoundError:
+                        pass
+                    if parts[-1] != src.name:
+                        raise OSError(f"bad backup label for {src}")
+                    _copy_entry_at(spfd, src.name, fds[-1])
+                finally:
+                    for fd in fds[1:]:
+                        os.close(fd)
+            finally:
+                os.close(spfd)
+    finally:
+        os.close(sfd)
+    return Path(var_root) / bpath / stamp
+
+
+def _rm(p: Path, roots: tuple, allowed: list) -> None:
+    """Remove a copy this module made: only a path recomputed for the move
+    (``allowed``) that resolves inside the etc or var tree.  A file or link
+    goes by unlink through its directory's descriptor; a directory under a
+    directory others can write goes by ``rm -rf`` running as that
+    directory's owner, never by root."""
+    if p not in allowed:
+        raise JournalError(f"refusing to remove {p}: not one of the move's paths")
+    real = p.parent.resolve() / p.name
+    if not any(real.is_relative_to(Path(r).resolve()) for r in roots):
+        raise JournalError(f"refusing to remove {p}: outside the etc/var trees")
+    try:
+        pfd = os.open(p.parent, _DIR_FLAGS)
+    except FileNotFoundError:
+        return
+    try:
+        parent = os.fstat(pfd)
+        try:
+            st = os.stat(p.name, dir_fd=pfd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if not stat.S_ISDIR(st.st_mode):
+            os.unlink(p.name, dir_fd=pfd)
+            return
+    finally:
+        os.close(pfd)
+    if _root_only(parent) and _geteuid() == 0:
+        shutil.rmtree(p)                 # the fd-based walk; parent is root's
+    else:
+        rc, out = _run_as(parent.st_uid, parent.st_gid,
+                          ["rm", "-rf", "--one-file-system", "--", str(p)])
+        if rc != 0 or os.path.lexists(p):
+            raise OSError(f"removing {p} as uid {parent.st_uid} failed: "
+                          f"{str(out).strip()[:200]}")
 
 
 # ---------------------------------------------------------------------------
@@ -321,92 +735,6 @@ def _label(src: Path, etc_root: Path) -> str:
         return str(src.relative_to(etc_root.parent))
     except ValueError:
         return src.name
-
-
-def _copy_file(src: Path, dst: Path, replace: bool = False) -> None:
-    """Copy one entry as root without ever following a symlink.  A symlink
-    copies as a symlink.  A regular file is read through O_NOFOLLOW and
-    written to a new file made with O_EXCL|O_NOFOLLOW, then fchmod/fchown
-    on the descriptor.  ``replace`` first unlinks what stands at ``dst``
-    (never its target); without it an existing ``dst`` aborts."""
-    st = os.lstat(src)
-    root = _geteuid() == 0
-    if replace and (os.path.lexists(dst)):
-        os.unlink(dst)
-    if stat.S_ISLNK(st.st_mode):
-        os.symlink(os.readlink(src), dst)
-        if root:
-            _chown(dst, st.st_uid, st.st_gid)
-        return
-    if not stat.S_ISREG(st.st_mode):
-        return                       # sockets, devices, fifos stay behind
-    fd_in = os.open(src, os.O_RDONLY | os.O_NOFOLLOW)
-    try:
-        if not stat.S_ISREG(os.fstat(fd_in).st_mode):
-            raise OSError(f"{src} changed while copying")
-        fd_out = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL
-                         | os.O_NOFOLLOW, 0o600)
-        try:
-            with os.fdopen(os.dup(fd_in), "rb") as fi, \
-                    os.fdopen(os.dup(fd_out), "wb") as fo:
-                shutil.copyfileobj(fi, fo)
-            os.fchmod(fd_out, stat.S_IMODE(st.st_mode))
-            if root:
-                _fchown(fd_out, st.st_uid, st.st_gid)
-            os.utime(fd_out, ns=(st.st_atime_ns, st.st_mtime_ns))
-        finally:
-            os.close(fd_out)
-    finally:
-        os.close(fd_in)
-
-
-def _copy_tree(src: Path, dst: Path) -> None:
-    """Copy a directory tree as root without following a symlink: the
-    walk never descends into a symlinked directory, every destination
-    entry must be new (an existing one aborts), and a directory takes its
-    mode and owner after it is populated."""
-    st = os.lstat(src)
-    if not stat.S_ISDIR(st.st_mode):
-        raise OSError(f"{src} is not a directory")
-    os.mkdir(dst, 0o700)             # no exist_ok: the new tree is ours
-    with os.scandir(src) as it:
-        entries = sorted(it, key=lambda e: e.name)
-    for e in entries:
-        target = dst / e.name
-        if e.is_dir(follow_symlinks=False):
-            _copy_tree(Path(e.path), target)
-        else:
-            _copy_file(Path(e.path), target)
-    os.chmod(dst, stat.S_IMODE(st.st_mode))
-    if _geteuid() == 0:
-        _chown(dst, st.st_uid, st.st_gid)
-    os.utime(dst, ns=(st.st_atime_ns, st.st_mtime_ns))
-
-
-def _backup(srcs: list, backup: Path, etc_root: Path) -> None:
-    for src in srcs:
-        if not os.path.lexists(src):
-            continue
-        dst = backup / _label(src, etc_root)
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        if src.is_dir() and not src.is_symlink():
-            shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=True)
-        else:
-            shutil.copy2(src, dst, follow_symlinks=False)
-
-
-def _rm(p: Path, roots: tuple, allowed: list) -> None:
-    """Remove a copy this module made: only a path recomputed for the move
-    (``allowed``) that resolves inside the etc or var tree."""
-    if p not in allowed:
-        raise JournalError(f"refusing to remove {p}: not one of the move's paths")
-    real = p.parent.resolve() / p.name
-    if not any(real.is_relative_to(Path(r).resolve()) for r in roots):
-        raise JournalError(f"refusing to remove {p}: outside the etc/var trees")
-    if p.is_dir() and not p.is_symlink():
-        shutil.rmtree(p)
-    elif p.exists() or p.is_symlink():
-        p.unlink()
 
 
 class _Sys:
@@ -436,7 +764,9 @@ class _Sys:
                 in ("active", "activating"))
 
 
-_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# The journal's grammar: the plan's, minus the backslash.  "=" is no path
+# trick, and a crash while moving a legacy AC0G=B4 instance must resume.
+_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._=-]*$")
 
 
 def _valid_key(k) -> bool:
@@ -453,8 +783,8 @@ def _valid_plan_key(k) -> bool:
 
 
 def _valid_move(d, strict: bool = True) -> Move:
-    """A Move from JSON (strict key grammar, for the journal) or from the
-    planner (``strict=False``: legacy ``=`` keys pass), or JournalError."""
+    """A Move from JSON (the journal's grammar) or from the planner
+    (``strict=False``: a backslash spelling passes too), or JournalError."""
     try:
         m = Move(**{f: d[f] for f in
                     ("client", "old_key", "new_key", "new_reporter_id",
@@ -476,69 +806,6 @@ def _valid_move(d, strict: bool = True) -> Move:
     except (InvalidReporterId, ValueError):
         raise JournalError("new_reporter_id is not a reporter id")
     return m
-
-
-def _check_owner(p: Path, what: str) -> None:
-    st = p.lstat()
-    if st.st_uid != _trusted_uid():
-        raise JournalError(f"{what} {p} is not owned by the trusted user")
-    if st.st_mode & 0o022:
-        raise JournalError(f"{what} {p} is writable by group or other")
-
-
-def _journal_dir(var_root: Path, create: bool = False) -> Path:
-    d = Path(var_root) / JOURNAL_DIR
-    if create and not d.exists():
-        d.mkdir(parents=True, mode=0o700)
-        os.chmod(d, 0o700)
-        if _geteuid() == 0:
-            _chown(d, 0, 0)
-    if d.exists():
-        if d.is_symlink() or not d.is_dir():
-            raise JournalError(f"{d} is not a plain directory")
-        _check_owner(d, "journal directory")
-    return d
-
-
-def _journal(var_root: Path, client: str, old: str) -> Path:
-    return Path(var_root) / JOURNAL_DIR / f"{client}@{old}.json"
-
-
-def _read_journal(path: Path) -> dict:
-    """The journal's content, after the owner/mode checks; JournalError
-    when anything is off.  Holds no paths: the move recomputes them."""
-    _check_owner(path, "journal")
-    try:
-        j = json.loads(path.read_text())
-        _valid_move(j["move"])
-        idx = [int(i) for i in j["fresh"]]
-        return {"move": j["move"], "was_enabled": bool(j["was_enabled"]),
-                "was_active": bool(j["was_active"]),
-                "stamp": re.fullmatch(r"[0-9]{8}T[0-9]{6}Z",
-                                      str(j["stamp"])).group(0),
-                "fresh": [i for i in idx if 0 <= i < 5]}
-    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
-        raise JournalError(f"unreadable journal {path}: {exc}")
-
-
-def pending_moves(var_root: Path, errors: list = None) -> list:
-    """Moves a crash left unfinished (their journals), to resume.  A
-    journal that cannot be trusted adds a line to ``errors`` and is
-    skipped."""
-    out = []
-    try:
-        d = _journal_dir(var_root)
-    except JournalError as exc:
-        if errors is not None:
-            errors.append(f"ERROR: journal: {exc}")
-        return out
-    for p in sorted(d.glob("*.json")) if d.is_dir() else []:
-        try:
-            out.append(_valid_move(_read_journal(p)["move"]))
-        except JournalError as exc:
-            if errors is not None:
-                errors.append(f"ERROR: journal {p.name}: {exc}")
-    return out
 
 
 def apply_moves(moves: list, *, etc_root: Path, var_root: Path,
@@ -568,14 +835,19 @@ def _move_one(m: Move, etc_root: Path, var_root: Path, sysd: _Sys,
     c, old, new = m.client, m.old_key, m.new_key
     old_unit = f"{c}@{systemd_escape(old)}.service"
     new_unit = f"{c}@{systemd_escape(new)}.service"
-    jpath = _journal(var_root, c, old)
+    jname = _journal_name(c, old)
     ofiles, odirs = _paths(etc_root, var_root, c, old)
     nfiles, ndirs = _paths(etc_root, var_root, c, new)
-    resume = jpath.exists()
     allowed = nfiles + ndirs
+    try:
+        resume = _journal_exists(var_root, jname)
+    except (JournalError, OSError) as exc:
+        steps.append(f"ERROR: {c}@{old} not moved: {exc}")
+        return False
     if resume:
         try:
-            j = _read_journal(jpath)
+            j = _journal_op(var_root,
+                            lambda dfd: _read_journal_at(dfd, jname))
         except JournalError as exc:
             steps.append(f"ERROR: {c}@{old} not moved: {exc}")
             return False
@@ -583,7 +855,7 @@ def _move_one(m: Move, etc_root: Path, var_root: Path, sysd: _Sys,
         stamp, fresh = j["stamp"], [allowed[i] for i in j["fresh"]]
         steps.append(f"resuming the move of {c}@{old} to {c}@{new}")
     else:
-        if nfiles[0].exists():
+        if os.path.lexists(nfiles[0]):
             steps.append(f"ERROR: {nfiles[0]} already exists; "
                          f"{c}@{old} not moved")
             return False
@@ -591,74 +863,68 @@ def _move_one(m: Move, etc_root: Path, var_root: Path, sysd: _Sys,
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         fresh = [p for p in allowed if not os.path.lexists(p)]
         try:
-            _journal_dir(var_root, create=True)
-        except JournalError as exc:
-            steps.append(f"ERROR: {c}@{old} not moved: {exc}")
-            return False
-        fd = os.open(jpath, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as fh:
-            fh.write(json.dumps({
+            _write_journal(var_root, jname, {
                 "move": m.__dict__, "was_enabled": was_enabled,
                 "was_active": was_active, "stamp": stamp,
-                "fresh": [allowed.index(p) for p in fresh]}))
-    backup = var_root / BACKUP_DIR[len("var/"):] / stamp
+                "fresh": [allowed.index(p) for p in fresh]})
+        except (JournalError, OSError) as exc:
+            steps.append(f"ERROR: {c}@{old} not moved: {exc}")
+            return False
     olds = _old_spellings(old, "")
     try:
         old_reporter = old
-        src_cfg = ofiles[0] if ofiles[0].exists() else \
+        src_cfg = ofiles[0] if os.path.lexists(ofiles[0]) else \
             ofiles[0].with_name(ofiles[0].name + MOVED_SUFFIX)
         try:
-            old_reporter = tomllib.loads(src_cfg.read_text()) \
+            old_reporter = tomllib.loads(
+                safe_write.read_nofollow(src_cfg) or "") \
                 .get("instance", {}).get("reporter_id") or old
         except (OSError, ValueError):
             pass
         olds = _old_spellings(old, old_reporter)
         if was_active:
             sysd.must("stop", old_unit)
-        _backup(ofiles + odirs + [p for p in nfiles if os.path.lexists(p)],
-                backup, etc_root)
-        for src, dst in zip(ofiles, nfiles):
+        backup = _backup(ofiles + odirs
+                         + [p for p in nfiles if os.path.lexists(p)],
+                         var_root, stamp, etc_root)
+        changed: list = []
+
+        def env_edit(text):
+            out, ch = rewrite_env(text, old, old_reporter, m.new_reporter_id)
+            changed[:] = ch
+            return out
+        transforms = [lambda t: _with_reporter_id(t, m.new_reporter_id),
+                      env_edit, None]
+        for src, dst, tf in zip(ofiles, nfiles, transforms):
             moved = src.with_name(src.name + MOVED_SUFFIX)
             use = src if os.path.lexists(src) else moved
             if not os.path.lexists(use):
                 continue
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            _copy_file(use, dst, replace=True)
-            if src.exists():
-                src.rename(moved)
+            text = _copy_text(use, dst, tf)
+            if os.path.lexists(src):
+                _rename_at(src, moved.name)
                 steps.append(f"{src} -> {dst} (old kept as {moved.name})")
+            if dst == nfiles[0]:
+                steps.append(f"{dst}: reporter_id = \"{m.new_reporter_id}\"")
+            elif dst == nfiles[1] and changed:
+                steps.append(f"{dst}: {', '.join(changed)} now name "
+                             f"{m.new_reporter_id}")
+            if dst in nfiles[:2]:
+                steps += _leftovers(text, olds, str(dst))
         for src, dst in zip(odirs, ndirs):
             if not os.path.lexists(src):
                 continue
-            if dst.is_symlink():
-                if dst in fresh:                   # ours, from a crashed run
+            if os.path.lexists(dst):
+                if resume and dst in fresh:        # ours, from a crashed run
                     _rm(dst, (etc_root, var_root), allowed)
                 else:
-                    raise OSError(f"{dst} is a symlink; refusing to copy "
-                                  f"into it")
-            elif os.path.lexists(dst):
-                if resume and dst in fresh:
-                    _rm(dst, (etc_root, var_root), allowed)
-                else:
-                    continue               # a real directory already there
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            if src.is_dir() and not src.is_symlink():
-                _copy_tree(src, dst)
-            else:
-                _copy_file(src, dst)
+                    steps.append(
+                        f"WARN: {dst} already exists; {c}@{old} not moved "
+                        f"-- move it aside by hand (it may hold stale state), "
+                        f"then re-run")
+                    raise FileExistsError(f"{dst} already exists")
+            _copy_as_owner(src, dst)
             steps.append(f"copied {src} -> {dst} (old kept)")
-        if nfiles[0].exists():
-            _set_reporter_id(nfiles[0], m.new_reporter_id)
-            steps.append(f"{nfiles[0]}: reporter_id = \"{m.new_reporter_id}\"")
-        if nfiles[1].exists():
-            text, changed = rewrite_env(nfiles[1].read_text(), old,
-                                        old_reporter, m.new_reporter_id)
-            if changed:
-                nfiles[1].write_text(text)
-                steps.append(f"{nfiles[1]}: {', '.join(changed)} now name "
-                             f"{m.new_reporter_id}")
-        for f in nfiles[:2]:
-            steps += _leftovers(f, olds, str(f))
         sysd.must("daemon-reload")
         if was_enabled:
             sysd.must("disable", old_unit)
@@ -670,8 +936,8 @@ def _move_one(m: Move, etc_root: Path, var_root: Path, sysd: _Sys,
         try:
             for src in ofiles:
                 moved = src.with_name(src.name + MOVED_SUFFIX)
-                if moved.exists() and not src.exists():
-                    moved.rename(src)
+                if os.path.lexists(moved) and not os.path.lexists(src):
+                    _rename_at(moved, src.name)
             for p in fresh:
                 _rm(p, (etc_root, var_root), allowed)
             sysd.call("daemon-reload")
@@ -680,13 +946,13 @@ def _move_one(m: Move, etc_root: Path, var_root: Path, sysd: _Sys,
                 sysd.call("enable", old_unit)
             if was_active:
                 sysd.call("start", old_unit)
-            jpath.unlink(missing_ok=True)
+            _drop_journal(var_root, jname)
             steps.append(f"rolled back: {c}@{old} is as it was")
         except Exception as exc2:                           # noqa: BLE001
             steps.append(f"ERROR: rollback of {c}@{old} also failed: {exc2}; "
                          f"re-run receiver apply to resume")
         return False
-    jpath.unlink(missing_ok=True)
+    _drop_journal(var_root, jname)
     steps.append(f"backup of every moved file: {backup}")
     return True
 
@@ -702,18 +968,17 @@ def apply_retires(retires: list, *, etc_root: Path, var_root: Path,
         unit = f"{r.client}@{systemd_escape(r.key)}.service"
         files, dirs = _paths(etc_root, var_root, r.client, r.key)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        backup = var_root / BACKUP_DIR[len("var/"):] / stamp
         was_enabled = was_active = False
         renamed = []
         try:
             was_enabled, was_active = sysd.state(unit)
             if was_active:
                 sysd.must("stop", unit)
-            _backup(files + dirs, backup, etc_root)
+            backup = _backup(files + dirs, var_root, stamp, etc_root)
             for f in files:
-                if f.exists():
+                if os.path.lexists(f):
                     g = f.with_name(f.name + RETIRED_SUFFIX)
-                    f.rename(g)
+                    _rename_at(f, g.name)
                     renamed.append((f, g))
                     steps.append(f"{f} -> {g.name}")
             sysd.must("daemon-reload")
@@ -725,8 +990,11 @@ def apply_retires(retires: list, *, etc_root: Path, var_root: Path,
         except Exception as exc:                            # noqa: BLE001
             steps.append(f"ERROR: retiring {r.client}@{r.key} failed: {exc}")
             for f, g in renamed:
-                if g.exists() and not f.exists():
-                    g.rename(f)
+                if os.path.lexists(g) and not os.path.lexists(f):
+                    try:
+                        _rename_at(g, f.name)
+                    except OSError:
+                        pass
             if was_enabled:
                 sysd.call("enable", unit)
             if was_active:

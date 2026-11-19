@@ -261,6 +261,20 @@ def read_nofollow(path: Union[str, Path]) -> Optional[str]:
     return None if got is None else got[0]
 
 
+def read_nofollow_stat(path: Union[str, Path]):
+    """(text, stat) of the regular file at `path`, or None when nothing
+    stands there.  The same rules as ``read_nofollow``; the stat comes from
+    the descriptor that was read, so a caller can copy the file's mode and
+    owner without a second, path-based look."""
+    path = Path(path)
+    name = _name_of(path)
+    dfd = _open_parent(path.parent)
+    try:
+        return _read_at(dfd, os.fstat(dfd), name, path)
+    finally:
+        os.close(dfd)
+
+
 # ---- the boolean TOML setter (mag-recorder's lever) -----------------------
 
 _BARE = re.compile(r"^[A-Za-z0-9_-]+$")

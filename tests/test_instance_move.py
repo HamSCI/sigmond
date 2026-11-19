@@ -352,8 +352,10 @@ def test_failure_mid_move_rolls_back(tmp_root, fake_systemctl):
 def test_oserror_mid_copy_rolls_back(tmp_root, fake_systemctl):
     make_instance(tmp_root, "psk-recorder", "N8UR", RADIOD)
     before = _tree(tmp_root)
-    with mock.patch("sigmond.instance_move.shutil.copytree",
-                    side_effect=OSError("disk full")):
+    real_run_as = IM._run_as
+    with mock.patch.object(IM, "_run_as",
+                           lambda u, g, a: (1, "disk full") if a[0] == "cp"
+                           else real_run_as(u, g, a)):
         steps = apply_moves(
             [Move("psk-recorder", "N8UR", "N8UR-SIGMOND", "N8UR-SIGMOND", RADIOD)],
             etc_root=tmp_root / "etc", var_root=tmp_root / "var",
@@ -460,21 +462,21 @@ def test_copies_keep_owner_and_mode(tmp_root, fake_systemctl):
     (st / "sub").mkdir()
     (st / "sub/f.dat").write_text("x")
     os.chmod(st / "sub/f.dat", 0o640)
-    calls = []
-    with mock.patch.object(IM, "_geteuid", lambda: 0), \
-            mock.patch.object(IM, "_chown", lambda p, u, g: calls.append((Path(p), u, g))), \
-            mock.patch.object(IM, "_fchown", lambda fd, u, g: calls.append(
-                (Path(os.readlink(f"/proc/self/fd/{fd}")), u, g))):
+    dropin = tmp_root / "etc/systemd/system/chirp-recorder@AB4EJ.service.d"
+    runner = RecordingRunner()
+    with mock.patch.object(IM, "_run_as", runner):
         apply_moves([Move("chirp-recorder", "AB4EJ", "AB4EJ-RX888", "AB4EJ-RX888", RADIOD)],
                     etc_root=tmp_root / "etc", var_root=tmp_root / "var",
                     run=fake_systemctl)
+    for src in (st, dropin):
+        s_ = src.stat()
+        assert [(u, g) for u, g, a in runner.calls if str(src) in a] \
+            == [(s_.st_uid, s_.st_gid)]
     new = tmp_root / "var/lib/chirp-recorder/AB4EJ-RX888"
-    got = {p for p, u, g in calls}
-    assert {new, new / "sub", new / "sub/f.dat", new / "cursor"} <= got
-    for path, u, g in calls:
-        if st.parent / "AB4EJ-RX888" in path.parents or path == new:
-            src = st / path.relative_to(new)
-            assert (u, g) == (src.stat().st_uid, src.stat().st_gid)
+    for p in (new, new / "sub", new / "sub/f.dat", new / "cursor"):
+        src = st / p.relative_to(new)
+        assert (p.stat().st_uid, p.stat().st_gid) == \
+            (src.stat().st_uid, src.stat().st_gid)
     assert (new / "sub/f.dat").stat().st_mode & 0o777 == 0o640
 
 
@@ -592,7 +594,9 @@ def test_resumed_move_is_not_also_retired(tmp_root, fake_systemctl, capsys):
     make_instance(tmp_root, "psk-recorder", "N8UR", RADIOD)
     make_instance(tmp_root, "psk-recorder", "N8UR-SIGMOND", RADIOD)
     mv = Move("psk-recorder", "N8UR", "N8UR-SIGMOND", "N8UR-SIGMOND", RADIOD)
-    d = _journal_for(tmp_root, mv.__dict__)
+    # The crashed run made every new path (a real journal lists them as
+    # fresh); a destination that stood before the move would abort it.
+    d = _journal_for(tmp_root, mv.__dict__, fresh=[0, 1, 2, 3, 4])
     (d / "x.json").rename(d / "psk-recorder@N8UR.json")
     assert _apply(smd, tmp_root, [Receiver("N8UR-SIGMOND", RADIOD)],
                   fake_systemctl) == 0
@@ -601,36 +605,34 @@ def test_resumed_move_is_not_also_retired(tmp_root, fake_systemctl, capsys):
 
 # ---- fix round 3 -------------------------------------------------------
 
-def _record_chowns():
-    calls = []
-    return calls, (mock.patch.object(IM, "_geteuid", lambda: 0),
-                   mock.patch.object(IM, "_chown",
-                                     lambda p, u, g: calls.append(Path(p))),
-                   mock.patch.object(IM, "_fchown", lambda fd, u, g: calls.append(
-                       Path(os.readlink(f"/proc/self/fd/{fd}")))))
-
-
 def test_symlink_in_state_dir_is_copied_as_a_link(tmp_root, fake_systemctl):
     make_instance(tmp_root, "chirp-recorder", "AB4EJ", RADIOD)
     outside = tmp_root / "outside.txt"
     outside.write_text("secret\n")
-    before = (outside.stat().st_uid, outside.stat().st_gid, outside.read_text())
+    before = (outside.stat().st_uid, outside.stat().st_gid,
+              outside.stat().st_mode, outside.read_text())
     st = tmp_root / "var/lib/chirp-recorder/AB4EJ"
     os.symlink(outside, st / "link")
     os.symlink(tmp_root / "etc", st / "dirlink")
-    calls, (a, b, c) = _record_chowns()
-    with a, b, c:
+    record = []
+    patches = _spy_root_ops(record)
+    for p in patches:
+        p.start()
+    try:
         steps = apply_moves(
             [Move("chirp-recorder", "AB4EJ", "AB4EJ-RX888", "AB4EJ-RX888", RADIOD)],
             etc_root=tmp_root / "etc", var_root=tmp_root / "var",
             run=fake_systemctl)
+    finally:
+        for p in reversed(patches):
+            p.stop()
     assert not [s for s in steps if s.startswith("ERROR")]
     new = tmp_root / "var/lib/chirp-recorder/AB4EJ-RX888"
     assert os.path.islink(new / "link") and os.readlink(new / "link") == str(outside)
     assert os.path.islink(new / "dirlink")
-    assert outside not in calls and tmp_root / "etc" not in calls
-    assert (outside.stat().st_uid, outside.stat().st_gid, outside.read_text()) == before
-    assert not any(str(p).startswith(str(outside)) for p in calls)
+    assert not [p for _, p in record if p == outside]
+    assert (outside.stat().st_uid, outside.stat().st_gid,
+            outside.stat().st_mode, outside.read_text()) == before
 
 
 def test_preexisting_symlink_at_destination_aborts(tmp_root, fake_systemctl):
@@ -658,8 +660,11 @@ def test_symlink_inside_destination_tree_aborts(tmp_root, fake_systemctl):
     st = tmp_root / "var/lib/chirp-recorder/AB4EJ"
     (st / "sub").mkdir()
     (st / "sub/f").write_text("x")
-    # a failing step mid-tree leaves nothing behind
-    with mock.patch.object(IM, "_copy_file", side_effect=[None, FileExistsError("x")]):
+    # a copy that fails mid-tree leaves nothing behind
+    def half(uid, gid, argv):
+        rc, out = RecordingRunner()(uid, gid, argv)
+        return (1, "failed half way") if argv[0] == "cp" else (rc, out)
+    with mock.patch.object(IM, "_run_as", half):
         steps = apply_moves(
             [Move("chirp-recorder", "AB4EJ", "AB4EJ-RX888", "AB4EJ-RX888", RADIOD)],
             etc_root=tmp_root / "etc", var_root=tmp_root / "var", run=fake_systemctl)
@@ -690,16 +695,289 @@ def test_legacy_equals_key_moves_and_uses_escaped_unit(tmp_root, fake_systemctl)
     assert ["stop", "meteor-scatter@AC0G\\x3dB4.service"] in fake_systemctl.calls
 
 
-def test_journal_keeps_the_strict_grammar_for_equals(tmp_root):
-    _journal_for(tmp_root, {"client": "meteor-scatter", "old_key": "AC0G=B4",
+def test_refused_key_names_instance_migrate(tmp_root, fake_systemctl):
+    steps = apply_moves([Move("psk-recorder", "bad/key", "N8UR", "N8UR", RADIOD)],
+                        etc_root=tmp_root / "etc", var_root=tmp_root / "var",
+                        run=fake_systemctl)
+    assert any("instance migrate" in s for s in steps)
+
+
+# ---- fix round 4: root never acts on a path a service user can write ------
+
+import subprocess                                               # noqa: E402
+
+MV_CHIRP = Move("chirp-recorder", "AB4EJ", "AB4EJ-RX888", "AB4EJ-RX888", RADIOD)
+
+
+class RecordingRunner:
+    """Stands in for the privilege-drop runner: records (uid, gid, argv),
+    runs ``before(argv)`` (a race, injected), then the command itself as
+    the test user."""
+
+    def __init__(self, before=None):
+        self.calls, self.before = [], before
+
+    def __call__(self, uid, gid, argv):
+        self.calls.append((uid, gid, list(argv)))
+        if self.before:
+            self.before(list(argv))
+        p = subprocess.run(list(argv), capture_output=True, text=True)
+        return p.returncode, p.stdout + p.stderr
+
+
+def _move_chirp(tmp_root, fake_systemctl, mv=MV_CHIRP):
+    return apply_moves([mv], etc_root=tmp_root / "etc",
+                       var_root=tmp_root / "var", run=fake_systemctl)
+
+
+def _errors(steps):
+    return [s for s in steps if s.startswith("ERROR")]
+
+
+def test_state_copy_runs_as_the_source_owner(tmp_root, fake_systemctl):
+    make_instance(tmp_root, "chirp-recorder", "AB4EJ", RADIOD)
+    st = tmp_root / "var/lib/chirp-recorder/AB4EJ"
+    (st / "sub").mkdir()
+    (st / "sub/f.dat").write_text("x")
+    os.chmod(st / "sub/f.dat", 0o640)
+    os.chmod(st, 0o2750)
+    runner = RecordingRunner()
+    with mock.patch.object(IM, "_run_as", runner):
+        steps = _move_chirp(tmp_root, fake_systemctl)
+    assert not _errors(steps)
+    s = st.stat()
+    copies = [c for c in runner.calls if c[2][0] == "cp" and str(st) in c[2]]
+    assert copies and all((u, g) == (s.st_uid, s.st_gid) for u, g, _ in copies)
+    assert all("--no-dereference" in a for _, _, a in copies)
+    new = tmp_root / "var/lib/chirp-recorder/AB4EJ-RX888"
+    assert (new / "sub/f.dat").stat().st_mode & 0o7777 == 0o640
+    assert new.stat().st_mode & 0o7777 == 0o2750
+    assert (new.stat().st_uid, new.stat().st_gid) == (s.st_uid, s.st_gid)
+    assert (new / "cursor").read_text() == "42\n"
+
+
+def test_default_runner_drops_to_the_owner_as_root():
+    seen = []
+
+    def fake_run(argv, **kw):
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    with mock.patch.object(IM, "_geteuid", lambda: 0), \
+            mock.patch.object(IM.subprocess, "run", fake_run):
+        rc, _ = IM._run_as(4242, 4343, ["cp", "-a", "x", "y"])
+    argv = seen[0]
+    assert rc == 0 and argv[0] == "setpriv"
+    assert "--reuid=4242" in argv and "--regid=4343" in argv
+    assert "--clear-groups" in argv or "--init-groups" in argv
+    assert argv[argv.index("--") + 1:] == ["cp", "-a", "x", "y"]
+
+
+def _resolve(p, dfd):
+    if isinstance(p, int):
+        return Path(os.readlink(f"/proc/self/fd/{p}"))
+    p = Path(os.fsdecode(p))
+    if not p.is_absolute() and isinstance(dfd, int):
+        return Path(os.readlink(f"/proc/self/fd/{dfd}")) / p
+    return p
+
+
+def _spy_root_ops(record):
+    """Patch the os calls that create, change or remove a path; record
+    every path they act on (resolved through dir_fd), then call through."""
+    wr = os.O_WRONLY | os.O_RDWR | os.O_CREAT
+    patches = []
+    for name in ("mkdir", "chmod", "utime", "chown", "lchown", "symlink",
+                 "rename", "replace", "unlink", "rmdir", "open"):
+        real = getattr(os, name)
+
+        def wrap(*a, _real=real, _n=name, **k):
+            if _n == "open":
+                flags = a[1] if len(a) > 1 else k.get("flags", 0)
+                if flags & wr:
+                    record.append((_n, _resolve(a[0], k.get("dir_fd"))))
+            elif _n == "symlink":
+                record.append((_n, _resolve(a[1], k.get("dir_fd"))))
+            elif _n in ("rename", "replace"):
+                record.append((_n, _resolve(a[0], k.get("src_dir_fd"))))
+                record.append((_n, _resolve(a[1], k.get("dst_dir_fd"))))
+            else:
+                record.append((_n, _resolve(a[0], k.get("dir_fd"))))
+            return _real(*a, **k)
+        patches.append(mock.patch.object(os, name, wrap))
+    return patches
+
+
+def test_root_makes_no_path_change_in_a_service_owned_state_tree(
+        tmp_root, fake_systemctl):
+    """The probe's race needs root to mkdir/chmod/utime/create inside the
+    service-owned /var/lib/<client>.  None of that may happen in this
+    (root) process: the copy belongs to a child running as the owner."""
+    make_instance(tmp_root, "chirp-recorder", "AB4EJ", RADIOD)
+    st = tmp_root / "var/lib/chirp-recorder/AB4EJ"
+    (st / "sub").mkdir()
+    (st / "sub/f").write_text("x")
+    record = []
+    patches = _spy_root_ops(record)
+    for p in patches:
+        p.start()
+    try:
+        steps = _move_chirp(tmp_root, fake_systemctl)
+    finally:
+        for p in reversed(patches):
+            p.stop()
+    assert not _errors(steps)
+    service = tmp_root / "var/lib/chirp-recorder"
+    hits = [(n, p) for n, p in record
+            if p == service or service in p.parents]
+    assert hits == []
+    assert (service / "AB4EJ-RX888/sub/f").read_text() == "x"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="needs an unprivileged user")
+def test_destination_swapped_for_a_link_before_the_copy_changes_nothing_outside(
+        tmp_root, fake_systemctl):
+    """The probe's race, through the seam between the checks and the copy:
+    the service user swaps NEW for a link to a root-owned directory.  The
+    copy runs as that user, so it can create, chmod or chown nothing there."""
+    make_instance(tmp_root, "chirp-recorder", "AB4EJ", RADIOD)
+    st = tmp_root / "var/lib/chirp-recorder/AB4EJ"
+    (st / "ld.so.preload").write_text("/evil.so\n")
+    os.chmod(st, 0o777)
+    outside = Path("/etc")
+    before = (os.stat(outside).st_mode, os.stat(outside).st_uid,
+              sorted(os.listdir(outside)))
+    dst = tmp_root / "var/lib/chirp-recorder/AB4EJ-RX888"
+
+    def swap(argv):
+        if argv[0] == "cp" and str(dst) in argv and not os.path.lexists(dst):
+            os.symlink(outside, dst)
+    runner = RecordingRunner(before=swap)
+    with mock.patch.object(IM, "_run_as", runner):
+        steps = _move_chirp(tmp_root, fake_systemctl)
+    assert _errors(steps)
+    assert (os.stat(outside).st_mode, os.stat(outside).st_uid,
+            sorted(os.listdir(outside))) == before
+    assert (tmp_root / "etc/chirp-recorder/AB4EJ.toml").exists()
+
+
+def test_env_swapped_for_a_link_before_the_rewrite_is_not_written_through(
+        tmp_root, fake_systemctl):
+    make_instance(tmp_root, "wspr-recorder", "N8UR", RADIOD)
+    outside = tmp_root / "outside.env"
+    outside.write_text("precious\n")
+    new_env = tmp_root / "etc/wspr-recorder/env/N8UR-SIGMOND.env"
+    real = IM.rewrite_env
+
+    def racing(*a, **k):
+        if os.path.lexists(new_env):
+            os.unlink(new_env)
+        os.symlink(outside, new_env)
+        return real(*a, **k)
+    with mock.patch.object(IM, "rewrite_env", racing):
+        apply_moves([Move("wspr-recorder", "N8UR", "N8UR-SIGMOND",
+                          "N8UR-SIGMOND", RADIOD)],
+                    etc_root=tmp_root / "etc", var_root=tmp_root / "var",
+                    run=fake_systemctl)
+    assert outside.read_text() == "precious\n"
+    if os.path.lexists(new_env) and not new_env.is_symlink():
+        assert "WD_RECEIVER_CALL=N8UR-SIGMOND" in new_env.read_text()
+
+
+def test_config_swapped_for_a_link_before_the_rewrite_is_not_written_through(
+        tmp_root, fake_systemctl):
+    make_instance(tmp_root, "wspr-recorder", "N8UR", RADIOD)
+    outside = tmp_root / "outside.toml"
+    outside.write_text("precious\n")
+    new_cfg = tmp_root / "etc/wspr-recorder/N8UR-SIGMOND.toml"
+    real = IM.tomllib.loads
+
+    def racing(text, *a, **k):
+        out = real(text, *a, **k)
+        if 'reporter_id = "N8UR-SIGMOND"' in text and not new_cfg.is_symlink():
+            if os.path.lexists(new_cfg):
+                os.unlink(new_cfg)
+            os.symlink(outside, new_cfg)
+        return out
+    with mock.patch.object(IM.tomllib, "loads", racing):
+        apply_moves([Move("wspr-recorder", "N8UR", "N8UR-SIGMOND",
+                          "N8UR-SIGMOND", RADIOD)],
+                    etc_root=tmp_root / "etc", var_root=tmp_root / "var",
+                    run=fake_systemctl)
+    assert outside.read_text() == "precious\n"
+
+
+def test_symlinked_env_source_is_refused(tmp_root, fake_systemctl):
+    make_instance(tmp_root, "wspr-recorder", "N8UR", RADIOD)
+    outside = tmp_root / "outside.env"
+    outside.write_text("WD_RECEIVER_CALL=N8UR\n")
+    env = tmp_root / "etc/wspr-recorder/env/N8UR.env"
+    env.unlink()
+    os.symlink(outside, env)
+    steps = apply_moves([Move("wspr-recorder", "N8UR", "N8UR-SIGMOND",
+                              "N8UR-SIGMOND", RADIOD)],
+                        etc_root=tmp_root / "etc", var_root=tmp_root / "var",
+                        run=fake_systemctl)
+    assert _errors(steps)
+    assert outside.read_text() == "WD_RECEIVER_CALL=N8UR\n"
+    assert (tmp_root / "etc/wspr-recorder/N8UR.toml").exists()
+    assert not (tmp_root / "etc/wspr-recorder/N8UR-SIGMOND.toml").exists()
+
+
+def test_real_preexisting_state_dir_warns_and_aborts(tmp_root, fake_systemctl):
+    make_instance(tmp_root, "chirp-recorder", "AB4EJ", RADIOD)
+    dst = tmp_root / "var/lib/chirp-recorder/AB4EJ-RX888"
+    dst.mkdir()
+    (dst / "stale").write_text("old\n")
+    steps = _move_chirp(tmp_root, fake_systemctl)
+    assert any(s.startswith("WARN") and str(dst) in s for s in steps)
+    assert _errors(steps)
+    assert sorted(os.listdir(dst)) == ["stale"]
+    assert (tmp_root / "etc/chirp-recorder/AB4EJ.toml").exists()
+    assert not (tmp_root / "etc/chirp-recorder/AB4EJ-RX888.toml").exists()
+
+
+def test_journal_accepts_an_equals_key_so_the_crash_resumes(tmp_root):
+    mv = {"client": "meteor-scatter", "old_key": "AC0G=B4",
+          "new_key": "AC0G-B4", "new_reporter_id": "AC0G/B4", "radiod": RADIOD}
+    _journal_for(tmp_root, mv)
+    errs = []
+    assert pending_moves(tmp_root / "var", errors=errs) == [Move(**mv)]
+    assert errs == []
+
+
+def test_journal_still_refuses_a_backslash_key(tmp_root):
+    _journal_for(tmp_root, {"client": "meteor-scatter", "old_key": "AC0G\\x3dB4",
                             "new_key": "AC0G-B4", "new_reporter_id": "AC0G/B4",
                             "radiod": RADIOD})
     errs = []
     assert pending_moves(tmp_root / "var", errors=errs) == [] and errs
 
 
-def test_refused_key_names_instance_migrate(tmp_root, fake_systemctl):
-    steps = apply_moves([Move("psk-recorder", "bad/key", "N8UR", "N8UR", RADIOD)],
-                        etc_root=tmp_root / "etc", var_root=tmp_root / "var",
-                        run=fake_systemctl)
-    assert any("instance migrate" in s for s in steps)
+def test_backup_root_swapped_for_a_link_is_refused(tmp_root, fake_systemctl):
+    """/var/lib/sigmond is root:sigmond 2775, so a group member can plant a
+    link where the backups go; root must not write through it."""
+    make_instance(tmp_root, "chirp-recorder", "AB4EJ", RADIOD)
+    outside = tmp_root / "outside"
+    outside.mkdir()
+    (tmp_root / "var/lib/sigmond").mkdir(parents=True, exist_ok=True)
+    os.symlink(outside, tmp_root / "var" / BACKUP_DIR[len("var/"):])
+    steps = _move_chirp(tmp_root, fake_systemctl)
+    assert _errors(steps)
+    assert list(outside.iterdir()) == []
+    assert (tmp_root / "etc/chirp-recorder/AB4EJ.toml").exists()
+
+
+def test_rollback_removes_the_new_state_as_its_owner(tmp_root, fake_systemctl):
+    make_instance(tmp_root, "chirp-recorder", "AB4EJ", RADIOD)
+    fake_systemctl.fail.add(("enable", "chirp-recorder@AB4EJ-RX888.service"))
+    runner = RecordingRunner()
+    with mock.patch.object(IM, "_run_as", runner):
+        steps = _move_chirp(tmp_root, fake_systemctl)
+    assert _errors(steps)
+    new = tmp_root / "var/lib/chirp-recorder/AB4EJ-RX888"
+    assert not os.path.lexists(new)
+    parent = new.parent.stat()
+    rms = [c for c in runner.calls if c[2][0] == "rm" and str(new) in c[2]]
+    assert rms and all((u, g) == (parent.st_uid, parent.st_gid)
+                       for u, g, _ in rms)
+    assert (tmp_root / "var/lib/chirp-recorder/AB4EJ/cursor").read_text() == "42\n"
