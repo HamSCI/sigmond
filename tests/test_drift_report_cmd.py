@@ -307,7 +307,7 @@ def test_accept_is_exclusive_with_apply_json_verify(other):
     assert cm.value.code == 2
 
 
-def test_apply_enables_the_drift_timer_and_starts_nothing(tmp_path):
+def test_apply_enables_and_starts_the_drift_timer(tmp_path):
     import subprocess
     unit_dir = tmp_path / "units"
     unit_dir.mkdir()
@@ -322,9 +322,7 @@ def test_apply_enables_the_drift_timer_and_starts_nothing(tmp_path):
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     steps = smd._align_own_units(repo, unit_dir=unit_dir, run=fake_run)
-    assert ["systemctl", "enable", "sigmond-drift.timer"] in calls
-    assert not any(c[:2] in (["systemctl", "start"],) or "--now" in c
-                   for c in calls)
+    assert ["systemctl", "enable", "--now", "sigmond-drift.timer"] in calls
     assert [s.outcome for s in steps] == ["installed"]
 
 

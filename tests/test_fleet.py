@@ -12,7 +12,12 @@ thing it could not parse.
 
 import pytest
 
-from sigmond.fleet import DEFAULT_FLEET_PATH, Host, load_fleet
+from sigmond.fleet import (DEFAULT_FLEET_PATH, READ_ONLY_COMMANDS, Host,
+                           load_fleet, _CHECK_JSON_CMD)
+
+
+def test_the_drift_check_is_a_whitelisted_read():
+    assert _CHECK_JSON_CMD in READ_ONLY_COMMANDS
 
 
 class TestLoadFleet:
@@ -874,7 +879,7 @@ class TestFleetUpdateDryRun:
         for _host, command in run.calls:
             assert '--apply' not in command
             # the end-of-run drift check is a read, named in READ_ONLY_COMMANDS
-            assert command in UPDATE_COMMANDS + ('smd check --json',)
+            assert command in UPDATE_COMMANDS + (_CHECK_JSON_CMD,)
 
     def test_a_current_host_produces_an_empty_plan(self):
         fleet = _fleet(Host(name='a', reach='r', canary=True))
@@ -959,7 +964,7 @@ class TestCanaryThenWave:
         fleet_update(fleet, run, apply=True)
 
         order = [(h, c) for h, c in run.calls
-                 if c not in ('true', 'smd check --json')]
+                 if c not in ('true', _CHECK_JSON_CMD)]
         assert ('canary', 'smd update --apply') in order
         canary_verified = max(i for i, (h, c) in enumerate(order)
                               if h == 'canary')
@@ -976,7 +981,7 @@ class TestCanaryThenWave:
         assert result.applied is True
         assert result.verified is True
         assert [c for _h, c in run.calls
-                if c != 'smd check --json'][-1] == 'smd update'
+                if c != _CHECK_JSON_CMD][-1] == 'smd update'
 
     def test_every_wave_host_is_updated_once_the_canary_holds(self):
         fleet = _fleet(Host(name='canary', reach='r', canary=True),

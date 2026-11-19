@@ -330,20 +330,45 @@ class HostStatus:
     release: Optional[str] = None
     faults: Optional[int] = None
     drift_count: Optional[int] = None
+    #: Hours since the report was written, when that passes the 36 h
+    #: limit `smd check` uses; faults and drift_count stay None then.
+    drift_stale_h: Optional[int] = None
 
 
-def _drift_summary(host, run) -> dict:
+#: A drift report older than this no longer speaks for the station
+#: (the same limit `smd check` applies).
+DRIFT_STALE_S = 36 * 3600
+
+
+def _report_age_s(doc: dict, now=None) -> Optional[float]:
+    import datetime as _dt
+    try:
+        made = _dt.datetime.strptime(str(doc.get('generated_at', '')),
+                                     '%Y-%m-%dT%H:%M:%SZ'
+                                     ).replace(tzinfo=_dt.timezone.utc)
+    except ValueError:
+        return None
+    now = now if now is not None else _dt.datetime.now(
+        _dt.timezone.utc).timestamp()
+    return now - made.timestamp()
+
+
+def _drift_summary(host, run, now=None) -> dict:
     """release, faults and drift counts from the host's drift.json.
-    Empty when the host has no readable report."""
+    Empty when the host has no readable report (no file, no JSON object, or
+    no ``items`` list).  A report older than 36 h gives only its age."""
     import json as _json
     try:
         r = run(host, _DRIFT_FILE_CMD)
         doc = _json.loads(r.out) if r.rc == 0 else None
     except Exception:                       # noqa: BLE001
         return {}
-    if not isinstance(doc, dict):
+    if not isinstance(doc, dict) or not isinstance(doc.get('items'), list):
         return {}
-    items = [i for i in (doc.get('items') or []) if isinstance(i, dict)]
+    age = _report_age_s(doc, now)
+    if age is not None and age > DRIFT_STALE_S:
+        return {'drift_stale_h': int(age // 3600)}
+    items = [i for i in doc['items'] if isinstance(i, dict)]
     n_fault = sum(1 for i in items if i.get('severity') == 'fault')
     rel = doc.get('release')
     return {'release': str(rel) if rel else None, 'faults': n_fault,
@@ -547,7 +572,9 @@ def format_status(statuses: list) -> str:
             lines.append(f'{name}  sigmond {sha}  {behind}  '
                          f'[no manifest — unblessed]')
         if s.reachable and s.has_sigmond:
-            if s.faults is None:
+            if s.drift_stale_h is not None:
+                lines[-1] += f'  [drift report stale: {s.drift_stale_h} h old]'
+            elif s.faults is None:
                 lines[-1] += '  [no drift report]'
             else:
                 lines[-1] += (f'  [release {s.release or "?"}  '
@@ -873,32 +900,49 @@ class HostUpdate:
     behind: Optional[int] = None
     error: Optional[str] = None
     open_fault: bool = False
+    drift_unknown: bool = False
 
 
-def _has_open_fault(host, run) -> bool:
-    """True when `smd check --json` reports the drift line as FAIL.
-    The check exits nonzero on a fault, so the exit code does not count;
-    only a parsed drift line does.  Unreadable output counts as no fault."""
+def _drift_answer(host, run):
+    """True when `smd check --json` reports the drift line as FAIL, False
+    when it reports ok, None when the check cannot say: an older smd with
+    no drift line, a stale report (WAIT), no report yet, or unreadable
+    output.  The check exits nonzero on a fault, so the exit code does not
+    count; only a parsed drift line does."""
     import json as _json
     try:
         doc = _json.loads(run(host, _CHECK_JSON_CMD).out)
         lines = doc.get('lines') or []
     except Exception:                       # noqa: BLE001
-        return False
-    return any(isinstance(ln, dict) and ln.get('label') == 'drift'
-               and ln.get('mark') == 'FAIL' for ln in lines)
+        return None
+    for ln in lines:
+        if isinstance(ln, dict) and ln.get('label') == 'drift':
+            mark = ln.get('mark')
+            if mark == 'FAIL':
+                return True
+            if mark == 'ok':
+                return False
+            return None
+    return None
 
 
 def _name_open_faults(results: list, run) -> list:
-    """Mark each host that finished the run reachable with a drift fault.
-    Read-only, and it never changes a result's verdict, so the roll goes on."""
+    """Mark each host that finished the run reachable with its drift
+    answer.  Read-only, and it never changes a result's verdict, so the
+    roll goes on.  Frozen, halted, unreachable and sigmond-less hosts get
+    no check and appear in neither list."""
     out = []
     for r in results:
-        if (r.skipped or r.halted or not r.reachable or not r.has_sigmond
-                or not _has_open_fault(r.host, run)):
+        if r.skipped or r.halted or not r.reachable or not r.has_sigmond:
             out.append(r)
-        else:
+            continue
+        answer = _drift_answer(r.host, run)
+        if answer is True:
             out.append(replace(r, open_fault=True))
+        elif answer is None:
+            out.append(replace(r, drift_unknown=True))
+        else:
+            out.append(r)
     return out
 
 
@@ -1185,10 +1229,16 @@ def format_update(results: list) -> str:
             for line in r.plan.splitlines():
                 lines.append(f'    {line}')
     faulted = [r.host.name for r in results if r.open_fault]
-    if faulted:
+    unknown = [r.host.name for r in results if r.drift_unknown]
+    if faulted or unknown:
         lines.append('')
+    if faulted:
         lines.append(f'open faults: {", ".join(faulted)}  '
                      f'(smd check on each station names the fix)')
+    if unknown:
+        lines.append(f'drift unknown: {", ".join(unknown)}  '
+                     f'(no current drift answer: older smd, stale or missing '
+                     f'report)')
     return '\n'.join(lines)
 
 

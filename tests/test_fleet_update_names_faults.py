@@ -1,6 +1,7 @@
 """`smd fleet update` names stations with open drift faults and keeps
 rolling; `smd fleet status` shows release, faults and drift per station."""
 
+import datetime
 import json
 
 from sigmond.fleet import (CURRENT_SENTINEL, Host, RunResult, fleet_status,
@@ -79,3 +80,57 @@ def test_fleet_status_without_a_report_says_so():
     [st] = fleet_status(_fleet('b4'), _runner(script))
     assert st.faults is None
     assert 'no drift report' in format_status([st])
+
+
+def _stamp(hours_ago):
+    t = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+        hours=hours_ago)
+    return t.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def _status_with(doc):
+    script = {('b4', 'true'): _ok(), ('b4', 'smd version'): _ok(VERSION),
+              ('b4', DRIFT): _ok(json.dumps(doc))}
+    [st] = fleet_status(_fleet('b4'), _runner(script))
+    return st
+
+
+def test_a_stale_report_shows_its_age_not_counts():
+    st = _status_with({'release': '3.94', 'generated_at': _stamp(120),
+                       'items': []})
+    assert st.faults is None and st.drift_stale_h >= 119
+    out = format_status([st])
+    assert 'stale' in out and 'faults 0' not in out
+
+
+def test_a_fresh_report_shows_counts():
+    st = _status_with({'release': '3.94', 'generated_at': _stamp(2),
+                       'items': []})
+    assert st.faults == 0 and st.drift_stale_h is None
+
+
+def test_an_empty_object_is_no_report():
+    st = _status_with({})
+    assert st.faults is None
+    assert 'no drift report' in format_status([st])
+    st = _status_with({'release': '3.94'})
+    assert st.faults is None
+
+
+def test_fleet_update_lists_stations_whose_check_cannot_say():
+    script = {}
+    for n in ('a', 'b', 'c', 'd'):
+        script[(n, 'true')] = _ok()
+        script[(n, 'smd update')] = _ok(CURRENT_SENTINEL)
+        script[(n, 'smd version')] = _ok(VERSION)
+    script[('a', CHECK)] = RunResult(1, _check_doc(True), '')
+    # b: older smd, no drift line
+    script[('b', CHECK)] = _ok(json.dumps({'lines': [], 'verdict': 'PASS'}))
+    # c: stale report, line is WAIT
+    script[('c', CHECK)] = RunResult(2, json.dumps({'lines': [
+        {'label': 'drift', 'mark': 'wait', 'text': 'stale'}]}), '')
+    # d: check prints nothing
+    text = format_update(fleet_update(_fleet('a', 'b', 'c', 'd'),
+                                      _runner(script)))
+    assert 'open faults: a' in text
+    assert 'drift unknown: b, c, d' in text

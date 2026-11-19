@@ -5,7 +5,7 @@ import contextlib
 import io
 import json
 import types
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -203,3 +203,10 @@ def test_reason_without_accept_is_refused():
     with contextlib.redirect_stdout(out):
         assert smd.cmd_align(args) == 2
     assert "only apply with --accept" in out.getvalue()
+
+
+def test_align_accept_says_when_until_is_clamped(tmp_path, monkeypatch):
+    far = (datetime.now(timezone.utc) + timedelta(days=90)).date().isoformat()
+    rc, out = _accept(tmp_path, monkeypatch, test=True, until=far)
+    assert rc == 0, out
+    assert "clamped to" in out and "30-day limit" in out

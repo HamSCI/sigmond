@@ -9502,10 +9502,10 @@ _ALIGN_LOCATION_TIMER = 'sigmond-location-check.timer'
 def _align_own_units(sigmond_repo, *, unit_dir=Path('/etc/systemd/system'),
                      run=None) -> list:
     """Install sigmond's own units (install.sh does this once; updates never
-    rerun it), then daemon-reload when any landed.  Enables only the daily
-    drift timer (never starts it: the calendar does that).  It also enables and
-    starts the location-check timer on every host; its service stays inert
-    without /run/gpsdo."""
+    rerun it), then daemon-reload when any landed.  Enables and starts the
+    daily drift timer and the location-check timer (an enabled timer that was
+    never started does not fire until a reboot).  The location-check service
+    stays inert without /run/gpsdo."""
     from sigmond import align_apply
     from sigmond.drift import units as drift_units
     run = run or subprocess.run
@@ -9525,8 +9525,9 @@ def _align_own_units(sigmond_repo, *, unit_dir=Path('/etc/systemd/system'),
         steps.append(align_apply.Step('sigmond-units', 'installed',
                                       ', '.join(wrote)))
     if (Path(unit_dir) / _ALIGN_DRIFT_TIMER).is_file():
-        r = _align_run(['systemctl', 'enable', _ALIGN_DRIFT_TIMER], run=run,
-                       timeout=60, action=f'systemctl enable {_ALIGN_DRIFT_TIMER}')
+        r = _align_run(['systemctl', 'enable', '--now', _ALIGN_DRIFT_TIMER],
+                       run=run, timeout=60,
+                       action=f'systemctl enable --now {_ALIGN_DRIFT_TIMER}')
         if r.returncode != 0:
             # Not a blocking step: the report still works from the CLI.
             print(f'  could not enable {_ALIGN_DRIFT_TIMER}: '
@@ -10028,6 +10029,10 @@ def _align_accept(args) -> int:
     except ValueError as e:
         print(f'smd align --accept: {e}')
         return 2
+    if until is not None and exc.until != until:
+        print(f'smd align --accept: --until {until.isoformat()} is past the '
+              f'{drift_exceptions.MAX_DAYS[exc.kind]}-day limit; '
+              f'clamped to {exc.until.isoformat()}')
     kind = 'temporary test' if exc.kind == 'test' else 'standing exception'
     print(f'recorded in {path}: {exc.key} accepted as a {kind} by {exc.by}, '
           f'{exc.start.isoformat()} to {exc.until.isoformat()}: {exc.reason}')
