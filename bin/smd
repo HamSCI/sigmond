@@ -8308,7 +8308,7 @@ def _reads_radiod(component, catalog) -> bool:
 
 
 def _align_staleness(base, services: dict, catalog=None, *, run=subprocess.run,
-                     local=None) -> dict:
+                     local=None, rebuilt=()) -> dict:
     """What an alignment has left stale on this station right now — the
     inputs align_live needs, read from the station itself, so a run finds
     restarts an earlier run left undone.  Read-only: `systemctl show`,
@@ -8324,7 +8324,11 @@ def _align_staleness(base, services: dict, catalog=None, *, run=subprocess.run,
       started; otherwise None (final review / P1).  A same-bytes rebuild by
       `smd update` or `smd install --force` bumps the binary's mtime alone
       and must not restart radiod.  A build an earlier run left
-      un-restarted is still caught: its checkout moved too.
+      un-restarted is still caught: its checkout moved too.  ``rebuilt``
+      names what THIS run rebuilt because its binary trailed the checkout
+      (`align_apply.NATIVE_COMPONENTS`): those bytes differ, so radiod's
+      binary mtime counts whether or not the checkout moved, and
+      ka9q-web's moved time is its installed binary's mtime.
     * ``radiod_consumers``: the running services whose catalog entry
       ``requires`` ka9q-radio — the declaration the installer already uses
       to order radiod's consumers after lan.target.  A component absent
@@ -8365,9 +8369,17 @@ def _align_staleness(base, services: dict, catalog=None, *, run=subprocess.run,
         built = _align_radiod_built_at()
         checkout = _align_head_moved_at(Path(base) / RADIOD)
         start = started_at.get(RADIOD)
-        if start is not None and (checkout is None or checkout <= start):
+        if (RADIOD not in rebuilt and start is not None
+                and (checkout is None or checkout <= start)):
             built = None      # only the binary moved: a same-bytes rebuild
         moved_at[RADIOD] = built
+    if 'ka9q-web' in rebuilt and 'ka9q-web' in services:
+        try:
+            web_at = _KA9Q_WEB_BIN.stat().st_mtime
+        except OSError:
+            web_at = None
+        if web_at is not None:
+            moved_at['ka9q-web'] = max(moved_at.get('ka9q-web') or 0.0, web_at)
     # A checkout the site manages by hand (site-profile [components]
     # locally_managed) restarts nothing: whoever moves or rebuilds it
     # restarts what they choose.  Unknown, never stale (ruling 7's reading).
@@ -9002,6 +9014,57 @@ def _align_build(name: str, repo: Path) -> int:
     return 0 if _build_ka9q_radio(repo, force=True) else 1
 
 
+def _align_native_stale(name: str, repo: Path) -> 'str | None':
+    """`Ctx.native_stale`: why the installed ka9q-radio or ka9q-web binary
+    trails its checkout, or None.  Read-only, so the dry run asks it too.
+
+    The build record (/var/lib/sigmond/build-manifest/<name>.toml) names
+    the commit the last real build compiled; one that differs from HEAD is
+    stale.  With no record, ka9q-web is stale (Task 1: the builder writes
+    one only after a real build).  ka9q-radio with no record is stale only
+    when /usr/local/sbin/radiod is older than HEAD's commit time: AC0G-B4,
+    2026-11-19, ran a radiod built 2026-10-25 from a checkout at a
+    2026-11-12 commit, and align called it current.  A ka9q-radio the site
+    manages by hand ([components] locally_managed) is never stale here."""
+    from sigmond.align_apply import NATIVE_COMPONENTS
+    if name not in NATIVE_COMPONENTS or name in _locally_managed():
+        return None
+    if not (Path(repo) / '.git').exists():
+        return None       # no checkout here: nothing to build from
+    head = _git_head(repo)
+    if not head:
+        return None
+    built = _manifest_source_sha(name)
+    if built:
+        if head.startswith(built) or built.startswith(head):
+            return None
+        return f'binary built from {built[:7]}, checkout at {head[:7]}'
+    if name != 'ka9q-radio':
+        return 'no build record'
+    binary_at = _align_radiod_built_at()
+    if binary_at is None:
+        return None       # no radiod here: nothing runs a stale binary
+    r = _run(['git', '-c', f'safe.directory={repo}', '-C', str(repo),
+              'log', '-1', '--format=%ct', 'HEAD'])
+    try:
+        head_at = float((r.stdout or '').strip()) if r.returncode == 0 else None
+    except ValueError:
+        head_at = None
+    if head_at is not None and binary_at < head_at:
+        return 'no build record'
+    return None
+
+
+def _align_native_build(name: str, repo: Path) -> int:
+    """`Ctx.native_build`: rebuild ka9q-radio or ka9q-web in place, forced.
+    Never restarts anything: `_align_make_live` tells the restart stage
+    what was rebuilt, and it restarts radiod (first) or ka9q-web."""
+    if name == 'ka9q-radio':
+        return _align_build(name, repo)
+    print(f'  building {name} ...')
+    return 0 if _build_ka9q_web_with_onion(repo, force=True) else 1
+
+
 def _align_deploy_build(name: str, repo: Path, base) -> 'int | None':
     """`Ctx.deploy_build`: a component with no install.sh but a deploy.toml
     [build] (station-web, hamsci-physics) builds as root through
@@ -9393,7 +9456,8 @@ def _align_apply(args) -> int:
             run_install=lambda repo: _align_install_and_repair(repo, base),
             say=print, prefetched=prefetched,
             chown=_align_chown, build=_align_build,
-            deploy_build=lambda name, repo: _align_deploy_build(name, repo, base))
+            deploy_build=lambda name, repo: _align_deploy_build(name, repo, base),
+            native_stale=_align_native_stale, native_build=_align_native_build)
 
         passthrough = ['--base', str(base)]
         if getattr(args, 'allow_rollback', False):
@@ -9591,8 +9655,10 @@ def _align_print_steps(steps) -> None:
 def _align_print_summary(steps) -> None:
     outcomes = ('moved', 'installed', 'left', 'refused', 'failed', 'skipped', 'restarted')
     counts = {o: sum(1 for s in steps if s.outcome == o) for o in outcomes}
+    rebuilt = sum(1 for s in steps if getattr(s, 'built', False))
     fetched_mib = sum(s.bytes or 0 for s in steps) / (1024 * 1024)
     print(f"  summary: moved {counts['moved']}, installed {counts['installed']}, "
+          f"rebuilt {rebuilt}, "
           f"left {counts['left']}, refused {counts['refused']}, "
           f"failed {counts['failed']}, skipped {counts['skipped']}, "
           f"restarted {counts['restarted']}, fetched {fetched_mib:.1f} MiB")
@@ -9726,9 +9792,13 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
     steps = steps + [routing_step]
     routing_failed = routing_step.outcome in _ALIGN_BLOCKING
 
+    # What this run rebuilt in place (a native binary that trailed its
+    # checkout): the restart stage below restarts what runs it.
+    rebuilt = {s.component for s in move_steps
+               if getattr(s, 'built', False) and s.component in align_apply.NATIVE_COMPONENTS}
     try:
         services = _align_services()
-        staleness = _align_staleness(base, services, catalog or None)
+        staleness = _align_staleness(base, services, catalog or None, rebuilt=rebuilt)
     except Exception as exc:
         # Recorded already: the alignment itself happened. Only the
         # restarts are unknown, so nothing restarts and the run exits 1.
@@ -10185,6 +10255,7 @@ def cmd_align(args) -> int:
     ahead_components = set()  # 'move' items commit_distance found already
                                # ahead of the target — left, not moved
     diverged_components = set()  # 'move' items commit_distance found diverged
+    rebuilds = set()          # 'current' natives whose binary trails its source
     for it in plan:
         if it.status == 'current':
             line = f'{(it.live or "")[:8]:<8}              current'
@@ -10236,10 +10307,15 @@ def cmd_align(args) -> int:
                 line = f'{"":8} -> {it.target[:8]}   {it.status}'
             else:
                 line = it.status
+        why_rebuild = (_align_native_stale(it.component, Path(base) / it.component)
+                       if it.status == 'current' else None)
         if it.component == align.RADIOD and it.status == 'move':
             from sigmond import align_live
             line += (f'   — REBUILDS and RESTARTS radiod — recording gap of about '
                      f'{align_live.RADIOD_GAP_ESTIMATE_S} s')
+        elif why_rebuild:
+            rebuilds.add(it.component)
+            line += f'   {align.native_rebuild_note(it.component, why_rebuild)}'
         elif it.note:
             line += f'   {it.note}'
         print(f'    {it.component:<16} {line}')
@@ -10256,7 +10332,7 @@ def cmd_align(args) -> int:
         print(f"    {f['path']:<40} {f['note'] or f['status']}")
     moving = [it.component for it in plan
               if it.status in ('move', 'missing') and it.component not in ahead_components
-              and it.component not in skip_missing]
+              and it.component not in skip_missing] + sorted(rebuilds)
     # The catalog cmd_align already read (empty under --no-cost, and then
     # _align_staleness reads it itself: the kinds decide radiod consumers).
     stale_now = _align_print_restarts(base, moving, catalog=catalog)
@@ -10272,7 +10348,8 @@ def cmd_align(args) -> int:
     # station never ran it (KJ6MKI, 2026-11-11).
     counts['skipped'] = len(skip_missing)
     counts['missing'] -= counts['skipped']
-    print(f"  summary: {counts['move']} to move, {counts['ahead']} left ahead, "
+    print(f"  summary: {counts['move']} to move, {len(rebuilds)} to rebuild, "
+          f"{counts['ahead']} left ahead, "
           f"{counts['refuse']} refused, {counts['missing']} to install, "
           f"{counts['skipped']} not on this station (skipped), "
           f"{counts['stray']} stray, "
@@ -10295,8 +10372,8 @@ def cmd_align(args) -> int:
         sink['report'], sink['plan'] = report, plan
     else:
         _align_print_drift(report)
-    pending = (counts['move'] or counts['refuse'] or counts['missing'] or stale or unverified
-               or stale_now)
+    pending = (counts['move'] or rebuilds or counts['refuse'] or counts['missing'] or stale
+               or unverified or stale_now)
     return 1 if pending else 0
 
 

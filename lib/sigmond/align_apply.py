@@ -255,6 +255,13 @@ INSTALL_TRIGGERS = {"pyproject.toml", "uv.lock", "install.sh", "scripts/install.
 # use in _move.
 BUILT_COMPONENTS = {RADIOD}
 
+# Compiled components whose installed binary can trail a checkout that
+# already sits at the pin: `smd update`, a hand pull, or a failed build
+# moved the source and nothing rebuilt it (AC0G-B4, 2026-11-19: radiod
+# built 2026-10-25, ka9q-radio checkout at a 2026-11-12 commit).  apply_plan
+# asks Ctx.native_stale about each one, and Ctx.native_build rebuilds it.
+NATIVE_COMPONENTS = (RADIOD, "ka9q-web")
+
 
 def ensure_pin_excluded(repo) -> bool:
     """Add `.pin` to `.git/info/exclude` when it's not already listed there,
@@ -356,6 +363,13 @@ class Ctx:
     # build, no [build], or the build stamp names HEAD already), else the
     # build's exit code.  See sigmond.build_stamp.
     deploy_build: Optional[Callable[[str, Path], Optional[int]]] = None
+    # NATIVE_COMPONENTS: why the installed binary trails the checkout
+    # ("binary built from 1a2b3c4, checkout at 5d6e7f8", "no build
+    # record"), or None when it does not (or the site manages it by hand).
+    native_stale: Optional[Callable[[str, Path], Optional[str]]] = None
+    # Rebuild one NATIVE_COMPONENT in place; 0 = ok.  Never restarts
+    # anything: the CLI's restart stage does that, told what was rebuilt.
+    native_build: Optional[Callable[[str, Path], int]] = None
 
 
 @dataclass
@@ -593,13 +607,48 @@ def _move(it: Item, ctx: Ctx) -> Step:
                 fetched, built=built)
 
 
+def _native_rebuild(step: Step, ctx: Ctx) -> Step:
+    """Rebuild a NATIVE_COMPONENT whose binary trails its checkout.
+
+    The step keeps its outcome and gains ``built``, which tells the restart
+    stage to restart what runs the binary.  A failed build fails the step:
+    the apply exits nonzero and nothing restarts, so the running binary
+    stays.  The checkout stays where it is; the build record still names
+    the old commit, so the next run tries again."""
+    name = step.component
+    if name not in NATIVE_COMPONENTS or ctx.native_stale is None or ctx.native_build is None:
+        return step
+    repo = ctx.base / name
+    try:
+        why = ctx.native_stale(name, repo)
+    except Exception as e:  # noqa: BLE001 -- a reader is foreign code
+        return Step(name, "failed", f"cannot tell whether its binary is current: {e}",
+                    step.bytes)
+    if not why:
+        return step
+    ctx.say(f"  {name}: {why} -- rebuilding ...")
+    try:
+        rc = ctx.native_build(name, repo)
+    except Exception as e:  # noqa: BLE001 -- a builder is foreign code
+        rc, err = 1, f"build raised: {e}"
+    else:
+        err = f"build exit {rc}" if rc else ""
+    head = f"{step.detail}; " if step.detail else ""
+    if err:
+        return Step(name, "failed",
+                    f"{head}{why}; rebuild failed ({err}) -- the installed binary stays",
+                    step.bytes)
+    return Step(name, step.outcome, f"{head}{why}; rebuilt", step.bytes, built=True)
+
+
 def _build_current(step: Step, it: Item, ctx: Ctx) -> Step:
     """A `current` component may still lack a build of its HEAD: a v3.82
     `smd update` pulled station-web onto the release commit and built
-    nothing (v3.83 final review, finding 1).  A failed build is a failed
+    nothing (v3.83 final review, finding 1).  A NATIVE_COMPONENT rebuilds
+    when its binary trails the checkout.  A failed build is a failed
     step; nothing restarts after it."""
-    if it.component in BUILT_COMPONENTS:
-        return step
+    if it.component in NATIVE_COMPONENTS:
+        return _native_rebuild(step, ctx)
     built, why = _deploy_build(it.component, ctx.base / it.component, ctx)
     if why:
         return Step(it.component, "failed", why, step.bytes)
@@ -701,6 +750,11 @@ def apply_plan(rel: Release, items: list, ctx: Ctx) -> list:
             steps.append(Step(it.component, "left", AHEAD_NOTE))
         else:  # forward, or an ahead item with allow_rollback set
             step = _move(it, ctx)
+            # A moved ka9q-web builds at its new HEAD.  ka9q-radio already
+            # built, forced, inside _move (with its rollback), so asking
+            # again would only build it twice.
+            if step.outcome == "moved" and it.component not in BUILT_COMPONENTS:
+                step = _native_rebuild(step, ctx)
             steps.append(step)
             if step.bytes:
                 total_bytes += step.bytes

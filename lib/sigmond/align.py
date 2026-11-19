@@ -361,6 +361,19 @@ def plan_align(release: Release, live: dict, dirty: dict, errors: Optional[dict]
     return items + sorted(strays, key=lambda i: i.component)
 
 
+def native_rebuild_note(component: str, reason: str) -> str:
+    """The dry run's tail for a `current` native component whose binary
+    trails its checkout (``reason`` from smd's ``_align_native_stale``).
+    ASCII only.  A radiod rebuild names its restart and the recording gap,
+    as a moved ka9q-radio does."""
+    note = f"-- {reason}; --apply REBUILDS"
+    if component == RADIOD:
+        from sigmond.align_live import RADIOD_GAP_ESTIMATE_S
+        note += (f" and RESTARTS radiod -- recording gap of about "
+                 f"{RADIOD_GAP_ESTIMATE_S} s")
+    return note
+
+
 AHEAD_NOTE = "ahead of the pin — left; --allow-rollback moves it back"
 DIVERGED_NOTE = "diverged from the pin — resolve by hand"
 
