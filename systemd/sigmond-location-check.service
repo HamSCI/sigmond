@@ -3,6 +3,8 @@
 Description=Sigmond location check: the station location follows its GPSDO
 Documentation=https://github.com/HamSCI/sigmond
 ConditionPathExists=/usr/local/sbin/sigmond-location-check
+# A GPSDO that appears after install is picked up by the next tick.
+ConditionPathExists=/run/gpsdo
 
 [Service]
 Type=oneshot

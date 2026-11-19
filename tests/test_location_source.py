@@ -105,7 +105,7 @@ def _units_repo(tmp_path):
     return repo, unit_dir
 
 
-def _own_units(tmp_path, gpsdo_dir):
+def _own_units(tmp_path):
     repo, unit_dir = _units_repo(tmp_path)
     calls = []
 
@@ -113,22 +113,85 @@ def _own_units(tmp_path, gpsdo_dir):
         calls.append(list(argv))
         return subprocess.CompletedProcess(argv, 0, "", "")
 
-    smd._align_own_units(repo, unit_dir=unit_dir, run=fake_run,
-                         gpsdo_dir=gpsdo_dir)
+    smd._align_own_units(repo, unit_dir=unit_dir, run=fake_run)
     return calls
 
 
-def test_location_check_timer_installed_when_gpsdo_present(tmp_path):
-    g = tmp_path / "gpsdo"
-    g.mkdir()
-    calls = _own_units(tmp_path, g)
+def test_location_check_timer_enabled_on_every_host(tmp_path):
+    calls = _own_units(tmp_path)
     assert ["systemctl", "enable", "--now",
             "sigmond-location-check.timer"] in calls
 
 
-def test_location_check_timer_absent_without_gpsdo(tmp_path):
-    calls = _own_units(tmp_path, tmp_path / "no-gpsdo")
-    assert not any("sigmond-location-check.timer" in c for c in calls)
+def test_location_check_service_inert_without_gpsdo():
+    root = Path(__file__).resolve().parent.parent / "systemd"
+    svc = (root / "sigmond-location-check.service").read_text().splitlines()
+    assert "ConditionPathExists=/run/gpsdo" in svc
+
+
+def test_identity_call_only_leaves_location_source(tmp_path):
+    prof, coord = _env(tmp_path, PROFILE + 'location_source = "gpsdo"\n')
+    coord.write_text('[host]\ncall = "N0CALL"\ngrid = "AA00aa"\n'
+                     'lat = 10.5\nlon = 20.25\nlocation_source = "gpsdo"\n')
+    args = types.SimpleNamespace(json=False, call="N1CALL", grid=None,
+                                 lat=None, lon=None)
+    rc = _run(_patches(prof, coord, tmp_path),
+              lambda: cfg.cmd_config_identity(args))
+    assert rc == 0
+    assert tomllib.loads(coord.read_text())["host"]["location_source"] == "gpsdo"
+    assert tomllib.loads(prof.read_text())["station"]["location_source"] == "gpsdo"
+
+
+APPLIANCE = (Path(__file__).resolve().parents[2] / "sigmond-appliance"
+             / "sigmond-location-check")
+
+
+def _check(tmp_path, source):
+    import json
+    import os
+    g = tmp_path / "gpsdo"
+    g.mkdir()
+    (g / "a.json").write_text(json.dumps({"health": {
+        "latitude": 10.5, "longitude": 20.25, "gps_fix": "3D",
+        "sats_used": 8, "fix_age_sec": 5}}))
+    prof = tmp_path / "site-profile.toml"
+    prof.write_text('[station]\ncallsign = "N0CALL"\nlatitude = 10.5\n'
+                    'longitude = 20.25\n'
+                    'grid_square = "KK00dm"   # typed\n'
+                    + (f'location_source = "{source}"\n' if source else ""))
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    log = tmp_path / "calls"
+    for n, body in (("smd", f'echo "smd $*" >> {log}\n'),
+                    ("systemd-cat", "cat >/dev/null\n"),
+                    ("systemctl", f'echo "systemctl $*" >> {log}\n')):
+        p = bindir / n
+        p.write_text("#!/bin/bash\n" + body)
+        p.chmod(0o755)
+    env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}",
+               SIGMOND_SITE_PROFILE=str(prof), SIGMOND_GPSDO_DIR=str(g))
+    subprocess.run(["bash", str(APPLIANCE)], env=env, check=True)
+    calls = log.read_text() if log.exists() else ""
+    return tomllib.loads(prof.read_text())["station"], calls
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.skipif(not APPLIANCE.exists(), reason="sigmond-appliance absent")
+def test_location_check_relabels_a_current_position_as_gpsdo(tmp_path):
+    st, calls = _check(tmp_path, "operator")
+    assert st["location_source"] == "gpsdo"
+    assert st["grid_square"] == "KK00dm"   # nothing moved
+    assert "smd config render" in calls
+    assert "systemctl" not in calls        # no recorder bounce
+
+
+@pytest.mark.skipif(not APPLIANCE.exists(), reason="sigmond-appliance absent")
+def test_location_check_current_and_gpsdo_does_nothing(tmp_path):
+    st, calls = _check(tmp_path, "gpsdo")
+    assert st["location_source"] == "gpsdo"
+    assert calls == ""
 
 
 def test_shipped_location_check_units():
