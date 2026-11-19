@@ -582,6 +582,9 @@ def build_plan(profile, *, local_radiod: bool,
         # client falls back to its base-config start.
         for rep_id in (reporters_for(client) if client in _REPORTER_KEYED
                        else []):
+            # A changed reporter id already MOVED its instance: Stage 1's
+            # `receiver apply` (above) runs plan_moves/apply_moves before
+            # any instance is added here, so this never makes a second one.
             # --force makes re-add idempotent (create only missing files, leave
             # existing ones) so re-running bring-up doesn't error on an instance
             # that's already scaffolded.

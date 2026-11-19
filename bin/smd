@@ -22932,11 +22932,36 @@ def _receiver_decides_upload(r) -> bool:
     return r.upload is not None or bool(r.same_antenna_as)
 
 
+def _receiver_moves(receivers, profile_clients, etc_root, run=None):
+    """(moves, refusals) for every reporter-keyed client: a declared
+    receiver whose reporter id differs from the instance already on its
+    radiod takes that instance over.  Reads files only."""
+    from sigmond import instance_move as _im
+    from sigmond.instance_rekey import CLIENTS
+    from sigmond.receivers import effective_clients
+    moves, refused = [], []
+    for client in CLIENTS:
+        declared = [r for r in receivers if r.radiod and client in
+                    effective_clients(r, frozenset(profile_clients) | {client})]
+        existing = _im.existing_instances(client, etc_root,
+                                          run=run or _im.default_run)
+        m, f = _im.plan_moves(declared, existing)
+        moves += m
+        refused += f
+    return moves, refused
+
+
 def _receiver_apply(receivers, *, profile_clients,
                     etc_root: Path = Path('/etc'), coord_path=None,
                     profile_path=None, dry_run: bool = False,
-                    inventory_rows=None, hosts=None, validate_all: bool = True) -> int:
+                    inventory_rows=None, hosts=None, validate_all: bool = True,
+                    move_run=None) -> int:
     """Bind every receiver in ``receivers`` (the declared list).
+
+    Before any bind, a changed reporter id MOVES its instance
+    (`_receiver_moves`): one instance per client per radiod.  A refusal
+    (two instances of one client on one radiod) stops here, touching
+    nothing; ``--dry-run`` lists the moves and changes nothing.
 
     Validates first: on any problem it prints every message, touches
     nothing and returns 1.  Then, per receiver, `_sources_bind` with the
@@ -22971,6 +22996,25 @@ def _receiver_apply(receivers, *, profile_clients,
             _err(f'receiver apply: {m}')
         return 1
     etc_root = Path(etc_root)
+    if validate_all:
+        moves, refused = _receiver_moves(receivers, profile_clients, etc_root,
+                                         move_run)
+        if refused:
+            for m in refused:
+                _err(f'receiver apply: {m}')
+            return 1
+        for m in moves:
+            _info(f'{"would move" if dry_run else "move"} '
+                  f'{m.client}@{m.old_key} -> {m.client}@{m.new_key} '
+                  f'on {m.radiod}')
+        if moves and not dry_run:
+            from sigmond import instance_move as _im
+            var_root = (Path('/var') if etc_root == Path('/etc')
+                        else etc_root.parent / 'var')
+            for line in _im.apply_moves(
+                    moves, etc_root=etc_root, var_root=var_root,
+                    run=move_run or _im.default_run):
+                (_warn if line.startswith('WARN') else _info)(line)
     rc = 0
     for r in receivers:
         clients = effective_clients(r, profile_clients)
