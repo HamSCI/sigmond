@@ -2515,8 +2515,15 @@ def _build_ka9q_web_with_onion(src_dir: Path, *, force: bool = False) -> bool:
         if not _build_onion(onion_src, force=force):
             return False
 
+        # `make clean` first: the Makefile's config_paths.h depends only on
+        # the Makefile, so a header that carries the commit never
+        # regenerates on a plain `make`.
         nproc = str(os.cpu_count() or 2)
-        _info(f'Building ka9q-web (make -j{nproc}) ...')
+        _info(f'Building ka9q-web (make clean; make -j{nproc}) ...')
+        r = _run(['make', 'clean'], cwd=str(src_dir))
+        if r.returncode != 0:
+            _err(f'ka9q-web make clean failed: {r.stderr[-400:]}')
+            return False
         r = _run(['make', f'-j{nproc}'], cwd=str(src_dir))
         if r.returncode != 0:
             _err(f'ka9q-web build failed: {r.stderr[-400:]}')
@@ -2527,14 +2534,16 @@ def _build_ka9q_web_with_onion(src_dir: Path, *, force: bool = False) -> bool:
             return False
         _ok('ka9q-web: built and installed')
 
-    _write_build_manifest('ka9q-web', [
-        {'name': 'ka9q-web', 'ref': 'master', 'pin': '',
-         'url': _git_remote_url(src_dir) or 'https://github.com/ka9q/ka9q-web',
-         'sha': _git_head(src_dir)},
-        {'name': 'onion', 'url': _ONION_REPO, 'ref': 'master',
-         'pin': _native_pin('onion'), 'sha': _git_head(onion_src)},
-    ], builder='_build_ka9q_web_with_onion')
-    _pin_if_tracking('onion', _git_head(onion_src))
+        # Record only here, on the branch that ran `make`.  Later staleness
+        # checks read this file as "the commit a real build compiled".
+        _write_build_manifest('ka9q-web', [
+            {'name': 'ka9q-web', 'ref': 'master', 'pin': '',
+             'url': _git_remote_url(src_dir) or 'https://github.com/ka9q/ka9q-web',
+             'sha': _git_head(src_dir)},
+            {'name': 'onion', 'url': _ONION_REPO, 'ref': 'master',
+             'pin': _native_pin('onion'), 'sha': _git_head(onion_src)},
+        ], builder='_build_ka9q_web_with_onion')
+        _pin_if_tracking('onion', _git_head(onion_src))
     return True
 
 
