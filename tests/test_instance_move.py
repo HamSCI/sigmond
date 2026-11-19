@@ -13,8 +13,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
 import sigmond.site_profile as sp                              # noqa: E402
-from sigmond.instance_move import (Existing, Move, apply_moves,  # noqa: E402
-                                   existing_instances, plan_moves)
+from sigmond.instance_move import (Existing, Move, Retire, apply_moves,  # noqa: E402
+                                   apply_retires, existing_instances,
+                                   pending_moves, plan_changes, plan_moves)
 from sigmond.instance_rekey import BACKUP_DIR                  # noqa: E402
 from sigmond.receivers import Receiver                         # noqa: E402
 
@@ -22,11 +23,23 @@ RADIOD = "n8ur-status.local"
 
 
 class FakeSystemctl:
+    """Records every call.  ``state`` maps a unit to (enabled, active);
+    unknown units stand enabled and active.  ``fail`` holds argument
+    tuples that return rc 1."""
+
     def __init__(self):
         self.calls = []
+        self.state = {}
+        self.fail = set()
 
     def __call__(self, args):
         self.calls.append(list(args))
+        if tuple(args) in self.fail:
+            return 1, "boom"
+        if args[0] in ("is-enabled", "is-active"):
+            en, ac = self.state.get(args[1], (True, True))
+            return 0, (("enabled" if en else "disabled") if args[0] == "is-enabled"
+                       else ("active" if ac else "inactive"))
         return 0, ""
 
 
@@ -47,7 +60,8 @@ def make_instance(root, client, key, radiod, reporter=None):
     (etc / client / "env").mkdir(parents=True, exist_ok=True)
     (etc / client / f"{key}.toml").write_text(
         f'[instance]\nreporter_id = "{reporter or key}"\n')
-    (etc / client / "env" / f"{key}.env").write_text("UPLOAD=1\n")
+    (etc / client / "env" / f"{key}.env").write_text(
+        f"UPLOAD=1\nWD_RECEIVER_CALL={reporter or key}\n")
     (etc / "sigmond/clients" / f"{client}@{key}.sources.toml").write_text(
         f'selected = ["radiod:{radiod}"]\n')
     st = root / "var/lib" / client / key
@@ -79,9 +93,11 @@ def test_apply_leaves_one_instance(tmp_root, fake_systemctl):
                 run=fake_systemctl)
     assert sorted(p.stem for p in (tmp_root / "etc/chirp-recorder").glob("*.toml")) \
         == ["AB4EJ-RX888"]
-    assert fake_systemctl.calls[-2:] == [
-        ["disable", "--now", "chirp-recorder@AB4EJ.service"],
-        ["enable", "--now", "chirp-recorder@AB4EJ-RX888.service"]]
+    assert fake_systemctl.calls[-3:] == [
+        ["disable", "chirp-recorder@AB4EJ.service"],
+        ["enable", "chirp-recorder@AB4EJ-RX888.service"],
+        ["start", "chirp-recorder@AB4EJ-RX888.service"]]
+    assert ["stop", "chirp-recorder@AB4EJ.service"] in fake_systemctl.calls
 
 
 def test_apply_rewrites_reporter_copies_state_keeps_old(tmp_root, fake_systemctl):
@@ -113,13 +129,53 @@ def test_backups_land_in_backup_dir(tmp_root, fake_systemctl):
             "psk-recorder@N8UR.sources.toml"} <= names
 
 
-def test_two_on_one_radiod_refuses(tmp_root, fake_systemctl):
+def test_declared_plus_undeclared_on_one_radiod_retires(tmp_root, fake_systemctl):
     for k in ("N8UR", "N8UR-SIGMOND"):
+        make_instance(tmp_root, "psk-recorder", k, RADIOD)
+    p = plan_changes(
+        [Receiver("N8UR-SIGMOND", RADIOD)],
+        existing_instances("psk-recorder", tmp_root / "etc", run=fake_systemctl))
+    assert p.moves == [] and p.refusals == []
+    assert p.retires == [Retire("psk-recorder", "N8UR", RADIOD)]
+
+
+def test_two_strays_one_target_refuses(tmp_root, fake_systemctl):
+    for k in ("N8UR", "AB4EJ"):
         make_instance(tmp_root, "psk-recorder", k, RADIOD)
     moves, refused = plan_moves(
         [Receiver("N8UR-SIGMOND", RADIOD)],
         existing_instances("psk-recorder", tmp_root / "etc", run=fake_systemctl))
-    assert moves == [] and "N8UR" in refused[0] and "N8UR-SIGMOND" in refused[0]
+    assert moves == [] and "N8UR" in refused[0] and "AB4EJ" in refused[0]
+
+
+def test_duplicates_on_undeclared_radiod_warn_not_refuse(tmp_root, fake_systemctl):
+    for k in ("N8UR", "AB4EJ"):
+        make_instance(tmp_root, "hfdl-recorder", k, "other-status.local")
+    p = plan_changes(
+        [Receiver("N8UR-SIGMOND", RADIOD)],
+        existing_instances("hfdl-recorder", tmp_root / "etc", run=fake_systemctl))
+    assert p.refusals == [] and p.moves == [] and len(p.warnings) == 1
+
+
+def test_radiod_match_ignores_case():
+    ex = [Existing("wspr-recorder", "N8UR", "N8UR-Status.local")]
+    moves, _ = plan_moves([Receiver("N8UR-SIGMOND", RADIOD)], ex)
+    assert len(moves) == 1
+
+
+def test_retire_stops_backs_up_renames_keeps_state(tmp_root, fake_systemctl):
+    make_instance(tmp_root, "psk-recorder", "N8UR", RADIOD)
+    steps = apply_retires([Retire("psk-recorder", "N8UR", RADIOD)],
+                          etc_root=tmp_root / "etc", var_root=tmp_root / "var",
+                          run=fake_systemctl)
+    assert not (tmp_root / "etc/psk-recorder/N8UR.toml").exists()
+    assert (tmp_root / "etc/psk-recorder/N8UR.toml.retired").exists()
+    assert (tmp_root / "var/lib/psk-recorder/N8UR/cursor").exists()
+    assert ["stop", "psk-recorder@N8UR.service"] in fake_systemctl.calls
+    assert ["disable", "psk-recorder@N8UR.service"] in fake_systemctl.calls
+    assert not [s for s in steps if s.startswith("ERROR")]
+    root = tmp_root / "var" / BACKUP_DIR[len("var/"):]
+    assert any(p.name == "N8UR.toml" for p in root.rglob("*"))
 
 
 def test_reporter_declared_elsewhere_does_not_move():
@@ -148,7 +204,8 @@ def _apply(smd, root, receivers, run, **kw):
         return smd._receiver_apply(
             receivers, profile_clients=frozenset({"wspr-recorder", "psk-recorder"}),
             etc_root=root / "etc", coord_path=root / "etc/sigmond/coordination.toml",
-            profile_path=prof, inventory_rows=[], move_run=run, **kw)
+            profile_path=prof, inventory_rows=[], move_run=run,
+            **{'manifest_run': lambda: True, **kw})
 
 
 def test_receiver_apply_moves_before_adding(tmp_root, fake_systemctl):
@@ -182,11 +239,182 @@ def test_receiver_apply_dry_run_changes_nothing(tmp_root, fake_systemctl, capsys
 
 def test_receiver_apply_refusal_touches_nothing(tmp_root, fake_systemctl):
     smd = _load_smd()
+    for k in ("N8UR", "AB4EJ"):
+        make_instance(tmp_root, "psk-recorder", k, RADIOD)
+    before = _tree(tmp_root)
+    rc = _apply(smd, tmp_root, [Receiver("N8UR-SIGMOND", RADIOD)], fake_systemctl)
+    assert rc == 1 and _tree(tmp_root) == before
+    assert fake_systemctl.calls == []
+
+
+# ---- fix round 1 -------------------------------------------------------
+
+@pytest.mark.parametrize("client", ["chirp-recorder", "codar-sounder",
+                                    "hfdl-recorder", "superdarn-sounder"])
+def test_every_reporter_keyed_client_plans_a_move(tmp_root, fake_systemctl, client):
+    smd = _load_smd()
+    make_instance(tmp_root, client, "AB4EJ", RADIOD)
+    moves, refused = smd._receiver_moves(
+        [Receiver("AB4EJ-RX888", RADIOD)], frozenset({"wspr-recorder"}),
+        tmp_root / "etc", fake_systemctl)
+    assert refused == [] and [m.client for m in moves] == [client]
+
+
+def test_move_never_creates_a_client_with_no_instance(tmp_root, fake_systemctl):
+    smd = _load_smd()
+    make_instance(tmp_root, "wspr-recorder", "AB4EJ", RADIOD)
+    moves, _ = smd._receiver_moves(
+        [Receiver("AB4EJ-RX888", RADIOD)], frozenset({"wspr-recorder", "psk-recorder"}),
+        tmp_root / "etc", fake_systemctl)
+    assert [m.client for m in moves] == ["wspr-recorder"]
+
+
+def test_disabled_instance_stays_disabled(tmp_root, fake_systemctl):
+    make_instance(tmp_root, "codar-sounder", "KFS-OMNI", RADIOD)
+    fake_systemctl.state["codar-sounder@KFS-OMNI.service"] = (False, False)
+    apply_moves([Move("codar-sounder", "KFS-OMNI", "KFS-MAIN", "KFS-MAIN", RADIOD)],
+                etc_root=tmp_root / "etc", var_root=tmp_root / "var",
+                run=fake_systemctl)
+    verbs = [c[0] for c in fake_systemctl.calls]
+    assert "enable" not in verbs and "start" not in verbs
+    assert "disable" not in verbs and "stop" not in verbs
+    assert (tmp_root / "etc/codar-sounder/KFS-MAIN.toml").exists()
+
+
+def test_enabled_but_inactive_is_enabled_not_started(tmp_root, fake_systemctl):
+    make_instance(tmp_root, "psk-recorder", "N8UR", RADIOD)
+    fake_systemctl.state["psk-recorder@N8UR.service"] = (True, False)
+    apply_moves([Move("psk-recorder", "N8UR", "N8UR-SIGMOND", "N8UR-SIGMOND", RADIOD)],
+                etc_root=tmp_root / "etc", var_root=tmp_root / "var",
+                run=fake_systemctl)
+    assert ["enable", "psk-recorder@N8UR-SIGMOND.service"] in fake_systemctl.calls
+    assert ["start", "psk-recorder@N8UR-SIGMOND.service"] not in fake_systemctl.calls
+    assert ["stop", "psk-recorder@N8UR.service"] not in fake_systemctl.calls
+
+
+def test_moved_env_names_the_new_id(tmp_root, fake_systemctl):
+    make_instance(tmp_root, "wspr-recorder", "N8UR", RADIOD)
+    env = tmp_root / "etc/wspr-recorder/env/N8UR.env"
+    env.write_text("UPLOAD=1\nWD_RECEIVER_CALL=N8UR\nSTATION_REPORTER_ID=N8UR\n"
+                   "X_RECEIVER_CALL=SOMEONE\n")
+    apply_moves([Move("wspr-recorder", "N8UR", "N8UR-SIGMOND", "N8UR-SIGMOND", RADIOD)],
+                etc_root=tmp_root / "etc", var_root=tmp_root / "var",
+                run=fake_systemctl)
+    new = (tmp_root / "etc/wspr-recorder/env/N8UR-SIGMOND.env").read_text()
+    assert "WD_RECEIVER_CALL=N8UR-SIGMOND\n" in new
+    assert "STATION_REPORTER_ID=N8UR-SIGMOND\n" in new
+    assert "X_RECEIVER_CALL=SOMEONE" in new and "UPLOAD=1" in new
+
+
+def test_env_slash_form_follows(tmp_root, fake_systemctl):
+    make_instance(tmp_root, "wspr-recorder", "AC0G-B1", RADIOD, reporter="AC0G/B1")
+    apply_moves([Move("wspr-recorder", "AC0G-B1", "AC0G-B2", "AC0G/B2", RADIOD)],
+                etc_root=tmp_root / "etc", var_root=tmp_root / "var",
+                run=fake_systemctl)
+    new = (tmp_root / "etc/wspr-recorder/env/AC0G-B2.env").read_text()
+    assert "WD_RECEIVER_CALL=AC0G/B2\n" in new
+
+
+def test_leftover_old_id_warns(tmp_root, fake_systemctl):
+    make_instance(tmp_root, "wspr-recorder", "N8UR", RADIOD)
+    env = tmp_root / "etc/wspr-recorder/env/N8UR.env"
+    env.write_text("CUSTOM_TAG=N8UR\n")
+    steps = apply_moves(
+        [Move("wspr-recorder", "N8UR", "N8UR-SIGMOND", "N8UR-SIGMOND", RADIOD)],
+        etc_root=tmp_root / "etc", var_root=tmp_root / "var", run=fake_systemctl)
+    assert any(s.startswith("WARN") and "N8UR-SIGMOND.env:1" in s for s in steps)
+
+
+def test_failure_mid_move_rolls_back(tmp_root, fake_systemctl):
+    make_instance(tmp_root, "psk-recorder", "N8UR", RADIOD)
+    before = _tree(tmp_root)
+    fake_systemctl.fail.add(("enable", "psk-recorder@N8UR-SIGMOND.service"))
+    steps = apply_moves(
+        [Move("psk-recorder", "N8UR", "N8UR-SIGMOND", "N8UR-SIGMOND", RADIOD)],
+        etc_root=tmp_root / "etc", var_root=tmp_root / "var", run=fake_systemctl)
+    assert any(s.startswith("ERROR") for s in steps)
+    after = {p: b for p, b in _tree(tmp_root).items()
+             if "instance-rekey-backup" not in str(p)}
+    assert after == before                       # old files back, new copies gone
+    assert fake_systemctl.calls[-1] == ["start", "psk-recorder@N8UR.service"]
+    assert pending_moves(tmp_root / "var") == []
+
+
+def test_oserror_mid_copy_rolls_back(tmp_root, fake_systemctl):
+    make_instance(tmp_root, "psk-recorder", "N8UR", RADIOD)
+    before = _tree(tmp_root)
+    with mock.patch("sigmond.instance_move.shutil.copytree",
+                    side_effect=OSError("disk full")):
+        steps = apply_moves(
+            [Move("psk-recorder", "N8UR", "N8UR-SIGMOND", "N8UR-SIGMOND", RADIOD)],
+            etc_root=tmp_root / "etc", var_root=tmp_root / "var",
+            run=fake_systemctl)
+    assert any(s.startswith("ERROR") and "disk full" in s for s in steps)
+    assert {p: b for p, b in _tree(tmp_root).items()
+            if "instance-rekey-backup" not in str(p)} == before
+    assert ["start", "psk-recorder@N8UR.service"] in fake_systemctl.calls
+
+
+def test_rerun_after_crash_completes(tmp_root, fake_systemctl):
+    make_instance(tmp_root, "psk-recorder", "N8UR", RADIOD)
+    mv = Move("psk-recorder", "N8UR", "N8UR-SIGMOND", "N8UR-SIGMOND", RADIOD)
+    # A crash: the process dies inside daemon-reload (KeyboardInterrupt skips
+    # the rollback), leaving the journal and the renamed files behind.
+    real = fake_systemctl.__call__
+
+    def dying(args):
+        if args == ["daemon-reload"]:
+            raise KeyboardInterrupt
+        return real(args)
+    with pytest.raises(KeyboardInterrupt):
+        apply_moves([mv], etc_root=tmp_root / "etc", var_root=tmp_root / "var",
+                    run=dying)
+    assert pending_moves(tmp_root / "var") == [mv]
+    assert (tmp_root / "etc/psk-recorder/N8UR.toml.moved").exists()
+    # Re-run: finishes, with the original state (enabled, active) honoured.
+    fake_systemctl.calls.clear()
+    fake_systemctl.state["psk-recorder@N8UR.service"] = (False, False)  # as the crash left it
+    steps = apply_moves(pending_moves(tmp_root / "var"),
+                        etc_root=tmp_root / "etc", var_root=tmp_root / "var",
+                        run=fake_systemctl)
+    assert not [s for s in steps if s.startswith("ERROR")]
+    assert ["enable", "psk-recorder@N8UR-SIGMOND.service"] in fake_systemctl.calls
+    assert ["start", "psk-recorder@N8UR-SIGMOND.service"] in fake_systemctl.calls
+    assert pending_moves(tmp_root / "var") == []
+    assert (tmp_root / "etc/psk-recorder/N8UR-SIGMOND.toml").exists()
+
+
+def test_receiver_apply_fails_nonzero_on_failed_move(tmp_root, fake_systemctl):
+    smd = _load_smd()
+    make_instance(tmp_root, "wspr-recorder", "N8UR", RADIOD)
+    fake_systemctl.fail.add(("enable", "wspr-recorder@N8UR-SIGMOND.service"))
+    rc = _apply(smd, tmp_root, [Receiver("N8UR-SIGMOND", RADIOD)], fake_systemctl)
+    assert rc == 1
+
+
+def test_receiver_apply_retires_duplicate_and_shows_it_dry(tmp_root, fake_systemctl, capsys):
+    smd = _load_smd()
     for k in ("N8UR", "N8UR-SIGMOND"):
         make_instance(tmp_root, "psk-recorder", k, RADIOD)
     before = _tree(tmp_root)
-    with mock.patch.object(smd, "_sources_bind", return_value=0) as sb:
-        rc = _apply(smd, tmp_root, [Receiver("N8UR-SIGMOND", RADIOD)],
-                    fake_systemctl)
-    assert rc == 1 and _tree(tmp_root) == before
-    assert fake_systemctl.calls == []
+    assert _apply(smd, tmp_root, [Receiver("N8UR-SIGMOND", RADIOD)],
+                  fake_systemctl, dry_run=True) == 0
+    out = capsys.readouterr().out
+    assert "retire" in out and "psk-recorder@N8UR" in out and out.isascii()
+    assert _tree(tmp_root) == before and fake_systemctl.calls == []
+    assert _apply(smd, tmp_root, [Receiver("N8UR-SIGMOND", RADIOD)],
+                  fake_systemctl) == 0
+    assert (tmp_root / "etc/psk-recorder/N8UR.toml.retired").exists()
+
+
+def test_receiver_apply_rerenders_manifest_after_a_move(tmp_root, fake_systemctl):
+    smd = _load_smd()
+    make_instance(tmp_root, "wspr-recorder", "N8UR", RADIOD)
+    calls = []
+    assert _apply(smd, tmp_root, [Receiver("N8UR-SIGMOND", RADIOD)],
+                  fake_systemctl, manifest_run=lambda: calls.append(1) or True) == 0
+    assert calls == [1]
+    calls.clear()                                   # nothing left to move
+    _apply(smd, tmp_root, [Receiver("N8UR-SIGMOND", RADIOD)], fake_systemctl,
+           manifest_run=lambda: calls.append(1) or True)
+    assert calls == []
