@@ -1,0 +1,18 @@
+# /etc/systemd/system/sigmond-drift.service
+[Unit]
+Description=Sigmond drift report: how this station differs from its release
+Documentation=https://github.com/HamSCI/sigmond
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Nice=10
+IOSchedulingClass=idle
+# Writes /var/lib/sigmond/drift.json and queues one sigmondb row.  Reads the
+# station and repairs nothing; the report names each fix.
+ExecStart=/usr/local/bin/smd align --report
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sigmond-drift

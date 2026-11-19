@@ -1247,6 +1247,9 @@ $SUDO systemctl enable --now sigmond-storage-trim-all.timer
 # without hf-timestd, so it's safe to always enable (same reasoning as the
 # trim timer above re: greenfield-safe).
 $SUDO systemctl enable --now sigmond-gap-hourly.timer 2>/dev/null || true
+# Daily drift report (smd align --report).  Enable only: the calendar starts it
+# (Persistent=true catches a missed run on the next boot).
+$SUDO systemctl enable sigmond-drift.timer 2>/dev/null || true
 # sigmond-heartbeat.timer is INSTALLED above (it matched the sigmond-*.timer
 # glob) but deliberately NOT enabled here — this is the one asymmetry with
 # every other timer in this block.  Unlike gap-hourly/storage-trim, `smd

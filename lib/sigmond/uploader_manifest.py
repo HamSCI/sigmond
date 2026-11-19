@@ -1068,22 +1068,82 @@ _SIGMOND_FILE_HEADER = [
 ]
 
 
-def sigmond_pipeline_file(coord: Coordination) -> Optional[str]:
+DRIFT_PIPELINE = "sigmond-sigmondb-drift"
+DRIFT_FEATURE = "sigmondb-tar"
+
+
+def drift_pipeline(coord: Coordination,
+                   features: Optional[frozenset]) -> Optional[dict]:
+    """The daily drift row's pipeline: sigmondb.station_drift, producer
+    sigmond, to wsprdaemon-server in the same tar the codar and hfdl
+    sigmondb pipelines use.  ``None`` unless hs-uploader offers
+    ``sigmondb-tar`` (an older daemon would carry the tar wrongly) and the
+    station has a reporter id to file the rows under."""
+    if DRIFT_FEATURE not in (features or frozenset()):
+        return None
+    call = reporter_call(coord)
+    if not call:
+        return None
+    return {
+        "name": DRIFT_PIPELINE,
+        "client": "sigmond",
+        "batch_limit": 5000,
+        "source": {
+            "type": "sqlite",
+            "database": "sigmondb",
+            "table": "station_drift",
+            "accepted_schema_versions": [1],
+            "producer": "sigmond",
+        },
+        "transport": {
+            "type": "wsprdaemon_tar",
+            "name": f"wsprdaemon-tar-sftp:{DRIFT_PIPELINE}",
+            "servers": ["gw1.wsprdaemon.org", "gw2.wsprdaemon.org"],
+            "version": "4.0",
+            "receiver": call.replace("/", "_"),
+            "compression": "bz2",
+            "tar_root": "wsprdaemon",
+            "primary_table_name": "sigmondb.station_drift",
+            "tar_tag": "chirp-drift",
+            "ftp_fallback": {
+                "servers": ["gw2.wsprdaemon.org"],
+                "ftp_user": "noisegraphs",
+                "remote_path": "upload",
+            },
+        },
+        "retry": {"base": 2.0, "cap_sec": 900.0},
+    }
+
+
+def sigmond_pipeline_file(coord: Coordination,
+                          features: Optional[frozenset] = None
+                          ) -> Optional[str]:
     """The text of ``pipelines.d/sigmond.toml`` for the gate form (spec §3.6):
     the :func:`heartbeat_pipeline` entry with ``governed = false`` and no
-    ``start_at``, as the one ``[[pipeline]]`` table of the file, and
-    nothing else, so part 1's file rules accept it.  ``None`` when the
-    station renders no heartbeat; the file then has no reason to exist."""
+    ``start_at``, then (with ``sigmondb-tar`` in ``features``) the
+    :func:`drift_pipeline` entry, each as a ``[[pipeline]]`` table of the
+    file, and nothing else, so part 1's file rules accept it.  ``None``
+    when the station renders neither; the file then has no reason to
+    exist."""
+    entries = []
     hb = heartbeat_pipeline(coord)
-    if hb is None:
+    if hb is not None:
+        entry = {"name": hb["name"], "client": hb["client"], "governed": False}
+        entry.update((k, v) for k, v in hb.items() if k not in entry)
+        entry["source"] = {k: v for k, v in entry["source"].items()
+                           if k != "start_at"}
+        entries.append(entry)
+    dr = drift_pipeline(coord, features)
+    if dr is not None:
+        entry = {"name": dr["name"], "client": dr["client"], "governed": False}
+        entry.update((k, v) for k, v in dr.items() if k not in entry)
+        entries.append(entry)
+    if not entries:
         return None
-    entry = {"name": hb["name"], "client": hb["client"], "governed": False}
-    entry.update((k, v) for k, v in hb.items() if k not in entry)
-    entry["source"] = {k: v for k, v in entry["source"].items()
-                       if k != "start_at"}
     lines = list(_SIGMOND_FILE_HEADER)
-    lines.append("")
-    _emit("pipeline", entry, lines, array=True)
+    for entry in entries:
+        lines.append("")
+        _emit("pipeline", entry, lines, array=True)
     return "\n".join(lines) + "\n"
 
 
@@ -1593,7 +1653,7 @@ def generate_forms(topology: Optional[Topology] = None,
     identity = build_identity(coord, reporter_call(coord))
     return RenderResult(
         render_manifest(pipelines, identity, banner=_GATE_BANNER),
-        sigmond_pipeline_file(coord))
+        sigmond_pipeline_file(coord, features))
 
 
 def _open_dir_nofollow(name: str, dir_fd: int) -> int:

@@ -9495,10 +9495,14 @@ def _align_apply(args) -> int:
         return _align_make_live(args, rel, steps, base=base, catalog=catalog, now=_now)
 
 
+_ALIGN_DRIFT_TIMER = 'sigmond-drift.timer'
+
+
 def _align_own_units(sigmond_repo, *, unit_dir=Path('/etc/systemd/system'),
                      run=None) -> list:
     """Install sigmond's own units (install.sh does this once; updates never
-    rerun it), then daemon-reload when any landed.  Enables nothing."""
+    rerun it), then daemon-reload when any landed.  Enables only the daily
+    drift timer (never starts it: the calendar does that)."""
     from sigmond import align_apply
     from sigmond.drift import units as drift_units
     run = run or subprocess.run
@@ -9507,15 +9511,24 @@ def _align_own_units(sigmond_repo, *, unit_dir=Path('/etc/systemd/system'),
     except OSError as exc:
         return [align_apply.Step('sigmond-units', 'failed',
                                  f'could not install units: {exc}')]
-    if not wrote:
-        return []
-    r = _align_run(['systemctl', 'daemon-reload'], run=run, timeout=60,
-                   action='systemctl daemon-reload')
-    if r.returncode != 0:
-        return [align_apply.Step('sigmond-units', 'failed',
-                                 f'installed {", ".join(wrote)}; daemon-reload '
-                                 f'failed: {(r.stderr or "").strip()}')]
-    return [align_apply.Step('sigmond-units', 'installed', ', '.join(wrote))]
+    steps = []
+    if wrote:
+        r = _align_run(['systemctl', 'daemon-reload'], run=run, timeout=60,
+                       action='systemctl daemon-reload')
+        if r.returncode != 0:
+            return [align_apply.Step('sigmond-units', 'failed',
+                                     f'installed {", ".join(wrote)}; daemon-reload '
+                                     f'failed: {(r.stderr or "").strip()}')]
+        steps.append(align_apply.Step('sigmond-units', 'installed',
+                                      ', '.join(wrote)))
+    if (Path(unit_dir) / _ALIGN_DRIFT_TIMER).is_file():
+        r = _align_run(['systemctl', 'enable', _ALIGN_DRIFT_TIMER], run=run,
+                       timeout=60, action=f'systemctl enable {_ALIGN_DRIFT_TIMER}')
+        if r.returncode != 0:
+            # Not a blocking step: the report still works from the CLI.
+            print(f'  could not enable {_ALIGN_DRIFT_TIMER}: '
+                  f'{(r.stderr or "").strip()}')
+    return steps
 
 
 _ALIGN_BLOCKING = ('failed', 'refused', 'skipped')
@@ -9911,6 +9924,59 @@ def _align_json(args) -> int:
     return rc
 
 
+def _align_collect_report(args):
+    """The drift report from a fresh dry run (its text swallowed), or None
+    when the target cannot be established."""
+    import copy
+    dry = copy.copy(args)
+    for k in ('apply', 'verify', 'json', 'report', 'accept'):
+        setattr(dry, k, False if k != 'accept' else None)
+    sink: dict = {}
+    dry._drift_sink = sink
+    with contextlib.redirect_stdout(io.StringIO()):
+        cmd_align(dry)
+    return sink.get('report')
+
+
+def _align_report(args) -> int:
+    """`smd align --report` (what sigmond-drift.timer runs): rebuild the
+    drift report, write /var/lib/sigmond/drift.json, queue one sigmondb row.
+    Reads the station and changes nothing else; takes no lifecycle lock."""
+    from sigmond.drift import publish
+    if _need_root('align --report'):
+        return 1
+    try:
+        report = _align_collect_report(args)
+    except Exception as exc:  # noqa: BLE001
+        print(f'smd align --report: could not build the report: {exc}')
+        return 2
+    if report is None:
+        print('smd align --report: cannot establish the target; '
+              'drift.json is unchanged')
+        return 2
+    try:
+        publish.publish(report)
+    except OSError as exc:
+        print(f'smd align --report: cannot write {publish.DRIFT_JSON}: {exc}')
+        return 1
+    return 0
+
+
+def _align_refresh_drift(args) -> None:
+    """The end of `smd align --apply`: rewrite drift.json as --report does.
+    Best effort: any failure prints one line and changes no exit code."""
+    try:
+        from sigmond.drift import publish
+        report = _align_collect_report(args)
+        if report is None:
+            print('  drift.json not refreshed: target not established')
+            return
+        publish.publish(report)
+    except Exception as exc:  # noqa: BLE001
+        print(f'  drift.json not refreshed: {exc}'.encode(
+            'ascii', 'replace').decode('ascii'))
+
+
 def _align_accept(args) -> int:
     """`smd align --accept KEY --reason TEXT [--test] [--until DATE]`:
     record one drift exception in /etc/sigmond/drift-exceptions.toml."""
@@ -9919,9 +9985,12 @@ def _align_accept(args) -> int:
     from sigmond.drift import exceptions as drift_exceptions
     key = args.accept
     reason = (getattr(args, 'reason', None) or '').strip()
-    if ':' not in key:
+    from sigmond.drift.model import KINDS
+    kind_part, _, subject_part = key.partition(':')
+    if not subject_part or kind_part not in KINDS:
         print(f'smd align --accept: {key!r} is no item key; give kind:subject '
-              f'as smd align prints it')
+              f'as smd align prints it, where kind is one of '
+              f'{", ".join(KINDS)}')
         return 2
     if not reason:
         print('smd align --accept: --reason is required (say why the difference stays)')
@@ -10000,15 +10069,15 @@ def cmd_align(args) -> int:
         print('smd align: --json is for the dry run (not --apply or --verify)')
         return 2
     if getattr(args, 'report', False):
-        print('smd align --report: arrives with the daily drift timer; '
-              'use smd align --json for the report now')
-        return 2
+        return _align_report(args)
     if getattr(args, 'json', False) and getattr(args, '_drift_sink', None) is None:
         return _align_json(args)
     if getattr(args, 'verify', False):
         return _align_verify(args)
     if getattr(args, 'apply', False):
-        return _align_apply(args)
+        rc = _align_apply(args)
+        _align_refresh_drift(args)
+        return rc
     from sigmond import align
     import socket
     base = getattr(args, 'base', None) or '/opt/git/sigmond'
@@ -31369,13 +31438,14 @@ def _build_parser() -> argparse.ArgumentParser:
                    help='stop fetching once this many bytes have been '
                         'transferred (plain integer, or a suffix like 500K, '
                         '20M, 1G; only with --apply)')
-    p.add_argument('--json', action='store_true',
-                   help='dry run only: print the drift report (and the plan '
-                        'under "plan") as one JSON document, nothing else')
+    mode.add_argument('--json', action='store_true',
+                      help='dry run only: print the drift report (and the plan '
+                           'under "plan") as one JSON document, nothing else')
     p.add_argument('--report', action='store_true',
-                   help='what the daily drift timer runs (not yet: arrives '
-                        'with sigmond-drift.timer)')
-    p.add_argument('--accept', metavar='ITEM',
+                   help='what the daily drift timer runs: write '
+                        '/var/lib/sigmond/drift.json and queue one sigmondb '
+                        'row (needs root)')
+    mode.add_argument('--accept', metavar='ITEM',
                    help='accept one drift item by its key (kind:subject, as '
                         'the report prints it) in '
                         '/etc/sigmond/drift-exceptions.toml; needs --reason')
