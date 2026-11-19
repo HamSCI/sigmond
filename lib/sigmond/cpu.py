@@ -63,6 +63,7 @@ AFFINITY_UNITS = {
     # opportunistic-radar sounders — numpy detection/dechirp bursts must stay
     # off radiod's cores for the same reason as the recorders above.
     'codar-sounder@.service':            'other',
+    'chirp-recorder@.service':           'other',
     'superdarn-sounder@.service':        'other',
     # sigmond infra group
     'wd-rac.service':       'other',

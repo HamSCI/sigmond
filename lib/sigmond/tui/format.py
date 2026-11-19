@@ -833,6 +833,7 @@ _TIMING_CONSUMER_PATTERNS: tuple = (
     ("psk-recorder",       "psk-recorder@*.service"),
     ("hfdl-recorder",      "hfdl-recorder@*.service"),
     ("codar-sounder",      "codar-sounder@*.service"),
+    ("chirp-recorder",     "chirp-recorder@*.service"),
     ("mag-recorder",       "mag-recorder.service"),
 )
 

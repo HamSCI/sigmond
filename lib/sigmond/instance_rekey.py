@@ -43,7 +43,8 @@ from .instance import (
 
 # Every client whose units are keyed by reporter id.
 CLIENTS = ("psk-recorder", "wspr-recorder", "meteor-scatter",
-           "hfdl-recorder", "codar-sounder", "superdarn-sounder")
+           "hfdl-recorder", "codar-sounder", "chirp-recorder",
+           "superdarn-sounder")
 
 BACKUP_DIR = "var/lib/sigmond/instance-rekey-backup"
 

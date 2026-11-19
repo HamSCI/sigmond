@@ -4014,6 +4014,27 @@
    ""
   ],
   [
+   "enable chirp-recorder",
+   [
+    "smd",
+    "enable",
+    "chirp-recorder"
+   ],
+   ""
+  ],
+  [
+   "install chirp-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "chirp-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
    "ensure the RX-888 is on the bus (wait for a slow FX3, recover a latched card)",
    [
     "/usr/local/sbin/sigmond-sdr-recover",
@@ -4738,6 +4759,19 @@
     "install",
     "--components",
     "superdarn-sounder",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install chirp-recorder (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "chirp-recorder",
     "--yes",
     "--no-enable",
     "--no-pull"
@@ -8113,6 +8147,27 @@
    ""
   ],
   [
+   "enable chirp-recorder",
+   [
+    "smd",
+    "enable",
+    "chirp-recorder"
+   ],
+   ""
+  ],
+  [
+   "install chirp-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "chirp-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
    "ensure the RX-888 is on the bus (wait for a slow FX3, recover a latched card)",
    [
     "/usr/local/sbin/sigmond-sdr-recover",
@@ -9256,6 +9311,19 @@
     "install",
     "--components",
     "superdarn-sounder",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install chirp-recorder (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "chirp-recorder",
     "--yes",
     "--no-enable",
     "--no-pull"

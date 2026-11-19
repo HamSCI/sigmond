@@ -24,7 +24,7 @@ Observe (what is, read-only):
     smd admin log         [--files | --level LEVEL] [<client>]         tail journal or file logs
     smd admin diag        [net | cpu-affinity | cpu-freq]              diagnostics
     smd admin environment list | probe | describe                      discover network peers
-    smd watch       <wspr|psk|hfdl|codar|superdarn|meteor|hf-tec|mag|ka9q|radiod|uploads|verifier> [args...] unified service watcher
+    smd watch       <wspr|psk|hfdl|codar|chirp|superdarn|meteor|hf-tec|mag|ka9q|radiod|uploads|verifier> [args...] unified service watcher
     smd admin sources     list | add | remove | apply                  per-client SDR source selection
 
 Operate (run things now, may need sudo):
@@ -20597,7 +20597,7 @@ _smd_complete() {
                     COMPREPLY=($(compgen -W "list install update add remove enable disable help" -- "$cur"))
                     ;;
                 watch)
-                    COMPREPLY=($(compgen -W "wspr psk hfdl codar superdarn meteor hf-tec mag ka9q radiod gpsdo usb uploads verifier" -- "$cur"))
+                    COMPREPLY=($(compgen -W "wspr psk hfdl codar chirp superdarn meteor hf-tec mag ka9q radiod gpsdo usb uploads verifier" -- "$cur"))
                     ;;
                 admin)
                     COMPREPLY=($(compgen -W "$admin_cmds" -- "$cur"))
@@ -26546,6 +26546,19 @@ def _format_codar_record(rec: dict) -> str:
             f'{layer:<11} ({p_idx}/{p_cnt})')
 
 
+def _codar_view_is_chirp(args) -> bool:
+    """True when the CODAR view should read chirp-recorder's spool.
+
+    ``smd watch chirp`` says so outright.  ``smd watch codar`` (and
+    ``smd codar-watch``) follow once codar-sounder's data root is gone
+    and chirp-recorder's exists, so the view survives the retirement.
+    """
+    if getattr(args, 'watch_target', None) == 'chirp':
+        return True
+    return (not Path('/var/lib/codar-sounder').is_dir()
+            and Path('/var/lib/chirp-recorder').is_dir())
+
+
 def cmd_codar_watch(args) -> int:
     """Live tail of codar-sounder's ionospheric-sounding records.
 
@@ -26566,10 +26579,18 @@ def cmd_codar_watch(args) -> int:
     appearing mid-day (first detection on a previously-quiet station)
     are picked up at the next window with their cursor primed at the
     file's current size, so the watch doesn't dump a same-day backlog.
+
+    The same view serves chirp-recorder, which replaces codar-sounder and
+    keeps codar-sounder's record schema.  chirp-recorder writes
+    ``/var/lib/chirp-recorder/<KEY>/physics/<transmitter>/YYYY/MM/DD.jsonl``
+    (KEY = the reporter id).  ``smd watch chirp`` always reads that tree;
+    ``smd watch codar`` reads it too once codar-sounder's data root is gone.
     """
+    client = ('chirp-recorder' if _codar_view_is_chirp(args)
+              else 'codar-sounder')
     try:
         instance = _spool_watch_instance(getattr(args, 'instance', None),
-                                         'codar-sounder')
+                                         client)
     except ValueError as exc:
         _err(f'codar-watch: --instance: {exc}')
         return 1
@@ -26578,7 +26599,7 @@ def cmd_codar_watch(args) -> int:
             r = subprocess.run(
                 ['systemctl', 'list-units', '--no-legend', '--no-pager',
                  '--type=service', '--state=active',
-                 'codar-sounder@*.service'],
+                 f'{client}@*.service'],
                 capture_output=True, text=True, check=False,
             )
         except FileNotFoundError:
@@ -26590,11 +26611,11 @@ def cmd_codar_watch(args) -> int:
             # service isn't running — useful for tailing a stopped
             # service's recent records, and during the post-rebuild
             # restart-pending window.
-            data_root = Path('/var/lib/codar-sounder')
+            data_root = Path(f'/var/lib/{client}')
             if not data_root.is_dir():
-                _err('no active codar-sounder@* service and no '
-                     f'{data_root} directory — is codar-sounder '
-                     'installed? (smd status codar-sounder)')
+                _err(f'no active {client}@* service and no '
+                     f'{data_root} directory — is {client} '
+                     f'installed? (smd status {client})')
                 return 1
             candidates = sorted(
                 (p for p in data_root.iterdir() if p.is_dir()),
@@ -26605,7 +26626,7 @@ def cmd_codar_watch(args) -> int:
                      'recorded yet?')
                 return 1
             instance = candidates[0].name
-            _warn(f'codar-sounder@{_display_rid(instance)} not active — tailing '
+            _warn(f'{client}@{_display_rid(instance)} not active — tailing '
                   f'data dir anyway (records will only update once '
                   f'the service starts)')
         else:
@@ -26617,8 +26638,11 @@ def cmd_codar_watch(args) -> int:
                 except IndexError:
                     _err(f'unexpected unit name: {unit}')
                     return 1
-            instance, _others = _pick_instance_with_data(
-                'codar-sounder', active, '*.jsonl', recursive=True)
+            if client == 'chirp-recorder':
+                instance, _others = sorted(active)[0], sorted(active)[1:]
+            else:
+                instance, _others = _pick_instance_with_data(
+                    'codar-sounder', active, '*.jsonl', recursive=True)
             _watch_pick_note(instance, _others)
 
     # Phase 6 (RADIOD-IDENTIFICATION.md §3.1): codar-sounder keys its
@@ -26626,11 +26650,15 @@ def cmd_codar_watch(args) -> int:
     # template instance.  Resolve via the per-instance config; fall
     # back to the systemd-instance directory for pre-Phase-6 layouts
     # so an unmigrated host still tails its old data.
-    radiod_status = _radiod_status_from_per_instance_config(
-        'codar-sounder', instance)
-    data_dir = (Path(f'/var/lib/codar-sounder/{radiod_status}')
-                if radiod_status
-                else Path(f'/var/lib/codar-sounder/{instance}'))
+    if client == 'chirp-recorder':
+        from sigmond.instance import instance_stem as _stem
+        data_dir = Path(f'/var/lib/chirp-recorder/{_stem(instance)}/physics')
+    else:
+        radiod_status = _radiod_status_from_per_instance_config(
+            'codar-sounder', instance)
+        data_dir = (Path(f'/var/lib/codar-sounder/{radiod_status}')
+                    if radiod_status
+                    else Path(f'/var/lib/codar-sounder/{instance}'))
     if not data_dir.is_dir():
         _err(f'no data directory at {data_dir} — wrong instance?')
         return 1
@@ -26660,7 +26688,7 @@ def cmd_codar_watch(args) -> int:
     WIN_SEC = 15.0  # codar-sounder CPI cadence
 
     _heading(f'CODAR ionospheric soundings ({_display_rid(instance)})')
-    _info('   stage: decoder (codar-sounder) → JSONL spool (pre-SQLite)')
+    _info(f'   stage: decoder ({client}) → JSONL spool (pre-SQLite)')
     _info(f'   ▸ {len(stations)} station(s): {", ".join(stations)}')
     _info(f'   ▸ every {int(WIN_SEC)} s (CPI cadence) — '
           f'per-window rollup')
@@ -32976,6 +33004,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_codar_watch_args(p_w_codar)
 
+    # chirp-recorder's `[client_features.watch] verb = "chirp"` (pre-flight
+    # C13): the same view as `codar`, reading chirp-recorder's physics JSONL.
+    p_w_chirp = watch_sub.add_parser(
+        'chirp',
+        help='live tail of chirp-recorder ionospheric soundings '
+             '(same view as `watch codar`)',
+    )
+    _add_codar_watch_args(p_w_chirp)
+
     p_w_superdarn = watch_sub.add_parser(
         'superdarn',
         help='live tail of superdarn-sounder passive SuperDARN detections '
@@ -33982,7 +34019,7 @@ def main() -> int:
             return cmd_psk_watch(args)
         if target == 'hfdl':
             return cmd_hfdl_watch(args)
-        if target == 'codar':
+        if target in ('codar', 'chirp'):
             return cmd_codar_watch(args)
         if target == 'superdarn':
             return cmd_superdarn_watch(args)

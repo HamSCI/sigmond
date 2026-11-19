@@ -68,6 +68,7 @@ _TEMPLATED_COMPONENTS = (
     "wspr-recorder",
     "hfdl-recorder",
     "codar-sounder",
+    "chirp-recorder",
 )
 
 

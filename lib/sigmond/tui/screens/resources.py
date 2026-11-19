@@ -46,6 +46,7 @@ _SPOOL_TARGETS = [
     ("wspr-recorder",     Path("/var/lib/wspr-recorder")),
     ("hfdl-recorder",     Path("/var/lib/hfdl-recorder")),
     ("codar-sounder",     Path("/var/lib/codar-sounder")),
+    ("chirp-recorder",    Path("/var/lib/chirp-recorder")),
     ("mag-recorder",      Path("/var/lib/mag-recorder")),
     ("hf-timestd",        Path("/var/lib/timestd")),
     ("/var/log",          Path("/var/log")),

@@ -63,6 +63,7 @@ def _smd_binary() -> str:
 # mag-recorder, which are singletons today but plumb reporter_id
 # through their per-instance config schema).
 _INSTANCE_CAPABLE_CLIENTS = (
+    "chirp-recorder",
     "codar-sounder",
     "hf-tec",
     "hfdl-recorder",
