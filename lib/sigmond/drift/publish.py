@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import socket
 import tempfile
 from pathlib import Path
@@ -21,7 +22,6 @@ from typing import Optional
 
 DRIFT_JSON = Path("/var/lib/sigmond/drift.json")
 MACHINE_ID = Path("/etc/machine-id")
-GPSDO_DIR = Path("/run/gpsdo")
 SCHEMA_VERSION = 1
 MAX_FAULTS = 50
 DETAIL_MAX = 200
@@ -55,50 +55,51 @@ def maidenhead(lat: float, lon: float) -> str:
             + chr(97 + ss_lon) + chr(97 + ss_lat))
 
 
-def _gpsdo_has_fix(gpsdo_dir: Path) -> bool:
+LOCATION_MARKER = "# GPSDO location authority"
+
+
+def _marker_on_grid_line(profile: Optional[Path]) -> bool:
+    """True when site-profile's grid_square line carries the marker that
+    sigmond-location-check writes when the GPSDO set the location."""
+    if profile is None:
+        from sigmond import site_profile
+        profile = site_profile.SITE_PROFILE_PATH
     try:
-        files = sorted(Path(gpsdo_dir).glob("*.json"))
+        text = Path(profile).read_text()
     except OSError:
         return False
-    for f in files:
-        if f.name.endswith("index.json"):
-            continue
-        try:
-            health = json.loads(f.read_text()).get("health", {})
-        except (OSError, ValueError, AttributeError):
-            continue
-        return health.get("gps_fix") in ("2D", "3D")
+    for line in text.splitlines():
+        if re.match(r"\s*grid_square\s*=", line):
+            return LOCATION_MARKER in line
     return False
 
 
-def position(coord, *, gpsdo_dir: Optional[Path] = None) -> tuple:
+def position(coord, *, profile: Optional[Path] = None) -> tuple:
     """(grid6, pos_source) for this host.
 
-    Nothing records where a location came from, so this infers it.
-    Coordination holds lat/lon only from a GPS fix (`smd config location`)
-    or an explicit `smd config identity --lat/--lon`; with a GPSDO that
-    reports a fix right now, the position counts as ``gpsdo``.  Otherwise
-    ``operator``.  grid6 comes from lat/lon when present, else from the
-    typed grid (shorter than six characters stays as typed)."""
+    pos_source is ``gpsdo`` when sigmond-location-check marked the
+    site-profile's grid_square line (``# GPSDO location authority``), else
+    ``operator``.  A live GPS fix does not decide it: the fix can drop at
+    timer time.  grid6 comes from lat/lon when coordination holds them,
+    else from the grid (shorter than six characters stays as typed)."""
     host = getattr(coord, "host", None)
     lat = float(getattr(host, "lat", 0.0) or 0.0)
     lon = float(getattr(host, "lon", 0.0) or 0.0)
     grid = (getattr(host, "grid", "") or "").strip()
-    gdir = Path(gpsdo_dir) if gpsdo_dir is not None else GPSDO_DIR
+    src = "gpsdo" if _marker_on_grid_line(profile) else "operator"
     if lat or lon:
-        src = "gpsdo" if _gpsdo_has_fix(gdir) else "operator"
         return maidenhead(lat, lon), src
-    return grid[:6], "operator"
+    return grid[:6], src
 
 
 def receiver_identity(station: str, *, coord, receivers,
-                      gpsdo_dir: Optional[Path] = None) -> list:
+                      profile: Optional[Path] = None) -> list:
     """One {reporter_id, radiod_id, grid6, pos_source} per receiver served.
 
     The receivers come from the site profile's [[receiver]] list; a host
     with none serves one, named by ``station``."""
     from sigmond.instance import display_reporter_id, parse_user_reporter_id
-    grid6, src = position(coord, gpsdo_dir=gpsdo_dir)
+    grid6, src = position(coord, profile=profile)
     out = []
     for r in receivers or ():
         rid = (getattr(r, "reporter_id", "") or "").strip()
@@ -121,7 +122,7 @@ def receiver_identity(station: str, *, coord, receivers,
 
 def build_row(report, *, machine_id: Optional[Path] = None, coord=None,
               receivers=None, hostname: Optional[str] = None,
-              gpsdo_dir: Optional[Path] = None) -> dict:
+              profile: Optional[Path] = None) -> dict:
     faults = []
     for it in report.faults()[:MAX_FAULTS]:
         faults.append({"kind": it.kind, "subject": it.subject,
@@ -136,7 +137,7 @@ def build_row(report, *, machine_id: Optional[Path] = None, coord=None,
         "hostname": hostname if hostname is not None else socket.gethostname(),
         "receivers_json": json.dumps(
             receiver_identity(report.station, coord=coord, receivers=receivers,
-                              gpsdo_dir=gpsdo_dir), sort_keys=True),
+                              profile=profile), sort_keys=True),
         "release": report.release,
         "baseline": report.baseline,
         "n_fault": n_fault,
@@ -198,7 +199,7 @@ def insert_row(row: dict, writer=None) -> bool:
 
 def publish(report, *, path: Optional[Path] = None, writer=None,
             machine_id: Optional[Path] = None, coord=None, receivers=None,
-            hostname: Optional[str] = None, gpsdo_dir: Optional[Path] = None,
+            hostname: Optional[str] = None, profile: Optional[Path] = None,
             say=print) -> bool:
     """Write drift.json, then insert the row.  The file's failure raises;
     the row's failure says one line.  True when both landed."""
@@ -212,7 +213,7 @@ def publish(report, *, path: Optional[Path] = None, writer=None,
             receivers = load_receivers()
         row = build_row(report, machine_id=machine_id, coord=coord,
                         receivers=receivers, hostname=hostname,
-                        gpsdo_dir=gpsdo_dir)
+                        profile=profile)
         if insert_row(row, writer):
             return True
         say("smd align --report: no sigmondb sink took the row; "

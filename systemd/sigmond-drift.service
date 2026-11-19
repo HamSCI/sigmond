@@ -9,6 +9,7 @@ User=root
 Group=root
 Nice=10
 IOSchedulingClass=idle
+TimeoutStartSec=10min
 # Writes /var/lib/sigmond/drift.json and queues one sigmondb row.  Reads the
 # station and repairs nothing; the report names each fix.
 ExecStart=/usr/local/bin/smd align --report

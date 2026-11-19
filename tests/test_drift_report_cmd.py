@@ -67,7 +67,8 @@ def env(tmp_path, monkeypatch):
     path = tmp_path / "var" / "drift.json"
     monkeypatch.setattr(publish, "DRIFT_JSON", path)
     monkeypatch.setattr(publish, "MACHINE_ID", mid)
-    monkeypatch.setattr(publish, "GPSDO_DIR", tmp_path / "no-gpsdo")
+    monkeypatch.setattr("sigmond.site_profile.SITE_PROFILE_PATH",
+                        tmp_path / "no-site-profile.toml")
     monkeypatch.setattr(publish, "make_writer", lambda: w)
     monkeypatch.setattr("sigmond.coordination.load_coordination",
                         lambda *a, **k: _coord())
@@ -183,20 +184,44 @@ def test_row_carries_identity(env):
     assert not {"lat", "lon", "latitude", "longitude"} & set(row)
 
 
-def test_row_names_gpsdo_when_a_gps_fix_gave_the_location(env, tmp_path):
-    g = tmp_path / "gpsdo"
-    g.mkdir()
-    (g / "lbe.json").write_text(json.dumps({"health": {"gps_fix": "3D"}}))
-    coord = _coord(lat=38.9, lon=-92.3)
-    row = publish.build_row(_report(), machine_id=env.mid, coord=coord,
-                            receivers=[], hostname="b4", gpsdo_dir=g)
-    rx = json.loads(row["receivers_json"])
+def _profile(tmp_path, grid_line):
+    p = tmp_path / "site-profile.toml"
+    p.write_text('[station]\ncallsign = "AC0G"\n' + grid_line + "\n")
+    return p
+
+
+def _pos_source(env, tmp_path, profile, coord=None):
+    row = publish.build_row(_report(), machine_id=env.mid,
+                            coord=coord or _coord(), receivers=[],
+                            hostname="b4", profile=profile)
+    return json.loads(row["receivers_json"])
+
+
+def test_pos_source_gpsdo_when_location_check_marked_the_grid(env, tmp_path):
+    prof = _profile(tmp_path,
+                    'grid_square = "EM38uv"   # GPSDO location authority')
+    rx = _pos_source(env, tmp_path, prof, _coord(lat=38.9, lon=-92.3))
     assert rx == [{"reporter_id": "AC0G-B4",
                    "radiod_id": "sigma-status.local",
-                   "grid6": publish.maidenhead(38.9, -92.3),
-                   "pos_source": "gpsdo"}]
-    assert len(rx[0]["grid6"]) == 6
+                   "grid6": "EM38uv", "pos_source": "gpsdo"}]
     assert publish.maidenhead(38.9, -92.3) == "EM38uv"
+
+
+def test_pos_source_operator_without_the_marker(env, tmp_path):
+    prof = _profile(tmp_path, 'grid_square = "EM38ww"')
+    assert _pos_source(env, tmp_path, prof)[0]["pos_source"] == "operator"
+    assert _pos_source(env, tmp_path, tmp_path / "absent")[0][
+        "pos_source"] == "operator"
+
+
+def test_a_live_gps_fix_without_the_marker_stays_operator(env, tmp_path):
+    prof = _profile(tmp_path, 'grid_square = "EM38ww"')
+    g = tmp_path / "run-gpsdo"
+    g.mkdir()
+    (g / "lbe.json").write_text(json.dumps({"health": {"gps_fix": "3D"}}))
+    assert not hasattr(publish, "_gpsdo_has_fix")
+    rx = _pos_source(env, tmp_path, prof, _coord(lat=38.9, lon=-92.3))
+    assert rx[0]["pos_source"] == "operator"
 
 
 def test_host_key_stable_across_rename(env):
@@ -313,3 +338,16 @@ def test_shipped_drift_units_carry_the_required_values():
     for line in ("ExecStart=/usr/local/bin/smd align --report", "Nice=10",
                  "IOSchedulingClass=idle"):
         assert line in svc
+
+
+def test_report_is_exclusive_with_apply():
+    with contextlib.redirect_stderr(io.StringIO()), \
+         pytest.raises(SystemExit) as cm:
+        smd._build_parser().parse_args(["align", "--report", "--apply"])
+    assert cm.value.code == 2
+
+
+def test_drift_service_has_a_start_timeout():
+    root = Path(__file__).resolve().parent.parent / "systemd"
+    assert "TimeoutStartSec=10min" in (
+        root / "sigmond-drift.service").read_text().splitlines()

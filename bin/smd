@@ -31441,7 +31441,7 @@ def _build_parser() -> argparse.ArgumentParser:
     mode.add_argument('--json', action='store_true',
                       help='dry run only: print the drift report (and the plan '
                            'under "plan") as one JSON document, nothing else')
-    p.add_argument('--report', action='store_true',
+    mode.add_argument('--report', action='store_true',
                    help='what the daily drift timer runs: write '
                         '/var/lib/sigmond/drift.json and queue one sigmondb '
                         'row (needs root)')
