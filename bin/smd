@@ -8026,26 +8026,42 @@ _ALIGN_RADIOD_REBUILT_REASON = 'binary rebuilt after radiod started'
 
 def _align_note_radiod_rebuilt() -> None:
     """Record the radiod binary align just built.  Best effort: without the
-    note, a later run only misses a restart this run did not do."""
+    note, a later run only misses a restart this run did not do.
+
+    /var/lib/sigmond is writable by service accounts, so the write goes
+    through safe_write as the native-build-failed markers do: the parent
+    opened O_NOFOLLOW (a symlinked parent is refused), a random O_EXCL
+    temporary name, and a rename that replaces a planted link at the note's
+    name instead of writing through it."""
+    from sigmond.safe_write import _open_parent, _write_at
     built = _align_radiod_built_at()
     if built is None:
         return
+    path = _ALIGN_RADIOD_REBUILT
     try:
-        _ALIGN_RADIOD_REBUILT.parent.mkdir(parents=True, exist_ok=True)
-        tmp = _ALIGN_RADIOD_REBUILT.with_name(_ALIGN_RADIOD_REBUILT.name + '.tmp')
-        tmp.write_text(f'{built!r}\n')
-        os.replace(tmp, _ALIGN_RADIOD_REBUILT)
+        dfd = _open_parent(path.parent)
     except OSError as exc:
         _warn(f'align: could not note the radiod rebuild ({exc}); a later run '
               f'will not know radiod still needs a restart')
+        return
+    try:
+        _write_at(dfd, os.fstat(dfd), path.name, path, f'{built!r}\n'.encode(),
+                  0o644, (0, 0) if os.geteuid() == 0 else None)
+    except (OSError, ValueError) as exc:
+        _warn(f'align: could not note the radiod rebuild ({exc}); a later run '
+              f'will not know radiod still needs a restart')
+    finally:
+        os.close(dfd)
 
 
 def _align_radiod_rebuilt_at() -> Optional[float]:
     """The mtime of a radiod binary align rebuilt, while that binary is
     still the one installed; None otherwise (no note, or another install
-    has replaced it since: then the same-bytes guard decides)."""
+    has replaced it since: then the same-bytes guard decides).  Read
+    without following a symlink: a planted link reads as no note."""
+    from sigmond.safe_write import read_nofollow
     try:
-        noted = float(_ALIGN_RADIOD_REBUILT.read_text().strip())
+        noted = float((read_nofollow(_ALIGN_RADIOD_REBUILT) or '').strip())
     except (OSError, ValueError):
         return None
     built = _align_radiod_built_at()

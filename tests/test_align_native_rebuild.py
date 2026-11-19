@@ -376,6 +376,49 @@ class AlignStalenessRebuiltTests(unittest.TestCase):
         self.assertIn("ka9q-radio", rebuilt["stale"])
 
 
+class AlignRadiodRebuiltNoteSafetyTests(_Rig):
+    """Fix round 2: /var/lib/sigmond is writable by service accounts, so
+    the note is written and read without following a planted symlink."""
+
+    def setUp(self):
+        super().setUp()
+        self._record("ka9q-web", self.new["ka9q-web"])
+        self.victim = Path(self._tmp.name) / "victim"
+        self.victim.write_text("precious\n")
+
+    def test_symlinks_at_note_and_tmp_names_leave_the_target_untouched(self):
+        self.marker.symlink_to(self.victim)
+        tmp_link = self.marker.with_name(self.marker.name + ".tmp")
+        tmp_link.symlink_to(self.victim)
+        rc, out, _ = self._apply()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.victim.read_text(), "precious\n")
+        # The link itself was replaced by a regular file holding the note.
+        self.assertFalse(self.marker.is_symlink())
+        self.assertEqual(float(self.marker.read_text().strip()),
+                         self.radiod_bin.stat().st_mtime)
+        self.assertTrue(tmp_link.is_symlink())       # never written through
+
+    def test_symlinked_parent_skips_the_note_with_a_warning(self):
+        real = Path(self._tmp.name) / "real-state"
+        real.mkdir()
+        linked = Path(self._tmp.name) / "linked-state"
+        linked.symlink_to(real)
+        err = io.StringIO()
+        with mock.patch.object(smd, "_ALIGN_RADIOD_REBUILT", linked / "align-radiod-rebuilt"), \
+             contextlib.redirect_stderr(err):
+            rc, out, _ = self._apply()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(list(real.iterdir()), [])
+        self.assertIn("could not note the radiod rebuild", out + err.getvalue())
+
+    def test_a_symlinked_note_reads_as_no_note(self):
+        noted = Path(self._tmp.name) / "planted"
+        noted.write_text(f"{self.radiod_bin.stat().st_mtime!r}\n")
+        self.marker.symlink_to(noted)
+        self.assertIsNone(smd._align_radiod_rebuilt_at())
+
+
 class AlignRadiodRestartDueTests(_Rig):
     """Reviewer Minor 1: a radiod align rebuilt but did not restart stays a
     restart due on later runs, through the marker, while an identical-bytes
