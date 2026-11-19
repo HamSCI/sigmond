@@ -133,3 +133,20 @@
 - Test: `tests/test_docs*.py`, `scripts/docs-linkcheck.py docs`
 
 - [ ] **Step 1:** Write the doc changes; plain, short sentences, active voice.  **Step 2:** Run the docs checks and the full suite (`.venv/bin/pytest -q -p no:cacheprovider --basetemp=$HOME/.cache/pytest-tmp/v394 tests`).  **Step 3:** Commit `docs: v3.94 align rebuilds and unit enables; drift corrections`.
+
+### Task 8: Device-reading clients follow their local device (added 2026-11-19, Michael: "Yes")
+
+Why: AC1SN (installed 10-15, before 770763b) kept gmag-webui enabled with no magnetometer.  `harmonize.dormant_reason` gates only the `smd start` verb; nothing re-senses an existing station, and sigmond's own gmag-webui unit carries no device condition (mag-recorder's carries `ConditionPathExists=/dev/ttyMAG0`).  Scope: only clients that read a device on this machine's USB (catalog `hardware_gated`: mag-recorder, gmag-webui, gpsdo-monitor).  hf-timestd and T6 are never gated on local USB: they work from the RF input, fed by a GPSDO or TS-1 on another machine (B2, KFS-MAIN, SIGMA behind B4).
+
+**Files:**
+- Modify: `bin/smd` (`_align_bringup` or the step Task 5 added; reuse `_dormant_disable_units`), `lib/sigmond/gmag_webui.py` (the unit sigmond renders), `lib/sigmond/hardware.py` if gmag-webui needs mag-recorder's readiness
+- Test: `tests/test_align_device_gate.py`
+
+**Interfaces:**
+- Consumes: `harmonize.dormant_reason(name, enabled=True)`, `_dormant_disable_units(name)`, `hardware.hardware_ready(component) -> Optional[bool]`.
+- Produces: `_align_follow_devices(apply: bool) -> int` in `bin/smd`, called from `_align_bringup`.  For each topology-enabled `hardware_gated` component: device confidently absent (`False`) -> dry run prints `would switch off <name>: no <label> on this machine`; `--apply` stops and disables its units (the existing `_dormant_disable_units` path) and leaves topology `enabled` as is, so the component comes back when the device returns.  Device present and units disabled -> `--apply` enables and starts them (an explicit operator verb, so this respects Rob's rule that hardware appearing alone starts nothing).  Unknown (`None`) -> no change, one info line.
+- gmag-webui readiness follows mag-recorder's (same magnetometer): if `hardware_ready('gmag-webui')` returns None because gmag-webui has no inventory CLI, map it to mag-recorder's answer.
+- The rendered gmag-webui unit gains `ConditionPathExists=/dev/ttyMAG0` with a one-line comment, as mag-recorder's unit has.
+
+- [ ] **Step 1: Failing tests** (real `cmd_align` via `_apply_patches`; stub only `hardware_ready`/inventory and systemctl): `test_absent_magnetometer_switches_off_mag_clients` (AC1SN: both mag clients enabled+active, device False -> stop+disable argv for both, topology unchanged); `test_present_device_reenables`; `test_unknown_readiness_changes_nothing`; `test_dry_run_only_names`; `test_hf_timestd_never_gated` (no TS-1/GPSDO on USB -> no hf-timestd unit touched); `test_gmag_webui_unit_has_device_condition`.
+- [ ] **Step 2:** FAIL.  **Step 3:** Implement.  **Step 4:** PASS + `tests/test_align_cli.py tests/test_harmonize*.py`.  **Step 5:** Commit `align: device-reading clients follow their local device; gmag-webui unit waits for the magnetometer`.
