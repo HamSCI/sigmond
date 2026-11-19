@@ -56,7 +56,7 @@ from __future__ import annotations
 import os
 import re
 import tomllib
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Optional
 
@@ -268,9 +268,14 @@ _DOCTOR_CMD = 'smd doctor'
 #: read-only by construction; harvests the station identity PUBLIC key
 #: for the heartbeat drop's authorized_keys.
 _PUBKEY_CMD = 'cat /etc/hs-uploader/keys/id_ed25519_host.pub'
+#: The drift report the daily timer writes; and `smd check`, whose
+#: drift line says whether that report holds an open fault.  Both read.
+_DRIFT_FILE_CMD = 'cat /var/lib/sigmond/drift.json'
+_CHECK_JSON_CMD = 'smd check --json'
 READ_ONLY_COMMANDS: tuple[str, ...] = (_PROBE_CMD, _VERSION_CMD,
                                        _MANIFEST_CMD, _DOCTOR_CMD,
-                                       _PUBKEY_CMD)
+                                       _PUBKEY_CMD, _DRIFT_FILE_CMD,
+                                       _CHECK_JSON_CMD)
 
 
 @dataclass(frozen=True)
@@ -322,6 +327,27 @@ class HostStatus:
     blessed_source: str = 'none'
     drift: list = field(default_factory=list)
     behind: Optional[int] = None
+    release: Optional[str] = None
+    faults: Optional[int] = None
+    drift_count: Optional[int] = None
+
+
+def _drift_summary(host, run) -> dict:
+    """release, faults and drift counts from the host's drift.json.
+    Empty when the host has no readable report."""
+    import json as _json
+    try:
+        r = run(host, _DRIFT_FILE_CMD)
+        doc = _json.loads(r.out) if r.rc == 0 else None
+    except Exception:                       # noqa: BLE001
+        return {}
+    if not isinstance(doc, dict):
+        return {}
+    items = [i for i in (doc.get('items') or []) if isinstance(i, dict)]
+    n_fault = sum(1 for i in items if i.get('severity') == 'fault')
+    rel = doc.get('release')
+    return {'release': str(rel) if rel else None, 'faults': n_fault,
+            'drift_count': len(items) - n_fault}
 
 
 def fleet_status(fleet: dict, run, commits_behind=None) -> list:
@@ -369,9 +395,13 @@ def fleet_status(fleet: dict, run, commits_behind=None) -> list:
     out = []
     for host in fleet.values():
         try:
-            out.append(_status_for(host, run, commits_behind,
-                                   _parse_manifest_components,
-                                   drift_text))
+            st = _status_for(host, run, commits_behind,
+                             _parse_manifest_components, drift_text)
+            if st.reachable and st.has_sigmond:
+                extra = _drift_summary(host, run)
+                if extra:
+                    st = replace(st, **extra)
+            out.append(st)
         except Exception as exc:            # noqa: BLE001 — see docstring
             out.append(HostStatus(host=host, reachable=False,
                                   error=f'{type(exc).__name__}: {exc}'))
@@ -516,6 +546,12 @@ def format_status(statuses: list) -> str:
                 behind = f'{s.behind} behind main'
             lines.append(f'{name}  sigmond {sha}  {behind}  '
                          f'[no manifest — unblessed]')
+        if s.reachable and s.has_sigmond:
+            if s.faults is None:
+                lines[-1] += '  [no drift report]'
+            else:
+                lines[-1] += (f'  [release {s.release or "?"}  '
+                              f'faults {s.faults}  drift {s.drift_count}]')
         if s.host.frozen:
             lines.append(f'{" " * width}  FROZEN: {s.host.frozen}')
     return '\n'.join(lines)
@@ -836,6 +872,34 @@ class HostUpdate:
     verified: Optional[bool] = None
     behind: Optional[int] = None
     error: Optional[str] = None
+    open_fault: bool = False
+
+
+def _has_open_fault(host, run) -> bool:
+    """True when `smd check --json` reports the drift line as FAIL.
+    The check exits nonzero on a fault, so the exit code does not count;
+    only a parsed drift line does.  Unreadable output counts as no fault."""
+    import json as _json
+    try:
+        doc = _json.loads(run(host, _CHECK_JSON_CMD).out)
+        lines = doc.get('lines') or []
+    except Exception:                       # noqa: BLE001
+        return False
+    return any(isinstance(ln, dict) and ln.get('label') == 'drift'
+               and ln.get('mark') == 'FAIL' for ln in lines)
+
+
+def _name_open_faults(results: list, run) -> list:
+    """Mark each host that finished the run reachable with a drift fault.
+    Read-only, and it never changes a result's verdict, so the roll goes on."""
+    out = []
+    for r in results:
+        if (r.skipped or r.halted or not r.reachable or not r.has_sigmond
+                or not _has_open_fault(r.host, run)):
+            out.append(r)
+        else:
+            out.append(replace(r, open_fault=True))
+    return out
 
 
 def choose_canary(fleet: dict) -> Host:
@@ -904,7 +968,7 @@ def fleet_update(fleet: dict, run, apply: bool = False,
     if not apply:
         for host in live.values():
             results.append(_plan_only(host, run, commits_behind))
-        return _in_inventory_order(fleet, results)
+        return _in_inventory_order(fleet, _name_open_faults(results, run))
 
     canary = choose_canary(fleet)
     outcome = _update_one(canary, run, commits_behind)
@@ -921,7 +985,7 @@ def fleet_update(fleet: dict, run, apply: bool = False,
         results.append(outcome)
         halted = not (outcome.verified is True)
 
-    return _in_inventory_order(fleet, results)
+    return _in_inventory_order(fleet, _name_open_faults(results, run))
 
 
 def _in_inventory_order(fleet: dict, results: list) -> list:
@@ -1120,6 +1184,11 @@ def format_update(results: list) -> str:
             lines.append(f'{name}: has a plan{suffix}')
             for line in r.plan.splitlines():
                 lines.append(f'    {line}')
+    faulted = [r.host.name for r in results if r.open_fault]
+    if faulted:
+        lines.append('')
+        lines.append(f'open faults: {", ".join(faulted)}  '
+                     f'(smd check on each station names the fix)')
     return '\n'.join(lines)
 
 

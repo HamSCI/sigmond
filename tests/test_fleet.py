@@ -873,7 +873,8 @@ class TestFleetUpdateDryRun:
         assert all(not r.applied for r in results)
         for _host, command in run.calls:
             assert '--apply' not in command
-            assert command in UPDATE_COMMANDS
+            # the end-of-run drift check is a read, named in READ_ONLY_COMMANDS
+            assert command in UPDATE_COMMANDS + ('smd check --json',)
 
     def test_a_current_host_produces_an_empty_plan(self):
         fleet = _fleet(Host(name='a', reach='r', canary=True))
@@ -957,7 +958,8 @@ class TestCanaryThenWave:
         run = updating_runner({'canary', 'wave1', 'wave2'})
         fleet_update(fleet, run, apply=True)
 
-        order = [(h, c) for h, c in run.calls if c != 'true']
+        order = [(h, c) for h, c in run.calls
+                 if c not in ('true', 'smd check --json')]
         assert ('canary', 'smd update --apply') in order
         canary_verified = max(i for i, (h, c) in enumerate(order)
                               if h == 'canary')
@@ -973,7 +975,8 @@ class TestCanaryThenWave:
         [result] = fleet_update(fleet, run, apply=True)
         assert result.applied is True
         assert result.verified is True
-        assert run.calls[-1][1] == 'smd update'
+        assert [c for _h, c in run.calls
+                if c != 'smd check --json'][-1] == 'smd update'
 
     def test_every_wave_host_is_updated_once_the_canary_holds(self):
         fleet = _fleet(Host(name='canary', reach='r', canary=True),

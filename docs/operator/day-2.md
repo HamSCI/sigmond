@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond f3b0c6e on 2026-11-18 — storage ledger, F16 raw IQ, `smd archive add --upgrade` and dormant components checked against `smd <verb> --help`, commands/archive.py, hf-timestd's README and its ledger gate (b4fed24e); the dated 2026-08 sample outputs were not re-run. Earlier: sigmond 5554c6e on 2026-11-13 — verbs and flags against `smd <verb> --help`, archive section against commands/archive.py and hf-timestd b7f5a56 (archiver and prune timers), update section against bin/smd and update.py; sample outputs dated 2026-08 not re-run. Routing passages: sigmond 0d9e879 on 2026-11-13 — every spot goes to wsprdaemon.org, checked against uniform_routing.py, uploader_manifest.apply_proxying, upload.py, bin/smd `watch uploads` and wspr-recorder's hs_uploader_shim.py. Earlier: sigmond 913bfed on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 007bf72 on 2026-10-10: remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; held packages against sink_doors.py
+> **Verified against:** sigmond 127fab9 on 2026-11-19 — storage ledger, F16 raw IQ, `smd archive add --upgrade` and dormant components checked against `smd <verb> --help`, commands/archive.py, hf-timestd's README and its ledger gate (b4fed24e); the dated 2026-08 sample outputs were not re-run. Earlier: sigmond 5554c6e on 2026-11-13 — verbs and flags against `smd <verb> --help`, archive section against commands/archive.py and hf-timestd b7f5a56 (archiver and prune timers), update section against bin/smd and update.py; sample outputs dated 2026-08 not re-run. Routing passages: sigmond 0d9e879 on 2026-11-13 — every spot goes to wsprdaemon.org, checked against uniform_routing.py, uploader_manifest.apply_proxying, upload.py, bin/smd `watch uploads` and wspr-recorder's hs_uploader_shim.py. Earlier: sigmond 913bfed on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 007bf72 on 2026-10-10: remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; held packages against sink_doors.py
 > **Canonical for:** day-2 operation — what healthy looks like, the weekly check, updates, power loss
 
 The station is meant to be boring. It runs itself, it restarts itself after a
@@ -667,6 +667,14 @@ then names the held components and moves none of them. A line such as
 `nothing to do — 2 component(s) HELD (…); the rest of the host is current`
 does not mean everything runs the newest code. Your fleet admin releases a hold
 with `smd update --unpin`, so leave that flag alone too.
+
+**What differs from the release.** `smd check` ends with a `drift` line. A
+daily timer writes the station's drift report, and the line reads it. It shows
+`ok` when nothing needs action, and `FAIL` with the first fault and its fix when
+something does. Run `smd align` with no flags to see every difference, each with
+a one-line fix. If a difference should stay, record it with `smd align --accept
+<kind:subject> --reason "<why>"`; add `--test` for a trial you will undo. The
+check page, [platform.drift](checks/platform.drift.md), explains each message.
 
 **A component the station lacks.** `smd align` does not install a component
 this station has never had, unless topology enables it. The dry run lists such a

@@ -2,7 +2,7 @@
 
 > **Audience:** all
 > **Status:** current
-> **Verified against:** sigmond f3b0c6e on 2026-11-18
+> **Verified against:** sigmond 127fab9 on 2026-11-19
 > **Canonical for:** the map of sigmond/docs
 
 Reading-order map. ★ = canonical — when two docs disagree, the ★ one wins.
@@ -39,7 +39,7 @@ Front door for each audience: [docs/README.md](README.md).
 | [operator/remote-access.md](operator/remote-access.md) ★ | Remote access (RAC): what the outbound tunnel is, that it runs on the Proxmox host and not the VM, the six channels it exposes and who can reach them, turning it off and on with `smd remote` in the VM, why the dashboard's `root@` ssh command cannot work, and what to do when remote access does not come up |
 | [operator/radiod-only.md](operator/radiod-only.md) ★ | A radiod-only station: when to choose it, bare-metal and Proxmox-VM builds (cloud image, standard kernel, never `qm clone` the decoder VM, two cores and 4 GB), 64.8 Msps below 32 MHz, the `/29` host-only bridge and the CLAT MSS clamp, `HOST_RESERVE_PAIRS`, re-running the layout and the manual VM re-bind, `bridge-mcsnoop 0` and the IGMP querier, and attaching it to a decoder host with `smd admin sources`, coordination `host =` and `smd apply` |
 | [operator/troubleshooting.md](operator/troubleshooting.md) ★ | Symptom-first troubleshooting: the 2-minute triage, fifteen symptoms each with likely causes / what to check / what to do / when to stop and ask, the replug-restart-reboot-reinstall ladder, exactly what to send when asking for help, and what not to touch while chasing a fault |
-| [operator/checks/README.md](operator/checks/README.md) ★ | One page per `smd check` line, linked from the station pages' Check page: what the check looks at, what healthy looks like, what each WAIT and FAIL means, what to do, and where to look closer |
+| [operator/checks/README.md](operator/checks/README.md) ★ | One page per `smd check` line (including [platform.drift](operator/checks/platform.drift.md), how a station differs from its release), linked from the station pages' Check page: what the check looks at, what healthy looks like, what each WAIT and FAIL means, what to do, and where to look closer |
 | [commands/smd.md](commands/smd.md) | Real `smd` output from AC0G-B4, one section per read-only command, feeding the station Commands page: what each command is for and how to read what it prints |
 | [operator/do-not-touch.md](operator/do-not-touch.md) ★ | The guard rails: the seventeen things an operator must not do on a station — `sudo smd`, `apt`/`pip`/`git pull`, a client's own `install.sh`, `smd install ka9q-radio`, `smd apply`, `smd config <client> edit`, hand-edits to `/etc/radio` or `/etc/sigmond`, CPU/VM changes, moving without `--reconfigure` — each with the cited reason and what to do if you already did it, plus what you may do freely |
 | [operator/hardware.md](operator/hardware.md) (pointer) | Redirects to `hardware/shopping-list.md` — the parts list is shared with the scientist path |

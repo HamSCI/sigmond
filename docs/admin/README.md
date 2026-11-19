@@ -2,7 +2,7 @@
 
 > **Audience:** fleet administrator
 > **Status:** current
-> **Verified against:** sigmond f3b0c6e on 2026-11-18 — code: `bin/smd` argparse for every verb named here, `scripts/proxmox/pm-align.py`, `lib/sigmond/instance_split.py`, `lib/sigmond/uniform_routing.py`, `systemd/sigmond-storage.timer`; sigmond-appliance `docs/RELEASE.md`, `bless-release.sh` and `test-update-v3.sh`
+> **Verified against:** sigmond 127fab9 on 2026-11-19 — code: `bin/smd` argparse for every verb named here, `scripts/proxmox/pm-align.py`, `lib/sigmond/instance_split.py`, `lib/sigmond/uniform_routing.py`, `systemd/sigmond-storage.timer`; sigmond-appliance `docs/RELEASE.md`, `bless-release.sh` and `test-update-v3.sh`
 > **Canonical for:** what a fleet administrator does
 
 An operator hosts one station.  An administrator looks after all of them
@@ -36,7 +36,7 @@ station, so an operator can watch them work.
 |---|---|---|---|
 | Cut and prove a release | A station should run only a combination of code that someone has tested together | `smd version`, `smd align --manifest`, the appliance's `bless-release.sh` | [RELEASE.md](https://github.com/HamSCI/sigmond-appliance/blob/main/docs/RELEASE.md) |
 | Keep stations current | Fixes help no one until they reach the stations | `smd update`, `smd align`, `pm-align`, `smd version` | [day-2 §Updates](../operator/day-2.md#updates--who-decides-and-what-you-run) |
-| Watch the fleet | A station can run, look healthy, and send nothing | `smd status`, `smd check`, `smd watch uploads`, `smd sink status` | [day-2](../operator/day-2.md), [registration §6](../operator/registration.md#6-confirming-everything-flows) |
+| Watch the fleet | A station can run, look healthy, and send nothing | `smd status`, `smd check`, `smd align`, `smd watch uploads`, `smd sink status` | [day-2](../operator/day-2.md), [registration §6](../operator/registration.md#6-confirming-everything-flows) |
 | Manage storage | Raw IQ fills a disk in hours, and a full disk stops a station | `smd storage status`, `smd archive add\|remove\|status` | [storage design](../superpowers/specs/2026-11-04-storage-capacity-design.md) |
 | Set uploads and identity | Data must leave under the right name, to the right place | `smd sink`, `smd config reporters`, `smd config psws`, `smd psws` | [registration](../operator/registration.md) |
 | Reach a station remotely | Many problems need hands on a station the operator cannot fix | `smd remote status\|on\|off` | [remote access](../operator/remote-access.md) |
@@ -109,12 +109,12 @@ runs from outside, one host at a time.
 
 | Command | Where | What it does |
 |---|---|---|
-| `smd version` | station | Prints what really runs: the image the station started from, then every component's live commit, then the recent updates.  The file `/etc/sigmond-appliance/version` records only the install and goes stale. |
+| `smd version` | station | Prints what really runs: the image the station started from, then every component's live commit, each component's lifecycle state and version policy, then the recent updates.  It replaces the old `smd component list`, which now prints the same table with a note.  The file `/etc/sigmond-appliance/version` records only the install and goes stale. |
 | `smd update` | station | Plans an update and prints it.  `--apply` performs it.  A station fresh from an image holds each component at its blessed pin; `--unpin` releases the holds, and `--latest` moves everything to the newest code, for test stations only. |
 | `smd align` | station | Shows how far the station sits from the latest blessed release.  `--apply` moves the components, refreshes image files, re-runs bring-up and restarts stale services, radiod first.  `--release` names an older release; `--manifest` names an unblessed candidate; `--verify` reports gaps and uploads since the last align. |
 | `pm-align` | Proxmox host | The host's counterpart to `smd align`.  It brings the host's own files level with the release and pairs the host with its decoder VM.  It never touches the host's network, CPU tuning, Proxmox packages or VM configuration. |
 | `smd admin manifest adopt` | station | Records a blessed manifest on a live station whose components already match it.  It refuses unless every commit matches. |
-| `smd fleet status`, `smd fleet update` | administrator's machine | Ask every station in the administrator's inventory how it compares with its blessed pins.  `fleet update` plans canary first, verify, then the rest. |
+| `smd fleet status`, `smd fleet update` | administrator's machine | Ask every station in the administrator's inventory how it compares with its blessed pins.  `status` adds each station's release, open faults and drift count, read from its drift report.  `fleet update` plans canary first, verify, then the rest.  Its summary ends with `open faults: <stations>`, naming each station whose drift report holds a fault.  A fault never stops the roll; it asks for a fix on that station. |
 
 Each command here that changes a station runs as a dry run unless given
 `--apply`.  Read the plan before applying it.
@@ -143,6 +143,78 @@ what the station says about itself.
 | `smd watch uploads` | A live view of upload activity on one station. |
 | `smd storage status` | Each store's fill and each client's share (section 4). |
 | `smd version` | Whether a station's components match the release it claims. |
+| `smd align` | How the station differs from its release: the drift report (next subsection). |
+
+### The drift report
+
+`smd align` without flags prints the drift report.  It lists every way one
+station differs from the release it claims, or from the candidate a canary
+recorded.  Each difference is one item.  Six kinds exist: source (a checkout
+behind, ahead of or diverged from its pin, or a missing component), build (a
+built program whose stamp does not match its checkout), unit (a systemd unit a
+component declares that is absent or not enabled), override (a config key that
+points a component away from the release's choice), stray (a file or unit
+instance that no component accounts for) and host (the Proxmox host's files,
+carried into the VM's report).  Each item has a severity.  A `fault` changes
+behavior.  `drift` differs, probably harmlessly.  Each item also carries a
+one-line fix.
+
+The report reaches you in four ways.
+
+- **`drift.json`.**  The daily timer `sigmond-drift.timer` runs `smd align
+  --report`.  That writes `/var/lib/sigmond/drift.json` and queues one
+  `station_drift` row for sigmondb.  `smd align --apply` rewrites the file when
+  it finishes, so a fixed fault does not stay red until the next day.  The
+  timer runs on every install.
+- **`smd check`.**  Its `drift` line reads the file.  It shows FAIL for a fault,
+  WAIT when the file passes 36 hours of age, and `--` before the first run.
+  See [platform.drift](../operator/checks/platform.drift.md).
+- **`smd align --json`.**  The same report for a script.
+- **`smd fleet status` and `smd fleet update`.**  The first shows release,
+  faults and drift per station.  The second names stations with open faults at
+  the end of its summary and keeps rolling.
+
+Three commands change the report.  `smd align --apply` removes drift it can
+fix.  `smd align --accept KEY --reason "<why>"` records an intended
+difference.  KEY has the form `kind:subject`, for example
+`unit:hf-timestd-fusion.service`.  Add `--test` for a trial you mean to undo,
+and `--until YYYY-MM-DD` to set the end date.
+
+**The exceptions file.**  `/etc/sigmond/drift-exceptions.toml` holds one entry
+per accepted item: the key, the reason, who accepted it, the kind (`test` or
+`standing`), and the first and last day, in UTC.  While an entry holds, its item
+leaves the counts and shows under "accepted" with the days remaining.  The
+limits:
+
+| Kind | Default | Longest | After the last day |
+|---|---|---|---|
+| `test` | 7 days | 30 days | A reminder shows from the day before the end.  Then the item counts as a fault until someone restores baseline or renews the test with a new reason. |
+| `standing` | 30 days | 180 days | The item returns at its own severity. |
+
+An entry that matches no current item stays in the file and shows nowhere.
+`--accept` refuses an unparseable file rather than overwrite it, and keeps a
+`.bak` copy when it drops entries that did not parse.
+
+**What the station reports.**  The `station_drift` row carries the reporter id,
+release, baseline, counts by kind and severity, and the fault items.  It also
+carries the station's identity: a `host_key` (twelve hex digits of a hash of
+`/etc/machine-id`, which survives a rename), the hostname, and one entry per
+receiver with reporter id, radiod id, six-character grid and `location_source`.
+No precise position leaves the station in this row.  `location_source` reads
+`gpsdo` when the GPSDO set the location and `operator` when a person typed it.
+Every install with a GPSDO now runs `sigmond-location-check` (its timer runs
+everywhere; its service starts only when `/run/gpsdo` exists), so bare-metal
+hosts record the source as the appliance does.  A bare-metal host gets the
+current script with the sigmond-appliance refresh, so a release carries both.
+
+**The board.**  The fleetboard reads the rows.  A fault opens an alarm naming
+the station and the item.  Drift shows without an alarm.  A test that nears its
+end shows a reminder.  The public view carries only the station, the kind, the
+severity and a canned sentence.  Paths, commands, reasons and operator names stay
+in the private alarm table.  `ops/bin/fleet-map-export` builds the station map
+from the rows, so a station names itself and `fleet.toml` keeps only how to reach
+it.  Stations that send no row stay on their hand entries in the `[board]`
+tables.
 
 Stations used to send a heartbeat every five minutes to a central fleet board.
 Since v3.84 the setup wizard leaves the heartbeat off, so newer stations send
