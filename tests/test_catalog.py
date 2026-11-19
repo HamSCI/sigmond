@@ -22,6 +22,12 @@ from sigmond.catalog import (
 REPO_CATALOG = Path(__file__).resolve().parent.parent / 'etc' / 'catalog.toml'
 
 
+# chirp-recorder sits in no profile until its repo is published (Task 18);
+# a profile entry would make bringup/readiness --with-optional clone a 404.
+# It joins the dasi2 and client `optional` lists at Task 24; delete this then.
+UNPUBLISHED_CLIENTS = frozenset({'chirp-recorder'})
+
+
 class TestLoadCatalog:
     def test_repo_default_loads(self):
         entries = load_catalog(REPO_CATALOG)
@@ -141,13 +147,20 @@ class TestLoadCatalog:
             for key in ('clients', 'local_radiod_infra', 'optional'):
                 claimed.update(profile.get(key) or [])
 
+        # Not yet published: github.com/HamSCI/chirp-recorder 404s until
+        # Task 18 passes, so a profile naming it would make bringup and
+        # readiness --with-optional clone a missing repo.  It joins the
+        # dasi2 and client profiles at Task 24; remove it from this set then.
+        unpublished = {'chirp-recorder'}
         orphans = []
         for name, entry in cat.get('client', {}).items():
-            if entry.get('kind') != 'client':
+            if entry.get('kind') != 'client' or name in unpublished:
                 continue
             if int(entry.get('start_priority') or 0) < 200:
                 continue
             if entry.get('hardware_gated'):
+                continue
+            if name in UNPUBLISHED_CLIENTS:
                 continue
             if name not in claimed:
                 orphans.append(name)

@@ -26653,6 +26653,16 @@ def cmd_codar_watch(args) -> int:
     if client == 'chirp-recorder':
         from sigmond.instance import instance_stem as _stem
         data_dir = Path(f'/var/lib/chirp-recorder/{_stem(instance)}/physics')
+        # A configured [paths] output_dir moves the tree (chirp-recorder
+        # config.py: output_dir defaults to /var/lib/chirp-recorder/<KEY>).
+        try:
+            with open(Path(f'/etc/chirp-recorder/{_stem(instance)}.toml'),
+                      'rb') as fh:
+                _out = (tomllib.load(fh).get('paths') or {}).get('output_dir')
+            if _out:
+                data_dir = Path(_out) / 'physics'
+        except (OSError, tomllib.TOMLDecodeError):
+            pass
     else:
         radiod_status = _radiod_status_from_per_instance_config(
             'codar-sounder', instance)
