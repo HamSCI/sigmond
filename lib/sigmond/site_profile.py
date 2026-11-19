@@ -126,6 +126,7 @@ class SiteProfile:
     lat: float = 0.0
     lon: float = 0.0
     elevation_m: float = 0.0
+    location_source: str = ""
     description: str = ""
     psws_enabled: bool = False
     psws_station_id: str = ""
@@ -298,6 +299,7 @@ def load_site_profile(path: Optional[Path] = None) -> Optional[SiteProfile]:
         lat=_f(st.get("latitude")),
         lon=_f(st.get("longitude")),
         elevation_m=_f(st.get("elevation_m")),
+        location_source=_clean(st.get("location_source")),
         description=_clean(st.get("description")),
         psws_enabled=bool(psws.get("enabled", False)),
         psws_station_id=_clean(psws.get("station_id")),
@@ -701,11 +703,12 @@ def set_reporters_keys(text: str, **keys) -> str:
 
 
 #: [station] keys that carry the location; set_station_location replaces them.
-_LOCATION_KEYS = ("grid_square", "latitude", "longitude", "elevation_m")
+_LOCATION_KEYS = ("grid_square", "latitude", "longitude", "elevation_m",
+                  "location_source")
 
 
 def set_station_location(text: str, *, lat: float, lon: float,
-                         elevation_m=None):
+                         elevation_m=None, location_source: str = ""):
     """``text`` with its [station] location set to a GPS fix: latitude,
     longitude (and elevation_m), and no grid_square, which would go stale.
     Every other line stays.  None when the profile has no [station] table:
@@ -721,9 +724,29 @@ def set_station_location(text: str, *, lat: float, lon: float,
             f"longitude   = {float(lon)!r}\n"]
     if elevation_m:
         out.append(f"elevation_m = {float(elevation_m)!r}\n")
+    if location_source:
+        out.append(f"location_source = {location_source!r}\n".replace("'", '"'))
     i = head + 1
     while i < len(lines) and not lines[i].lstrip().startswith("["):
         if not key_re.match(lines[i]):
+            out.append(lines[i])
+        i += 1
+    out += lines[i:]
+    return "".join(out)
+
+
+def set_station_location_source(text: str, source: str):
+    """``text`` with [station] ``location_source`` set (replacing any
+    earlier line); every other line stays.  None without a [station]."""
+    lines = text.splitlines(keepends=True)
+    head = next((i for i, ln in enumerate(lines)
+                 if re.match(r"\s*\[\s*station\s*\]", ln)), None)
+    if head is None:
+        return None
+    out = lines[:head + 1] + [f'location_source = "{source}"\n']
+    i = head + 1
+    while i < len(lines) and not lines[i].lstrip().startswith("["):
+        if not re.match(r"\s*location_source\s*=", lines[i]):
             out.append(lines[i])
         i += 1
     out += lines[i:]

@@ -17,6 +17,7 @@ import os
 import re
 import socket
 import tempfile
+import tomllib
 from pathlib import Path
 from typing import Optional
 
@@ -74,19 +75,47 @@ def _marker_on_grid_line(profile: Optional[Path]) -> bool:
     return False
 
 
+def _profile_location_source(profile: Optional[Path]) -> str:
+    """The site-profile [station] location_source, or ''."""
+    if profile is None:
+        from sigmond import site_profile
+        profile = site_profile.SITE_PROFILE_PATH
+    try:
+        with open(profile, "rb") as f:
+            st = tomllib.load(f).get("station", {})
+    except (OSError, tomllib.TOMLDecodeError):
+        return ""
+    v = str(st.get("location_source", "") or "").strip().lower()
+    return v if v in ("gpsdo", "operator") else ""
+
+
+def _pos_source(coord, profile) -> str:
+    """location_source (profile, then coordination [host]) first; the
+    sigmond-location-check marker second; else operator."""
+    src = _profile_location_source(profile)
+    if not src:
+        v = (getattr(getattr(coord, "host", None), "location_source", "")
+             or "").strip().lower()
+        src = v if v in ("gpsdo", "operator") else ""
+    if src:
+        return src
+    return "gpsdo" if _marker_on_grid_line(profile) else "operator"
+
+
 def position(coord, *, profile: Optional[Path] = None) -> tuple:
     """(grid6, pos_source) for this host.
 
-    pos_source is ``gpsdo`` when sigmond-location-check marked the
-    site-profile's grid_square line (``# GPSDO location authority``), else
-    ``operator``.  A live GPS fix does not decide it: the fix can drop at
+    pos_source reads the ``location_source`` key (site-profile [station],
+    then coordination [host]); without one, ``gpsdo`` when
+    sigmond-location-check marked the grid_square line
+    (``# GPSDO location authority``); else ``operator``.  A live GPS fix does not decide it: the fix can drop at
     timer time.  grid6 comes from lat/lon when coordination holds them,
     else from the grid (shorter than six characters stays as typed)."""
     host = getattr(coord, "host", None)
     lat = float(getattr(host, "lat", 0.0) or 0.0)
     lon = float(getattr(host, "lon", 0.0) or 0.0)
     grid = (getattr(host, "grid", "") or "").strip()
-    src = "gpsdo" if _marker_on_grid_line(profile) else "operator"
+    src = _pos_source(coord, profile)
     if lat or lon:
         return maidenhead(lat, lon), src
     return grid[:6], src

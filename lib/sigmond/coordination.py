@@ -28,6 +28,8 @@ class Host:
     grid: str = ""
     lat:  float = 0.0
     lon:  float = 0.0
+    # "gpsdo" or "operator": where lat/lon/grid came from.  "" = unrecorded.
+    location_source: str = ""
 
 
 @dataclass
@@ -253,6 +255,7 @@ def parse_coordination(raw: dict, source_path: Optional[Path] = None) -> Coordin
         grid=host_raw.get('grid', ''),
         lat=float(host_raw.get('lat', 0.0) or 0.0),
         lon=float(host_raw.get('lon', 0.0) or 0.0),
+        location_source=str(host_raw.get('location_source', '') or ''),
     )
 
     station_raw = raw.get('station', {}) or {}
@@ -416,6 +419,7 @@ def _passthrough_extras_for(client_type: str) -> list:
 
 def write_host_identity(call: str = '', grid: str = '', *,
                         lat: float = 0.0, lon: float = 0.0,
+                        location_source: str = '',
                         path: Path = COORDINATION_PATH) -> bool:
     """Merge a ``[host]`` identity section into coordination.toml.
 
@@ -436,6 +440,7 @@ def write_host_identity(call: str = '', grid: str = '', *,
     grid = grid or cur.grid
     lat = lat or cur.lat
     lon = lon or cur.lon
+    location_source = location_source or cur.location_source
 
     fields = []
     if call:
@@ -446,6 +451,8 @@ def write_host_identity(call: str = '', grid: str = '', *,
         fields.append(f'lat = {lat}')
     if lon:
         fields.append(f'lon = {lon}')
+    if location_source:
+        fields.append(f'location_source = "{location_source}"')
     if not fields:
         return False
     block = '[host]\n' + '\n'.join(fields) + '\n'

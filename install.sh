@@ -1250,6 +1250,8 @@ $SUDO systemctl enable --now sigmond-gap-hourly.timer 2>/dev/null || true
 # Daily drift report (smd align --report).  Enable only: the calendar starts it
 # (Persistent=true catches a missed run on the next boot).
 $SUDO systemctl enable sigmond-drift.timer 2>/dev/null || true
+# Location check: the station location follows its GPSDO wherever one exists.
+[ -d /run/gpsdo ] && $SUDO systemctl enable --now sigmond-location-check.timer 2>/dev/null || true
 # sigmond-heartbeat.timer is INSTALLED above (it matched the sigmond-*.timer
 # glob) but deliberately NOT enabled here — this is the one asymmetry with
 # every other timer in this block.  Unlike gap-hourly/storage-trim, `smd

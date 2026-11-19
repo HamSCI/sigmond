@@ -373,7 +373,13 @@ def cmd_config_identity(args) -> int:
     if new_grid and not _looks_like_grid(new_grid):
         warn(f'grid "{new_grid}" does not look like a Maidenhead locator (proceeding anyway)')
 
-    coord.host = Host(call=new_call, grid=new_grid, lat=new_lat, lon=new_lon)
+    # An operator-typed position says so; a call-only change keeps the record.
+    typed_pos = (new_lat != coord.host.lat or new_lon != coord.host.lon
+                 or arg_lat is not None or arg_lon is not None)
+    new_source = 'operator' if typed_pos and (new_lat or new_lon) \
+        else coord.host.location_source
+    coord.host = Host(call=new_call, grid=new_grid, lat=new_lat, lon=new_lon,
+                      location_source=new_source)
 
     try:
         _patch_host_block(COORDINATION_PATH, coord.host)
@@ -381,6 +387,16 @@ def cmd_config_identity(args) -> int:
         err(f'permission denied writing {COORDINATION_PATH}; re-run smd as root')
         return 1
     ok(f'updated {COORDINATION_PATH}')
+    if new_source == 'operator' and SITE_PROFILE_PATH.exists():
+        from ..site_profile import set_station_location_source
+        try:
+            text = SITE_PROFILE_PATH.read_text()
+            new_text = set_station_location_source(text, 'operator')
+            if new_text is not None and new_text != text:
+                _write_site_profile(new_text)
+        except PermissionError:
+            warn(f'could not record location_source in {SITE_PROFILE_PATH} '
+                 '(permission denied)')
 
     try:
         env_text = render_env(coord)
@@ -506,6 +522,7 @@ def cmd_config_location(args) -> int:
 
     try:
         changed = write_host_identity(grid=grid, lat=lat, lon=lon,
+                                      location_source='gpsdo',
                                       path=COORDINATION_PATH)
     except PermissionError:
         err(f'permission denied writing {COORDINATION_PATH}; re-run smd as root')
@@ -522,7 +539,8 @@ def cmd_config_location(args) -> int:
         from ..site_profile import set_station_location
         try:
             new_text = set_station_location(SITE_PROFILE_PATH.read_text(),
-                                            lat=lat, lon=lon, elevation_m=alt)
+                                            lat=lat, lon=lon, elevation_m=alt,
+                                            location_source='gpsdo')
             if new_text is not None and new_text != SITE_PROFILE_PATH.read_text():
                 _write_site_profile(new_text)
                 ok(f'{SITE_PROFILE_PATH.name} [station]: latitude={lat:.6f} '
@@ -608,6 +626,8 @@ def _patch_host_block(path: Path, host: Host) -> None:
         new_block.append(f'lat  = {host.lat}')
     if host.lon:
         new_block.append(f'lon  = {host.lon}')
+    if host.location_source:
+        new_block.append(f'location_source = "{host.location_source}"')
     new_block.append('')
 
     if not path.exists():
@@ -952,6 +972,7 @@ def cmd_config_render(args) -> int:
         if has_station:
             write_host_identity(call=profile.call, grid=profile.grid,
                                 lat=profile.lat, lon=profile.lon,
+                                location_source=profile.location_source,
                                 path=COORDINATION_PATH)
             _patch_station_block(COORDINATION_PATH, station)
         if heartbeat is not None:

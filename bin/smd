@@ -9496,13 +9496,15 @@ def _align_apply(args) -> int:
 
 
 _ALIGN_DRIFT_TIMER = 'sigmond-drift.timer'
+_ALIGN_LOCATION_TIMER = 'sigmond-location-check.timer'
 
 
 def _align_own_units(sigmond_repo, *, unit_dir=Path('/etc/systemd/system'),
-                     run=None) -> list:
+                     run=None, gpsdo_dir=Path('/run/gpsdo')) -> list:
     """Install sigmond's own units (install.sh does this once; updates never
     rerun it), then daemon-reload when any landed.  Enables only the daily
-    drift timer (never starts it: the calendar does that)."""
+    drift timer (never starts it: the calendar does that).  On a host with a
+    GPSDO (/run/gpsdo) it also enables and starts the location-check timer."""
     from sigmond import align_apply
     from sigmond.drift import units as drift_units
     run = run or subprocess.run
@@ -9527,6 +9529,14 @@ def _align_own_units(sigmond_repo, *, unit_dir=Path('/etc/systemd/system'),
         if r.returncode != 0:
             # Not a blocking step: the report still works from the CLI.
             print(f'  could not enable {_ALIGN_DRIFT_TIMER}: '
+                  f'{(r.stderr or "").strip()}')
+    if (Path(gpsdo_dir).is_dir()
+            and (Path(unit_dir) / _ALIGN_LOCATION_TIMER).is_file()):
+        r = _align_run(['systemctl', 'enable', '--now', _ALIGN_LOCATION_TIMER],
+                       run=run, timeout=60,
+                       action=f'systemctl enable --now {_ALIGN_LOCATION_TIMER}')
+        if r.returncode != 0:
+            print(f'  could not enable {_ALIGN_LOCATION_TIMER}: '
                   f'{(r.stderr or "").strip()}')
     return steps
 

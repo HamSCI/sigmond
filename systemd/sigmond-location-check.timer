@@ -1,0 +1,14 @@
+# /etc/systemd/system/sigmond-location-check.timer
+[Unit]
+Description=Sigmond location check, every 10 minutes
+Documentation=https://github.com/HamSCI/sigmond
+
+[Timer]
+OnBootSec=2min
+# OnActiveSec: a timer enabled with --now on a running host has no boot
+# anchor; this one fires 2 min after it starts.
+OnActiveSec=2min
+OnUnitActiveSec=10min
+
+[Install]
+WantedBy=timers.target

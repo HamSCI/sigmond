@@ -1,0 +1,19 @@
+# /etc/systemd/system/sigmond-location-check.service
+[Unit]
+Description=Sigmond location check: the station location follows its GPSDO
+Documentation=https://github.com/HamSCI/sigmond
+ConditionPathExists=/usr/local/sbin/sigmond-location-check
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Nice=10
+TimeoutStartSec=5min
+# Idempotent: it moves the location only when the GPSDO fix differs by more
+# than 50 m, and records location_source = "gpsdo" when it does.
+ExecStart=/usr/local/sbin/sigmond-location-check
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sigmond-location-check
