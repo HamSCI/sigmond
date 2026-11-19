@@ -169,6 +169,18 @@ Identity columns (amendment 2026-11-19, spec §Amendment): `host_key` (first 12 
 - [ ] **Step 1: Failing tests** — `test_report_writes_json_atomically`, `test_report_inserts_one_sink_row` (writer stubbed; fields as above), `test_report_takes_no_lifecycle_lock`, `test_sigmond_pipeline_renders_drift_pipeline_when_feature_present`, `test_drift_pipeline_absent_without_sigmondb_tar`.
 - [ ] **Step 2:** FAIL.  **Step 3:** Implement; the timer installs through Task 4's `install_own_units` and is enabled by bring-up and by `smd align --apply` (enable only; start leaves it to the calendar).  **Step 4:** PASS.  **Step 5:** commit `drift: daily timer, drift.json and the sigmondb row`.
 
+### Task 9b: Every install reads its GPSDO, and records where its location came from (Michael, 2026-11-19)
+
+Michael: "Bare metal should read GPSDO as well, right?"  Yes: the location rule (the GPSDO wherever one exists, else the operator's entry) holds on every install.  Today only the appliance ticks `sigmond-location-check`; bare metal has the script (align installs it) but nothing runs it, and `smd config location --from-gps` writes the GPS position without saying so.
+
+**Files:**
+- Create: `systemd/sigmond-location-check.service` (oneshot, `ExecStart=/usr/local/sbin/sigmond-location-check`), `systemd/sigmond-location-check.timer` (`OnBootSec=2min`, `OnActiveSec=2min`, `OnUnitActiveSec=10min`)
+- Modify: the timer installs and enables through `install_own_units` / align on every install where `/run/gpsdo` exists (the appliance's sentinel tick stays; both are harmless together since the check is idempotent with 50 m hysteresis); `lib/sigmond/commands/config.py` `cmd_config_location` and `smd config identity --lat/--lon` write `location_source = "gpsdo"` / `"operator"` to coordination `[host]` and the site-profile `[station]`; `sigmond-appliance/sigmond-location-check` writes `location_source = "gpsdo"` beside its marker; `lib/sigmond/drift/publish.py` reads `location_source` first, the marker second, else `operator`.
+- Test: `tests/test_location_source.py`
+
+- [ ] **Step 1: Failing tests** — `test_config_location_writes_gpsdo_source`, `test_identity_latlon_writes_operator_source`, `test_publish_prefers_location_source_key`, `test_publish_falls_back_to_marker`, `test_location_check_timer_installed_when_gpsdo_present`, `test_location_check_timer_absent_without_gpsdo`.
+- [ ] **Step 2:** FAIL.  **Step 3:** Implement.  **Step 4:** PASS + touched suites.  **Step 5:** commit `location: every install reads its GPSDO; location_source recorded`.
+
 ### Task 10: Server: ingest `station_drift` (wsprdaemon-server)
 
 **Files:**
