@@ -462,7 +462,9 @@ def test_copies_keep_owner_and_mode(tmp_root, fake_systemctl):
     os.chmod(st / "sub/f.dat", 0o640)
     calls = []
     with mock.patch.object(IM, "_geteuid", lambda: 0), \
-            mock.patch.object(IM, "_chown", lambda p, u, g: calls.append((Path(p), u, g))):
+            mock.patch.object(IM, "_chown", lambda p, u, g: calls.append((Path(p), u, g))), \
+            mock.patch.object(IM, "_fchown", lambda fd, u, g: calls.append(
+                (Path(os.readlink(f"/proc/self/fd/{fd}")), u, g))):
         apply_moves([Move("chirp-recorder", "AB4EJ", "AB4EJ-RX888", "AB4EJ-RX888", RADIOD)],
                     etc_root=tmp_root / "etc", var_root=tmp_root / "var",
                     run=fake_systemctl)
@@ -595,3 +597,109 @@ def test_resumed_move_is_not_also_retired(tmp_root, fake_systemctl, capsys):
     assert _apply(smd, tmp_root, [Receiver("N8UR-SIGMOND", RADIOD)],
                   fake_systemctl) == 0
     assert "retire" not in capsys.readouterr().out
+
+
+# ---- fix round 3 -------------------------------------------------------
+
+def _record_chowns():
+    calls = []
+    return calls, (mock.patch.object(IM, "_geteuid", lambda: 0),
+                   mock.patch.object(IM, "_chown",
+                                     lambda p, u, g: calls.append(Path(p))),
+                   mock.patch.object(IM, "_fchown", lambda fd, u, g: calls.append(
+                       Path(os.readlink(f"/proc/self/fd/{fd}")))))
+
+
+def test_symlink_in_state_dir_is_copied_as_a_link(tmp_root, fake_systemctl):
+    make_instance(tmp_root, "chirp-recorder", "AB4EJ", RADIOD)
+    outside = tmp_root / "outside.txt"
+    outside.write_text("secret\n")
+    before = (outside.stat().st_uid, outside.stat().st_gid, outside.read_text())
+    st = tmp_root / "var/lib/chirp-recorder/AB4EJ"
+    os.symlink(outside, st / "link")
+    os.symlink(tmp_root / "etc", st / "dirlink")
+    calls, (a, b, c) = _record_chowns()
+    with a, b, c:
+        steps = apply_moves(
+            [Move("chirp-recorder", "AB4EJ", "AB4EJ-RX888", "AB4EJ-RX888", RADIOD)],
+            etc_root=tmp_root / "etc", var_root=tmp_root / "var",
+            run=fake_systemctl)
+    assert not [s for s in steps if s.startswith("ERROR")]
+    new = tmp_root / "var/lib/chirp-recorder/AB4EJ-RX888"
+    assert os.path.islink(new / "link") and os.readlink(new / "link") == str(outside)
+    assert os.path.islink(new / "dirlink")
+    assert outside not in calls and tmp_root / "etc" not in calls
+    assert (outside.stat().st_uid, outside.stat().st_gid, outside.read_text()) == before
+    assert not any(str(p).startswith(str(outside)) for p in calls)
+
+
+def test_preexisting_symlink_at_destination_aborts(tmp_root, fake_systemctl):
+    make_instance(tmp_root, "chirp-recorder", "AB4EJ", RADIOD)
+    victim = tmp_root / "victim"
+    victim.mkdir()
+    (victim / "keep").write_text("1")
+    dst = tmp_root / "var/lib/chirp-recorder/AB4EJ-RX888"
+    os.symlink(victim, dst)
+    before = {p: b for p, b in _tree(tmp_root).items()}
+    steps = apply_moves(
+        [Move("chirp-recorder", "AB4EJ", "AB4EJ-RX888", "AB4EJ-RX888", RADIOD)],
+        etc_root=tmp_root / "etc", var_root=tmp_root / "var", run=fake_systemctl)
+    assert any(s.startswith("ERROR") for s in steps)
+    assert os.path.islink(dst) and os.readlink(dst) == str(victim)
+    assert (victim / "keep").read_text() == "1"
+    assert sorted(os.listdir(victim)) == ["keep"]
+    assert {p: b for p, b in _tree(tmp_root).items()
+            if "instance-rekey-backup" not in str(p)} == before
+    assert (tmp_root / "etc/chirp-recorder/AB4EJ.toml").exists()
+
+
+def test_symlink_inside_destination_tree_aborts(tmp_root, fake_systemctl):
+    make_instance(tmp_root, "chirp-recorder", "AB4EJ", RADIOD)
+    st = tmp_root / "var/lib/chirp-recorder/AB4EJ"
+    (st / "sub").mkdir()
+    (st / "sub/f").write_text("x")
+    # a failing step mid-tree leaves nothing behind
+    with mock.patch.object(IM, "_copy_file", side_effect=[None, FileExistsError("x")]):
+        steps = apply_moves(
+            [Move("chirp-recorder", "AB4EJ", "AB4EJ-RX888", "AB4EJ-RX888", RADIOD)],
+            etc_root=tmp_root / "etc", var_root=tmp_root / "var", run=fake_systemctl)
+    assert any(s.startswith("ERROR") for s in steps)
+    assert not (tmp_root / "var/lib/chirp-recorder/AB4EJ-RX888").exists()
+
+
+def test_backup_does_not_follow_symlinks(tmp_root, fake_systemctl):
+    make_instance(tmp_root, "chirp-recorder", "AB4EJ", RADIOD)
+    outside = tmp_root / "outside.txt"
+    outside.write_text("secret\n")
+    os.symlink(outside, tmp_root / "var/lib/chirp-recorder/AB4EJ/link")
+    apply_moves([Move("chirp-recorder", "AB4EJ", "AB4EJ-RX888", "AB4EJ-RX888", RADIOD)],
+                etc_root=tmp_root / "etc", var_root=tmp_root / "var",
+                run=fake_systemctl)
+    root = tmp_root / "var" / BACKUP_DIR[len("var/"):]
+    links = [p for p in root.rglob("link")]
+    assert links and all(p.is_symlink() for p in links)
+
+
+def test_legacy_equals_key_moves_and_uses_escaped_unit(tmp_root, fake_systemctl):
+    make_instance(tmp_root, "meteor-scatter", "AC0G=B4", RADIOD)
+    steps = apply_moves(
+        [Move("meteor-scatter", "AC0G=B4", "AC0G-B5", "AC0G/B5", RADIOD)],
+        etc_root=tmp_root / "etc", var_root=tmp_root / "var", run=fake_systemctl)
+    assert not [s for s in steps if s.startswith("ERROR")]
+    assert (tmp_root / "etc/meteor-scatter/AC0G-B5.toml").exists()
+    assert ["stop", "meteor-scatter@AC0G\\x3dB4.service"] in fake_systemctl.calls
+
+
+def test_journal_keeps_the_strict_grammar_for_equals(tmp_root):
+    _journal_for(tmp_root, {"client": "meteor-scatter", "old_key": "AC0G=B4",
+                            "new_key": "AC0G-B4", "new_reporter_id": "AC0G/B4",
+                            "radiod": RADIOD})
+    errs = []
+    assert pending_moves(tmp_root / "var", errors=errs) == [] and errs
+
+
+def test_refused_key_names_instance_migrate(tmp_root, fake_systemctl):
+    steps = apply_moves([Move("psk-recorder", "bad/key", "N8UR", "N8UR", RADIOD)],
+                        etc_root=tmp_root / "etc", var_root=tmp_root / "var",
+                        run=fake_systemctl)
+    assert any("instance migrate" in s for s in steps)

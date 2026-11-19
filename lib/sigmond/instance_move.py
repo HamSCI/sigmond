@@ -31,6 +31,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tomllib
 from dataclasses import dataclass, field
@@ -48,8 +49,16 @@ JOURNAL_DIR = "lib/sigmond/instance-move"
 
 # Seams for tests: a copy keeps its source's owner (the daemon runs as its
 # own user), and the journal must belong to the user smd runs as.
-_chown = os.chown
 _geteuid = os.geteuid
+
+
+def _chown(path, uid, gid) -> None:
+    """Give a path to uid:gid without following a symlink."""
+    os.chown(path, uid, gid, follow_symlinks=False)
+
+
+def _fchown(fd, uid, gid) -> None:
+    os.fchown(fd, uid, gid)
 
 
 def _trusted_uid() -> int:
@@ -314,43 +323,76 @@ def _label(src: Path, etc_root: Path) -> str:
         return src.name
 
 
-def _own(src: Path, dst: Path) -> None:
-    if _geteuid() == 0:
-        st = src.stat()
-        _chown(dst, st.st_uid, st.st_gid)
-
-
-def _copy_file(src: Path, dst: Path) -> None:
-    shutil.copy2(src, dst)
-    _own(src, dst)
+def _copy_file(src: Path, dst: Path, replace: bool = False) -> None:
+    """Copy one entry as root without ever following a symlink.  A symlink
+    copies as a symlink.  A regular file is read through O_NOFOLLOW and
+    written to a new file made with O_EXCL|O_NOFOLLOW, then fchmod/fchown
+    on the descriptor.  ``replace`` first unlinks what stands at ``dst``
+    (never its target); without it an existing ``dst`` aborts."""
+    st = os.lstat(src)
+    root = _geteuid() == 0
+    if replace and (os.path.lexists(dst)):
+        os.unlink(dst)
+    if stat.S_ISLNK(st.st_mode):
+        os.symlink(os.readlink(src), dst)
+        if root:
+            _chown(dst, st.st_uid, st.st_gid)
+        return
+    if not stat.S_ISREG(st.st_mode):
+        return                       # sockets, devices, fifos stay behind
+    fd_in = os.open(src, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        if not stat.S_ISREG(os.fstat(fd_in).st_mode):
+            raise OSError(f"{src} changed while copying")
+        fd_out = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                         | os.O_NOFOLLOW, 0o600)
+        try:
+            with os.fdopen(os.dup(fd_in), "rb") as fi, \
+                    os.fdopen(os.dup(fd_out), "wb") as fo:
+                shutil.copyfileobj(fi, fo)
+            os.fchmod(fd_out, stat.S_IMODE(st.st_mode))
+            if root:
+                _fchown(fd_out, st.st_uid, st.st_gid)
+            os.utime(fd_out, ns=(st.st_atime_ns, st.st_mtime_ns))
+        finally:
+            os.close(fd_out)
+    finally:
+        os.close(fd_in)
 
 
 def _copy_tree(src: Path, dst: Path) -> None:
-    """Copy a directory with each file's and directory's mode and owner."""
-    dst.mkdir(parents=True, exist_ok=True)
-    shutil.copystat(src, dst)
-    _own(src, dst)
-    for child in sorted(src.iterdir()):
-        target = dst / child.name
-        if child.is_dir() and not child.is_symlink():
-            _copy_tree(child, target)
-        elif child.is_symlink():
-            if not target.exists() and not target.is_symlink():
-                os.symlink(os.readlink(child), target)
+    """Copy a directory tree as root without following a symlink: the
+    walk never descends into a symlinked directory, every destination
+    entry must be new (an existing one aborts), and a directory takes its
+    mode and owner after it is populated."""
+    st = os.lstat(src)
+    if not stat.S_ISDIR(st.st_mode):
+        raise OSError(f"{src} is not a directory")
+    os.mkdir(dst, 0o700)             # no exist_ok: the new tree is ours
+    with os.scandir(src) as it:
+        entries = sorted(it, key=lambda e: e.name)
+    for e in entries:
+        target = dst / e.name
+        if e.is_dir(follow_symlinks=False):
+            _copy_tree(Path(e.path), target)
         else:
-            _copy_file(child, target)
+            _copy_file(Path(e.path), target)
+    os.chmod(dst, stat.S_IMODE(st.st_mode))
+    if _geteuid() == 0:
+        _chown(dst, st.st_uid, st.st_gid)
+    os.utime(dst, ns=(st.st_atime_ns, st.st_mtime_ns))
 
 
 def _backup(srcs: list, backup: Path, etc_root: Path) -> None:
     for src in srcs:
-        if not src.exists():
+        if not os.path.lexists(src):
             continue
         dst = backup / _label(src, etc_root)
         dst.parent.mkdir(parents=True, exist_ok=True)
-        if src.is_dir():
-            shutil.copytree(src, dst, dirs_exist_ok=True)
+        if src.is_dir() and not src.is_symlink():
+            shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=True)
         else:
-            shutil.copy2(src, dst)
+            shutil.copy2(src, dst, follow_symlinks=False)
 
 
 def _rm(p: Path, roots: tuple, allowed: list) -> None:
@@ -401,8 +443,18 @@ def _valid_key(k) -> bool:
     return isinstance(k, str) and bool(_KEY_RE.match(k)) and ".." not in k
 
 
-def _valid_move(d) -> Move:
-    """A Move from untrusted JSON, or JournalError."""
+_PLAN_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._=\\-]*$")
+
+
+def _valid_plan_key(k) -> bool:
+    """A key as instance.py makes or finds it, legacy ``=`` and ``\\x3d``
+    spellings included.  Never a path component trick."""
+    return isinstance(k, str) and bool(_PLAN_KEY_RE.match(k)) and ".." not in k
+
+
+def _valid_move(d, strict: bool = True) -> Move:
+    """A Move from JSON (strict key grammar, for the journal) or from the
+    planner (``strict=False``: legacy ``=`` keys pass), or JournalError."""
     try:
         m = Move(**{f: d[f] for f in
                     ("client", "old_key", "new_key", "new_reporter_id",
@@ -411,8 +463,11 @@ def _valid_move(d) -> Move:
         raise JournalError(f"bad move record: {exc}")
     if m.client not in CLIENTS:
         raise JournalError(f"unknown client {m.client!r}")
-    if not (_valid_key(m.old_key) and _valid_key(m.new_key)):
-        raise JournalError("a key is not a valid instance key")
+    ok = _valid_key if strict else _valid_plan_key
+    if not (ok(m.old_key) and ok(m.new_key)):
+        raise JournalError(
+            "a key is not a valid instance key; rename legacy instances "
+            "with `smd admin instance migrate` first")
     for v in (m.new_reporter_id, m.radiod):
         if not isinstance(v, str) or "\0" in v:
             raise JournalError("a field holds a bad value")
@@ -505,13 +560,14 @@ def _move_one(m: Move, etc_root: Path, var_root: Path, sysd: _Sys,
               steps: list) -> bool:
     """One move; True when it completed."""
     try:
-        m = _valid_move(m.__dict__)
+        m = _valid_move(m.__dict__, strict=False)
         _journal_dir(var_root)
     except JournalError as exc:
         steps.append(f"ERROR: move refused: {exc}")
         return False
     c, old, new = m.client, m.old_key, m.new_key
-    old_unit, new_unit = f"{c}@{old}.service", f"{c}@{new}.service"
+    old_unit = f"{c}@{systemd_escape(old)}.service"
+    new_unit = f"{c}@{systemd_escape(new)}.service"
     jpath = _journal(var_root, c, old)
     ofiles, odirs = _paths(etc_root, var_root, c, old)
     nfiles, ndirs = _paths(etc_root, var_root, c, new)
@@ -533,7 +589,7 @@ def _move_one(m: Move, etc_root: Path, var_root: Path, sysd: _Sys,
             return False
         was_enabled, was_active = sysd.state(old_unit)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        fresh = [p for p in allowed if not p.exists()]
+        fresh = [p for p in allowed if not os.path.lexists(p)]
         try:
             _journal_dir(var_root, create=True)
         except JournalError as exc:
@@ -559,21 +615,38 @@ def _move_one(m: Move, etc_root: Path, var_root: Path, sysd: _Sys,
         olds = _old_spellings(old, old_reporter)
         if was_active:
             sysd.must("stop", old_unit)
-        _backup(ofiles + odirs, backup, etc_root)
+        _backup(ofiles + odirs + [p for p in nfiles if os.path.lexists(p)],
+                backup, etc_root)
         for src, dst in zip(ofiles, nfiles):
             moved = src.with_name(src.name + MOVED_SUFFIX)
-            use = src if src.exists() else moved
-            if not use.exists():
+            use = src if os.path.lexists(src) else moved
+            if not os.path.lexists(use):
                 continue
             dst.parent.mkdir(parents=True, exist_ok=True)
-            _copy_file(use, dst)
+            _copy_file(use, dst, replace=True)
             if src.exists():
                 src.rename(moved)
                 steps.append(f"{src} -> {dst} (old kept as {moved.name})")
         for src, dst in zip(odirs, ndirs):
-            if src.is_dir() and (resume or not dst.exists()):
+            if not os.path.lexists(src):
+                continue
+            if dst.is_symlink():
+                if dst in fresh:                   # ours, from a crashed run
+                    _rm(dst, (etc_root, var_root), allowed)
+                else:
+                    raise OSError(f"{dst} is a symlink; refusing to copy "
+                                  f"into it")
+            elif os.path.lexists(dst):
+                if resume and dst in fresh:
+                    _rm(dst, (etc_root, var_root), allowed)
+                else:
+                    continue               # a real directory already there
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if src.is_dir() and not src.is_symlink():
                 _copy_tree(src, dst)
-                steps.append(f"copied {src} -> {dst} (old kept)")
+            else:
+                _copy_file(src, dst)
+            steps.append(f"copied {src} -> {dst} (old kept)")
         if nfiles[0].exists():
             _set_reporter_id(nfiles[0], m.new_reporter_id)
             steps.append(f"{nfiles[0]}: reporter_id = \"{m.new_reporter_id}\"")
@@ -626,7 +699,7 @@ def apply_retires(retires: list, *, etc_root: Path, var_root: Path,
     steps: list = []
     sysd = _Sys(run, steps)
     for r in retires:
-        unit = f"{r.client}@{r.key}.service"
+        unit = f"{r.client}@{systemd_escape(r.key)}.service"
         files, dirs = _paths(etc_root, var_root, r.client, r.key)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         backup = var_root / BACKUP_DIR[len("var/"):] / stamp
