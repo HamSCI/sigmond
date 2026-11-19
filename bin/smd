@@ -92,6 +92,7 @@ if (_VENV_PY.is_file()
 import argparse
 import configparser
 import contextlib
+import io
 import math
 import pwd
 import re
@@ -9489,10 +9490,18 @@ def _align_apply(args) -> int:
         # Not under an smd in an unknown state: a blocked sigmond step (dirty
         # or unmoved checkout) must not land its unit files as root units.
         # A failed unit copy blocks restarts like any other failed step.
-        if not any(s.component == 'sigmond' and s.outcome in _ALIGN_BLOCKING
-                   for s in steps):
+        own_units = not any(s.component == 'sigmond' and s.outcome in _ALIGN_BLOCKING
+                            for s in steps)
+        if own_units:
             steps = steps + _align_own_units(Path(base) / 'sigmond')
-        return _align_make_live(args, rel, steps, base=base, catalog=catalog, now=_now)
+        rc = _align_make_live(args, rel, steps, base=base, catalog=catalog, now=_now)
+        # Final review I1: the timers start only once the bring-up and its
+        # restarts are done.  The location-check service re-renders and can
+        # restart recorders; started before _align_make_live, its first
+        # tick (OnActiveSec=2min) landed mid-bring-up.
+        if own_units:
+            _align_start_timers(rc=rc, no_restart=bool(getattr(args, 'no_restart', False)))
+        return rc
 
 
 _ALIGN_DRIFT_TIMER = 'sigmond-drift.timer'
@@ -9502,10 +9511,10 @@ _ALIGN_LOCATION_TIMER = 'sigmond-location-check.timer'
 def _align_own_units(sigmond_repo, *, unit_dir=Path('/etc/systemd/system'),
                      run=None) -> list:
     """Install sigmond's own units (install.sh does this once; updates never
-    rerun it), then daemon-reload when any landed.  Enables and starts the
-    daily drift timer and the location-check timer (an enabled timer that was
-    never started does not fire until a reboot).  The location-check service
-    stays inert without /run/gpsdo."""
+    rerun it), then daemon-reload when any landed.  A unit a drift exception
+    covers stays as it is; a replaced unit is kept as .bak-drift-<stamp>
+    (drift.units.install_own_units).  Starts nothing: `_align_start_timers`
+    runs after `_align_make_live`."""
     from sigmond import align_apply
     from sigmond.drift import units as drift_units
     run = run or subprocess.run
@@ -9524,6 +9533,19 @@ def _align_own_units(sigmond_repo, *, unit_dir=Path('/etc/systemd/system'),
                                      f'failed: {(r.stderr or "").strip()}')]
         steps.append(align_apply.Step('sigmond-units', 'installed',
                                       ', '.join(wrote)))
+    return steps
+
+
+def _align_start_timers(*, rc: int, no_restart: bool,
+                        unit_dir=Path('/etc/systemd/system'), run=None) -> None:
+    """After `_align_make_live`: enable and start the daily drift timer (an
+    enabled timer that was never started does not fire until a reboot), and
+    the location-check timer.  The location-check service can restart
+    recorders, so under --no-restart, or after an align that did not finish
+    cleanly, its timer is enabled but not started, and a line says so.  The
+    service stays inert without /run/gpsdo, and skips a tick while smd's
+    lifecycle lock is held."""
+    run = run or subprocess.run
     if (Path(unit_dir) / _ALIGN_DRIFT_TIMER).is_file():
         r = _align_run(['systemctl', 'enable', '--now', _ALIGN_DRIFT_TIMER],
                        run=run, timeout=60,
@@ -9533,13 +9555,17 @@ def _align_own_units(sigmond_repo, *, unit_dir=Path('/etc/systemd/system'),
             print(f'  could not enable {_ALIGN_DRIFT_TIMER}: '
                   f'{(r.stderr or "").strip()}')
     if (Path(unit_dir) / _ALIGN_LOCATION_TIMER).is_file():
-        r = _align_run(['systemctl', 'enable', '--now', _ALIGN_LOCATION_TIMER],
-                       run=run, timeout=60,
-                       action=f'systemctl enable --now {_ALIGN_LOCATION_TIMER}')
+        start = rc == 0 and not no_restart
+        argv = ['systemctl', 'enable'] + (['--now'] if start else []) + [_ALIGN_LOCATION_TIMER]
+        r = _align_run(argv, run=run, timeout=60, action=' '.join(argv))
         if r.returncode != 0:
             print(f'  could not enable {_ALIGN_LOCATION_TIMER}: '
                   f'{(r.stderr or "").strip()}')
-    return steps
+        elif not start:
+            why = '--no-restart' if no_restart else 'align did not finish cleanly'
+            print(f'  {_ALIGN_LOCATION_TIMER} enabled but not started ({why}): '
+                  f'it can restart recorders; it starts at the next boot, or '
+                  f'with: systemctl start {_ALIGN_LOCATION_TIMER}')
 
 
 _ALIGN_BLOCKING = ('failed', 'refused', 'skipped')
@@ -9935,13 +9961,33 @@ def _align_json(args) -> int:
     return rc
 
 
+# Every flag the dry run refuses or that names another mode, with the value
+# that turns it off.  Final review I2: --apply --no-restart (or
+# --allow-rollback, --max-bytes) once reached the refresh's dry run, which
+# refused them, so drift.json never refreshed after such an apply.
+_ALIGN_DRY_OFF = {'apply': False, 'verify': False, 'json': False,
+                  'report': False, 'accept': None, 'reason': None,
+                  'test': False, 'until': None, 'no_restart': False,
+                  'allow_rollback': False, 'max_bytes': None}
+
+
+def _align_dry_args(args):
+    """A copy of ``args`` fit for the plain dry run: the target (--release,
+    --manifest), --base, --no-cost and --install-missing carry over; every
+    mode and apply-only flag is off."""
+    import copy
+    dry = copy.copy(args)
+    for k, v in _ALIGN_DRY_OFF.items():
+        setattr(dry, k, v)
+    if hasattr(dry, '_drift_sink'):
+        del dry._drift_sink
+    return dry
+
+
 def _align_collect_report(args):
     """The drift report from a fresh dry run (its text swallowed), or None
     when the target cannot be established."""
-    import copy
-    dry = copy.copy(args)
-    for k in ('apply', 'verify', 'json', 'report', 'accept'):
-        setattr(dry, k, False if k != 'accept' else None)
+    dry = _align_dry_args(args)
     sink: dict = {}
     dry._drift_sink = sink
     with contextlib.redirect_stdout(io.StringIO()):
@@ -9983,7 +10029,9 @@ def _align_refresh_drift(args) -> None:
             print('  drift.json not refreshed: target not established')
             return
         publish.publish(report)
-    except Exception as exc:  # noqa: BLE001
+    except (Exception, SystemExit) as exc:  # noqa: BLE001
+        # SystemExit too (final review T9): a sys.exit in the dry run must
+        # not replace the exit code of an apply that already finished.
         print(f'  drift.json not refreshed: {exc}'.encode(
             'ascii', 'replace').decode('ascii'))
 

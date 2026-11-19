@@ -1,6 +1,8 @@
 """location_source: where the station's location came from (Task 9b).
 
 Coordinates below are made up."""
+import contextlib
+import io
 import subprocess
 import sys
 import tomllib
@@ -114,13 +116,40 @@ def _own_units(tmp_path):
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     smd._align_own_units(repo, unit_dir=unit_dir, run=fake_run)
-    return calls
+    return calls, unit_dir
+
+
+def _start_timers(tmp_path, **kw):
+    calls, unit_dir = _own_units(tmp_path)
+    assert not [c for c in calls if c[:2] == ["systemctl", "enable"]]
+
+    def fake_run(argv, **k):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        smd._align_start_timers(unit_dir=unit_dir, run=fake_run, **kw)
+    return calls, out.getvalue()
 
 
 def test_location_check_timer_enabled_on_every_host(tmp_path):
-    calls = _own_units(tmp_path)
+    calls, _ = _start_timers(tmp_path, rc=0, no_restart=False)
     assert ["systemctl", "enable", "--now",
             "sigmond-location-check.timer"] in calls
+
+
+def test_location_check_timer_not_started_under_no_restart(tmp_path):
+    calls, out = _start_timers(tmp_path, rc=0, no_restart=True)
+    assert ["systemctl", "enable", "sigmond-location-check.timer"] in calls
+    assert not any("--now" in c and "sigmond-location-check.timer" in c
+                   for c in calls)
+    assert "enabled but not started (--no-restart)" in out and out.isascii()
+
+
+def test_location_check_timer_not_started_after_a_failed_align(tmp_path):
+    calls, out = _start_timers(tmp_path, rc=1, no_restart=False)
+    assert ["systemctl", "enable", "sigmond-location-check.timer"] in calls
+    assert "align did not finish cleanly" in out
 
 
 def test_location_check_service_inert_without_gpsdo():
@@ -146,7 +175,8 @@ APPLIANCE = (Path(__file__).resolve().parents[2] / "sigmond-appliance"
              / "sigmond-location-check")
 
 
-def _check(tmp_path, source):
+def _check(tmp_path, source, *, lat=10.5, hold_lock=False):
+    import fcntl
     import json
     import os
     g = tmp_path / "gpsdo"
@@ -155,7 +185,7 @@ def _check(tmp_path, source):
         "latitude": 10.5, "longitude": 20.25, "gps_fix": "3D",
         "sats_used": 8, "fix_age_sec": 5}}))
     prof = tmp_path / "site-profile.toml"
-    prof.write_text('[station]\ncallsign = "N0CALL"\nlatitude = 10.5\n'
+    prof.write_text(f'[station]\ncallsign = "N0CALL"\nlatitude = {lat}\n'
                     'longitude = 20.25\n'
                     'grid_square = "KK00dm"   # typed\n'
                     + (f'location_source = "{source}"\n' if source else ""))
@@ -168,9 +198,17 @@ def _check(tmp_path, source):
         p = bindir / n
         p.write_text("#!/bin/bash\n" + body)
         p.chmod(0o755)
+    lock = tmp_path / "lifecycle.lock"
     env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}",
-               SIGMOND_SITE_PROFILE=str(prof), SIGMOND_GPSDO_DIR=str(g))
-    subprocess.run(["bash", str(APPLIANCE)], env=env, check=True)
+               SIGMOND_SITE_PROFILE=str(prof), SIGMOND_GPSDO_DIR=str(g),
+               SIGMOND_LIFECYCLE_LOCK=str(lock))
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        if hold_lock:      # as smd's lifecycle_lock does: flock, LOCK_EX
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        subprocess.run(["bash", str(APPLIANCE)], env=env, check=True)
+    finally:
+        os.close(fd)
     calls = log.read_text() if log.exists() else ""
     return tomllib.loads(prof.read_text())["station"], calls
 
@@ -192,6 +230,37 @@ def test_location_check_current_and_gpsdo_does_nothing(tmp_path):
     st, calls = _check(tmp_path, "gpsdo")
     assert st["location_source"] == "gpsdo"
     assert calls == ""
+
+
+@pytest.mark.skipif(not APPLIANCE.exists(), reason="sigmond-appliance absent")
+def test_location_check_moves_and_restarts_without_the_lock(tmp_path):
+    st, calls = _check(tmp_path, "operator", lat=11.0)
+    assert st["latitude"] == 10.5 and st["location_source"] == "gpsdo"
+    assert "systemctl try-restart" in calls
+
+
+@pytest.mark.skipif(not APPLIANCE.exists(), reason="sigmond-appliance absent")
+def test_location_check_skips_its_tick_while_smd_holds_the_lock(tmp_path):
+    # Final review I1: never re-render or restart recorders while an smd
+    # lifecycle operation (align --apply's bring-up) runs.
+    st, calls = _check(tmp_path, "operator", lat=11.0, hold_lock=True)
+    assert st["latitude"] == 11.0 and st["location_source"] == "operator"
+    assert calls == ""
+    assert not list(tmp_path.glob("site-profile.toml.bak-location-*"))
+
+
+@pytest.mark.skipif(not APPLIANCE.exists(), reason="sigmond-appliance absent")
+def test_location_check_relabel_also_waits_for_the_lock(tmp_path):
+    st, calls = _check(tmp_path, "operator", hold_lock=True)
+    assert st["location_source"] == "operator" and calls == ""
+
+
+def test_location_check_lock_is_smds_lock():
+    from sigmond import paths
+    if not APPLIANCE.exists():
+        pytest.skip("sigmond-appliance absent")
+    assert f"/var/lib/sigmond/{paths.LIFECYCLE_LOCK.name}" in APPLIANCE.read_text()
+    assert str(paths.LIFECYCLE_LOCK) == "/var/lib/sigmond/lifecycle.lock"
 
 
 def test_shipped_location_check_units():

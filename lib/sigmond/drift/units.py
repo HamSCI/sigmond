@@ -15,9 +15,11 @@ install_own_units copies sigmond's own units the way install.sh does, so
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import tempfile
 import tomllib
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping
 
@@ -107,19 +109,59 @@ def unit_items(base: Path, enabled: Mapping[str, bool], *,
     return out
 
 
+def _excepted_units(exceptions_path, now) -> tuple:
+    """(unit names a live drift exception covers, the read error or None).
+    A live exception has not passed its ``until``; an expired test is the
+    restore the fault asks for, so it covers nothing."""
+    from sigmond.drift import exceptions as drift_exceptions
+    path = Path(exceptions_path or drift_exceptions.DEFAULT_PATH)
+    now = now or datetime.now(timezone.utc)
+    excs, err = drift_exceptions.load_checked(path, now)
+    today = now.astimezone(timezone.utc).date() if now.tzinfo else now.date()
+    names = {e.key[len("unit:"):] for e in excs
+             if e.key.startswith("unit:") and today <= e.until}
+    return names, err
+
+
 def install_own_units(sigmond_repo: Path, unit_dir: Path, *,
-                      run=subprocess.run) -> list:
+                      run=subprocess.run, exceptions_path=None, now=None,
+                      say: Callable[[str], None] = print) -> list:
     """Copy missing or changed sigmond units into unit_dir (0644, atomic).
+
+    Final review I3: a unit a drift exception covers (``unit:<name>``,
+    standing or test, not yet ended) stays as it is, installed or not
+    (one line through ``say``), and so does every
+    installed unit that differs while the exceptions file cannot be read.
+    An installed unit this replaces is kept first as
+    ``<unit>.bak-drift-<UTC stamp>``; ``say`` gets one line per
+    replacement.
 
     Enables and starts nothing.  Returns the names written.  ``run`` is
     kept for callers that inject a runner; the copy itself needs none.
     """
     unit_dir = Path(unit_dir)
+    excepted, err = _excepted_units(exceptions_path, now)
+    stamp = (now or datetime.now(timezone.utc)).astimezone(
+        timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    if err is not None:
+        say(f"  sigmond-units: {err}; no installed unit is replaced")
     wrote = []
     for src in own_unit_files(sigmond_repo):
         dst = unit_dir / src.name
-        if dst.is_file() and not _differs(src, dst):
+        present = dst.is_file()
+        if present and not _differs(src, dst):
             continue
+        if src.name in excepted:
+            # Missing or hand-edited on purpose: either way, left alone.
+            say(f"  sigmond-units: left {src.name} as it is: a drift "
+                f"exception covers unit:{src.name}")
+            continue
+        if present and err is not None:
+            continue
+        bak = None
+        if present:
+            bak = dst.with_name(f"{src.name}.bak-drift-{stamp}")
+            shutil.copy2(dst, bak)
         fd, tmp = tempfile.mkstemp(dir=unit_dir, prefix=f".{src.name}.")
         try:
             with os.fdopen(fd, "wb") as f:
@@ -134,5 +176,8 @@ def install_own_units(sigmond_repo: Path, unit_dir: Path, *,
             except OSError:
                 pass
             raise
+        if bak is not None:
+            say(f"  sigmond-units: replaced {src.name}; the old copy is "
+                f"{bak}")
         wrote.append(src.name)
     return wrote

@@ -25,6 +25,12 @@ from sigmond import build_stamp, decoder_choice
 from sigmond.drift.model import Item
 
 _APPLY = "smd align --apply"
+# align never rebuilds the native decoders; native-build does (final
+# review I4), and nothing on the station can add MSK144 to the pinned
+# UberSDR source.
+_NATIVE = "smd admin native-build --apply ubersdr-decoders"
+_MSK144_FIX = ("needs a sigmond release that moves the UberSDR pin to a "
+               "build with MSK144")
 _UBERSDR_SRC = "ubersdr_wsprd"
 _HEX40 = re.compile(r"\b[0-9a-f]{40}\b")
 
@@ -65,11 +71,11 @@ def _provenance_item(base: Path, decoder_dir: Path) -> Optional[Item]:
     if not m:
         return Item("build", "fault", "ubersdr-decoders",
                     "UberSDR decoders have no provenance commit; "
-                    f"checkout at {_short(head)}", _APPLY)
+                    f"checkout at {_short(head)}", _NATIVE)
     if m.group(0) != head:
         return Item("build", "fault", "ubersdr-decoders",
                     f"UberSDR decoders built from {_short(m.group(0))}, "
-                    f"checkout at {_short(head)}", _APPLY)
+                    f"checkout at {_short(head)}", _NATIVE)
     return None
 
 
@@ -85,7 +91,7 @@ def _msk144_item(decoder_dir: Path, run) -> Optional[Item]:
         return None
     return Item("build", "fault", "ubersdr-jt9",
                 "UberSDR jt9 lacks MSK144; meteor-scatter falls back to "
-                "the WSJT-X build", _APPLY)
+                "the WSJT-X build", _MSK144_FIX)
 
 
 def _live_item(decoder_dir: Path) -> Optional[Item]:

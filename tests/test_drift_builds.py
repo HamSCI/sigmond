@@ -76,7 +76,9 @@ def test_ubersdr_without_msk144_is_fault_when_meteor_enabled(tmp_path):
     assert len(items) == 1
     assert items[0].severity == "fault"
     assert "lacks MSK144" in items[0].detail
-    assert items[0].fix == "smd align --apply"
+    # Final review I4: align cannot add MSK144; only a release can.
+    assert items[0].fix == ("needs a sigmond release that moves the UberSDR "
+                            "pin to a build with MSK144")
 
 
 def test_ubersdr_with_msk144_is_quiet(tmp_path):
@@ -183,3 +185,5 @@ def test_operator_override_keeps_provenance_fault(tmp_path, monkeypatch):
     items = builds.build_items(tmp_path, [], enabled={},
                                decoder_dir=_dec(tmp_path, sha=SHA_A))
     assert [i.subject for i in items] == ["ubersdr-decoders"]
+    # Final review I4: align never rebuilds the decoders; native-build does.
+    assert items[0].fix == "smd admin native-build --apply ubersdr-decoders"

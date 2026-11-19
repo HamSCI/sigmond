@@ -82,3 +82,79 @@ def test_unreadable_config_is_one_fault(tmp_path):
     assert [(i.severity, i.subject) for i in got] == [
         ("fault", str(cfgs["meteor-scatter"][0])), ("drift", "catalog:x")]
     assert got[0].detail.startswith("could not read ")
+
+
+# Final review C3: the shipped templates set decoder_jt9 and mag_usb_binary
+# themselves; a config holding the release's own value is no override.
+import shutil  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import pytest  # noqa: E402
+
+REPOS = Path(__file__).resolve().parents[2]
+TEMPLATES = {
+    "psk-recorder": REPOS / "psk-recorder/config/psk-recorder-config.toml.template",
+    "mag-recorder": REPOS / "mag-recorder/config/mag-recorder-config.toml.template",
+}
+
+
+def _base_with_templates(tmp_path):
+    base = tmp_path / "base"
+    for comp, tpl in TEMPLATES.items():
+        if not tpl.is_file():
+            pytest.skip(f"no sibling checkout holds {tpl}")
+        (base / comp / "config").mkdir(parents=True)
+        shutil.copy(tpl, base / comp / "config" / tpl.name)
+    return base
+
+
+def _configs_from_templates(tmp_path, edit=None):
+    cfgs = {}
+    for comp, tpl in TEMPLATES.items():
+        text = tpl.read_text()
+        if edit:
+            text = edit(comp, text)
+        p = tmp_path / "etc" / comp / f"{comp}-config.toml"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+        cfgs[comp] = [p]
+    return cfgs
+
+
+def test_shipped_templates_raise_no_override(tmp_path):
+    base = _base_with_templates(tmp_path)
+    cfgs = _configs_from_templates(tmp_path)
+    assert _run(tmp_path, cfgs, base=base) == []
+
+
+def test_shipped_template_values_pass_without_a_checkout(tmp_path):
+    # No template at the checkout: RELEASE_DEFAULTS holds the same values.
+    _base_with_templates(tmp_path)          # skips without the siblings
+    cfgs = _configs_from_templates(tmp_path)
+    assert _run(tmp_path, cfgs) == []
+    assert _run(tmp_path, cfgs, base=tmp_path / "empty-base") == []
+
+
+def test_a_value_differing_from_the_template_is_a_fault(tmp_path):
+    base = _base_with_templates(tmp_path)
+
+    def edit(comp, text):
+        if comp == "psk-recorder":
+            return text.replace('"/usr/local/bin/jt9_decode"',
+                                '"/home/op/wsjtx/jt9"')
+        return text
+    got = _run(tmp_path, _configs_from_templates(tmp_path, edit), base=base)
+    assert [(i.severity, i.subject) for i in got] == [
+        ("fault", "psk-recorder-config.toml:paths.decoder_jt9")]
+    assert "/home/op/wsjtx/jt9" in got[0].detail
+
+
+def test_a_key_the_template_lacks_is_still_a_fault(tmp_path):
+    # meteor-scatter's template only comments decoder_jt9 out: ND's
+    # hand-built jt9 stays visible.
+    base = tmp_path / "base"
+    (base / "meteor-scatter" / "config").mkdir(parents=True)
+    (base / "meteor-scatter" / "config" / "m.toml.template").write_text(
+        '[paths]\n# decoder_jt9 = "/x"\n')
+    got = _run(tmp_path, _cfg(tmp_path, MS.format(line=J)), base=base)
+    assert [i.subject for i in got] == ["AC0G-ND.toml:paths.decoder_jt9"]

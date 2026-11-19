@@ -11,7 +11,7 @@ sys.path.insert(0, str(HERE))
 from sigmond import uploader_manifest as um   # noqa: E402
 import render_forms_driver as drv              # noqa: E402
 
-GATE = frozenset({"gate", "sigmondb-tar"})
+GATE = frozenset({"gate", "sigmondb-tar", "sigmondb-station-drift"})
 
 
 def _pipelines(text):
@@ -42,9 +42,26 @@ class DriftPipelineRenders(unittest.TestCase):
 
     def test_drift_pipeline_absent_without_sigmondb_tar(self):
         coord = drv.coordination("upload")
-        for feats in (None, frozenset(), frozenset({"gate"})):
+        for feats in (None, frozenset(), frozenset({"gate"}),
+                      frozenset({"gate", "sigmondb-station-drift"})):
             by = _pipelines(um.sigmond_pipeline_file(coord, feats))
             self.assertEqual(set(by), {"heartbeat"})
+
+    def test_drift_pipeline_absent_on_an_uploader_that_drops_the_table(self):
+        # Final review C2: an hs-uploader with sigmondb-tar but no
+        # station_drift chirp mapping skips every drift row.
+        coord = drv.coordination("upload")
+        by = _pipelines(um.sigmond_pipeline_file(
+            coord, frozenset({"gate", "sigmondb-tar"})))
+        self.assertEqual(set(by), {"heartbeat"})
+
+    def test_drift_feature_matches_hs_uploader(self):
+        cli = HERE.parent.parent / "hs-uploader" / "src" / "hs_uploader" / "cli.py"
+        if not cli.is_file():
+            self.skipTest("no hs-uploader checkout beside this one")
+        text = cli.read_text()
+        for word in um.DRIFT_FEATURES:
+            self.assertIn(f'"{word}"', text)
 
     def test_drift_alone_when_heartbeat_off(self):
         coord = drv.coordination("upload", heartbeat=False)

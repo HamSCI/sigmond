@@ -25,7 +25,7 @@ from typing import Any, Callable, Optional
 
 from sigmond.drift import exceptions as drift_exceptions
 from sigmond.drift.builds import build_items
-from sigmond.drift.model import KINDS, Report, run_collectors
+from sigmond.drift.model import KINDS, Item, Report, run_collectors
 from sigmond.drift.overrides import override_items
 from sigmond.drift.source import host_items, source_items
 from sigmond.drift.strays import stray_items, systemd_unit_env
@@ -103,7 +103,8 @@ def build(station: str, *, readers: Readers) -> Report:
         ("override", lambda: override_items(
             client_configs=_v(r.client_configs) or {},
             catalog_override=r.catalog_override, pins_file=r.pins_file,
-            coordination=r.coordination, manifest=_v(r.manifest) or {})),
+            coordination=r.coordination, manifest=_v(r.manifest) or {},
+            base=base)),
         ("stray", lambda: stray_items(
             decoder_dir=Path(r.decoder_dir), base=base,
             catalog_names=set(_v(r.catalog_names) or ()),
@@ -116,7 +117,14 @@ def build(station: str, *, readers: Readers) -> Report:
                     items=run_collectors(collectors))
     now = r.now or datetime.now(timezone.utc)
     path = r.exceptions_path or drift_exceptions.DEFAULT_PATH
-    excs = drift_exceptions.load(path, now)
+    excs, err = drift_exceptions.load_checked(path, now)
+    if err is not None:
+        # No exception applies while the file cannot be read; say so as a
+        # fault instead of failing the whole report.
+        report.items.append(Item(
+            "override", "fault", str(path),
+            f"drift exceptions file unreadable, so no exception applies: "
+            f"{err}", f"repair or move {path}"))
     return drift_exceptions.apply(report, excs, now)
 
 

@@ -322,8 +322,13 @@ def test_apply_enables_and_starts_the_drift_timer(tmp_path):
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     steps = smd._align_own_units(repo, unit_dir=unit_dir, run=fake_run)
-    assert ["systemctl", "enable", "--now", "sigmond-drift.timer"] in calls
     assert [s.outcome for s in steps] == ["installed"]
+    # Final review I1: installing starts nothing; the timers start after
+    # _align_make_live.
+    assert not [c for c in calls if c[:2] == ["systemctl", "enable"]]
+    smd._align_start_timers(rc=0, no_restart=False, unit_dir=unit_dir,
+                            run=fake_run)
+    assert ["systemctl", "enable", "--now", "sigmond-drift.timer"] in calls
 
 
 def test_shipped_drift_units_carry_the_required_values():

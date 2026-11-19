@@ -76,6 +76,17 @@ def load(path: Path, now: datetime) -> list:
     return _load(Path(path))[0]
 
 
+def load_checked(path: Path, now: datetime):
+    """``(entries, error)``: as ``load``, plus the ``ExceptionsFileError``
+    that says why a file that exists could not be read (else None).  The
+    report turns that error into one fault item."""
+    path = Path(path)
+    entries, _skipped, fatal = _load(path)
+    if fatal is None:
+        return entries, None
+    return entries, ExceptionsFileError(f"{path} cannot be parsed ({fatal})")
+
+
 def _load(path: Path):
     """Return (entries, skipped_count, fatal_error_or_None)."""
     try:
@@ -83,7 +94,9 @@ def _load(path: Path):
             data = tomllib.load(fh)
     except FileNotFoundError:
         return [], 0, None
-    except (OSError, tomllib.TOMLDecodeError) as exc:
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+        # UnicodeDecodeError: a stray non-UTF-8 byte (final review T7/M1)
+        # must not take down smd align, --json or --report.
         log.warning("drift exceptions: cannot read %s: %s", path, exc)
         return [], 0, exc
     raw = data.get("exception", [])
@@ -147,7 +160,7 @@ def _q(s: str) -> str:
 
 
 def _write(path: Path, excs: list) -> None:
-    lines = ["# sigmond drift exceptions; edit with: smd drift --accept",
+    lines = ["# sigmond drift exceptions; edit with: smd align --accept",
              ""]
     for e in excs:
         lines += ["[[exception]]",

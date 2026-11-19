@@ -4,7 +4,12 @@ An override replaces the release's own choice of software or source.
 Site configuration (callsign, grid, receivers, channels) never counts.
 
 * client configs: a key ending in _jt9, _wsprd or _binary, or named
-  decoder_jt9 or decoder_path, with a non-empty string value (any depth).
+  decoder_jt9 or decoder_path, with a non-empty string value (any depth)
+  that differs from the release's own value.  The release's value comes
+  from the component's shipped template at its checkout
+  (``<base>/<component>/config/*.toml.template``): the same dotted key
+  when the template has it, else any template value under the same key
+  name.  Without a readable template, ``RELEASE_DEFAULTS`` stands in.
 * /etc/sigmond/catalog.toml: an entry setting repo or branch.
 * /etc/sigmond/component-pins.toml: a pin that differs from the manifest
   commit, or names a component the manifest lacks.
@@ -27,6 +32,13 @@ from sigmond.drift.model import Item
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SUFFIXES = ("_jt9", "_wsprd", "_binary")
 _NAMES = ("decoder_jt9", "decoder_path")
+
+# The values the shipped templates write, for a component whose checkout
+# holds no readable template.  Keyed by the key's own name.
+RELEASE_DEFAULTS = {
+    "decoder_jt9": {"/usr/local/bin/jt9_decode"},
+    "mag_usb_binary": {"/usr/local/bin/mag-usb"},
+}
 
 
 def _load(path: Path, out: list):
@@ -62,14 +74,56 @@ def _walk(table: Mapping, prefix: str = ""):
             yield dotted, val
 
 
-def _client_items(client_configs, out: list) -> None:
+def _leaf(dotted: str) -> str:
+    return dotted.rsplit(".", 1)[-1]
+
+
+def release_values(base, comp: str):
+    """(by dotted key, by key name) of the choice keys the component's
+    shipped templates set, or None when no template could be read."""
+    if base is None:
+        return None
+    try:
+        paths = sorted((Path(base) / comp / "config").glob("*.toml.template"))
+    except OSError:
+        return None
+    by_dotted: dict = {}
+    by_leaf: dict = {}
+    found = False
+    for p in paths:
+        try:
+            with open(p, "rb") as f:
+                data = tomllib.load(f)
+        except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+            continue
+        found = True
+        for dotted, val in _walk(data):
+            by_dotted[dotted] = val.strip()
+            by_leaf.setdefault(_leaf(dotted), set()).add(val.strip())
+    return (by_dotted, by_leaf) if found else None
+
+
+def _is_release_value(dotted: str, val: str, release) -> bool:
+    val = val.strip()
+    if release is None:
+        return val in RELEASE_DEFAULTS.get(_leaf(dotted), ())
+    by_dotted, by_leaf = release
+    if dotted in by_dotted:
+        return val == by_dotted[dotted]
+    return val in by_leaf.get(_leaf(dotted), ())
+
+
+def _client_items(client_configs, out: list, base=None) -> None:
     for comp in sorted(client_configs):
+        release = release_values(base, comp)
         for path in client_configs[comp]:
             data = _load(path, out)
             if data is None:
                 continue
             name = Path(path).name
             for dotted, val in _walk(data):
+                if _is_release_value(dotted, val, release):
+                    continue
                 out.append(Item(
                     "override", "fault", f"{name}:{dotted}",
                     f"{name} sets {dotted} = {val!r}, replacing the "
@@ -152,9 +206,12 @@ def override_items(*, client_configs: Mapping[str, list],
                        "/etc/sigmond/component-pins.toml"),
                    coordination: Path = Path(
                        "/etc/sigmond/coordination.toml"),
-                   manifest: Mapping[str, str]) -> list:
+                   manifest: Mapping[str, str],
+                   base=None) -> list:
+    """``base`` holds the component checkouts whose shipped templates
+    give the release's own values (None: RELEASE_DEFAULTS only)."""
     out: list = []
-    _client_items(client_configs, out)
+    _client_items(client_configs, out, base)
     _catalog_items(Path(catalog_override), out)
     _pin_items(Path(pins_file), manifest, out)
     _decoder_items(Path(coordination), out)

@@ -165,8 +165,8 @@ The report reaches you in four ways.
   --report`.  That writes `/var/lib/sigmond/drift.json` and queues one
   `station_drift` row for sigmondb.  `smd align --apply` rewrites the file when
   it finishes, so a fixed fault does not stay red until the next day.  The
-  timer runs on every install, and an in-place `smd align --apply` enables and
-  starts it.
+  timer runs on every install.  An in-place `smd align --apply` enables and
+  starts it after the restarts finish.
 - **`smd check`.**  Its `drift` line reads the file.  It shows FAIL for a fault,
   WAIT when the file passes 36 hours of age, and `--` before the first run.
   See [platform.drift](../operator/checks/platform.drift.md).
@@ -179,7 +179,10 @@ name one per run.  `--report`, `--accept` and `--apply` need root.
   and those it cannot read, at the end of its summary, and keeps rolling.
 
 Three commands change the report.  `smd align --apply` removes drift it can
-fix.  `smd align --accept KEY --reason "<why>"` records an intended
+fix.  When it replaces one of sigmond's own units, it first keeps the old copy
+as `<unit>.bak-drift-<UTC stamp>` beside it and prints one line naming that
+copy.  It leaves alone any unit that an accepted item covers, whether a
+standing exception or a test.  `smd align --accept KEY --reason "<why>"` records an intended
 difference.  KEY has the form `kind:subject`, for example
 `unit:hf-timestd-fusion.service`.  Add `--test` for a trial you mean to undo,
 and `--until YYYY-MM-DD` to set the end date.  An end date past the limit below
@@ -198,7 +201,10 @@ limits:
 
 An entry that matches no current item stays in the file and shows nowhere.
 `--accept` refuses an unparseable file rather than overwrite it, and keeps a
-`.bak` copy when it drops entries that did not parse.
+`.bak` copy when it drops entries that did not parse.  The report shows a file
+it cannot read, a stray non-UTF-8 byte included, as one fault.  No entry
+applies until someone repairs the file, and meanwhile `smd align --apply`
+replaces no installed unit.
 
 **What the station reports.**  The `station_drift` row carries the reporter id,
 release, baseline, counts by kind and severity, and the fault items.  It also
@@ -214,11 +220,16 @@ Every install with a GPSDO now runs `sigmond-location-check` (its timer runs
 everywhere; its service starts only when `/run/gpsdo` exists), so bare-metal
 hosts record the source as the appliance does.  A bare-metal host gets the
 current script with the sigmond-appliance refresh, so a release carries both.
+The script can re-render the configuration and restart the wspr, psk and
+meteor-scatter recorders.  So it skips its tick while any smd lifecycle
+operation holds `/var/lib/sigmond/lifecycle.lock`, and `smd align --apply`
+starts its timer only after the restarts.  Under `--no-restart`, or after an
+align that failed, align enables the timer without starting it and says so.
 
 **The board.**  The fleetboard reads the rows.  A fault opens an alarm naming
 the station and the item.  Drift shows without an alarm.  A test that nears its
 end shows a reminder.  The public view carries only the station, the kind, the
-severity, a canned sentence and an opaque eight-digit item id.  Paths, commands, reasons and operator names stay
+severity, a canned sentence and an opaque item id of eight hex digits.  Paths, commands, reasons and operator names stay
 in the private alarm table.  `ops/bin/fleet-map-export` builds the station map
 from the rows, so a station names itself and `fleet.toml` keeps only how to reach
 it.  Stations that send no row stay on their hand entries in the `[board]`

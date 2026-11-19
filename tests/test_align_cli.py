@@ -641,7 +641,12 @@ def _quiet_live_stages():
         _align_aligned_live=lambda: None,
         # Never the real systemctl or /opt/git reflogs: the staleness read
         # also asks after hs-uploader's own daemon (final review / I5).
-        _align_staleness=lambda *a, **k: _staleness())
+        _align_staleness=lambda *a, **k: _staleness(),
+        # The drift.json refresh at the end of --apply runs a whole second
+        # dry run against the host (systemctl, /etc).  It died on a NameError
+        # until the drift final fixes, which hid that these harnesses let it
+        # through; tests/test_drift_final_fixes.py drives it for real.
+        _align_refresh_drift=lambda args: None)
 
 
 def _no_real_record_live():

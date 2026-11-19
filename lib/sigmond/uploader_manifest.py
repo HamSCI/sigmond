@@ -1070,16 +1070,21 @@ _SIGMOND_FILE_HEADER = [
 
 DRIFT_PIPELINE = "sigmond-sigmondb-drift"
 DRIFT_FEATURE = "sigmondb-tar"
+# hs-uploader that maps sigmondb.station_drift to its chirp/ leaf; an older
+# one logs "no chirp/ mapping" and drops every drift row (final review C2).
+DRIFT_TABLE_FEATURE = "sigmondb-station-drift"
+DRIFT_FEATURES = frozenset({DRIFT_FEATURE, DRIFT_TABLE_FEATURE})
 
 
 def drift_pipeline(coord: Coordination,
                    features: Optional[frozenset]) -> Optional[dict]:
     """The daily drift row's pipeline: sigmondb.station_drift, producer
     sigmond, to wsprdaemon-server in the same tar the codar and hfdl
-    sigmondb pipelines use.  ``None`` unless hs-uploader offers
-    ``sigmondb-tar`` (an older daemon would carry the tar wrongly) and the
-    station has a reporter id to file the rows under."""
-    if DRIFT_FEATURE not in (features or frozenset()):
+    sigmondb pipelines use.  ``None`` unless hs-uploader offers both
+    ``sigmondb-tar`` (an older daemon would carry the tar wrongly) and
+    ``sigmondb-station-drift`` (an older daemon drops the table's rows),
+    and the station has a reporter id to file the rows under."""
+    if not DRIFT_FEATURES <= (features or frozenset()):
         return None
     call = reporter_call(coord)
     if not call:
@@ -1120,7 +1125,7 @@ def sigmond_pipeline_file(coord: Coordination,
                           ) -> Optional[str]:
     """The text of ``pipelines.d/sigmond.toml`` for the gate form (spec §3.6):
     the :func:`heartbeat_pipeline` entry with ``governed = false`` and no
-    ``start_at``, then (with ``sigmondb-tar`` in ``features``) the
+    ``start_at``, then (with ``DRIFT_FEATURES`` in ``features``) the
     :func:`drift_pipeline` entry, each as a ``[[pipeline]]`` table of the
     file, and nothing else, so part 1's file rules accept it.  ``None``
     when the station renders neither; the file then has no reason to
