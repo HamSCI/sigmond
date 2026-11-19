@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 import types
@@ -13,6 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
 import sigmond.site_profile as sp                              # noqa: E402
+import sigmond.instance_move as IM                              # noqa: E402
 from sigmond.instance_move import (Existing, Move, Retire, apply_moves,  # noqa: E402
                                    apply_retires, existing_instances,
                                    pending_moves, plan_changes, plan_moves)
@@ -41,6 +43,13 @@ class FakeSystemctl:
             return 0, (("enabled" if en else "disabled") if args[0] == "is-enabled"
                        else ("active" if ac else "inactive"))
         return 0, ""
+
+
+@pytest.fixture(autouse=True)
+def _trust_this_user():
+    """Tests run as a normal user; the journal must be owned by "root"."""
+    with mock.patch.object(IM, "_trusted_uid", lambda: os.getuid()):
+        yield
 
 
 @pytest.fixture
@@ -255,7 +264,7 @@ def test_every_reporter_keyed_client_plans_a_move(tmp_root, fake_systemctl, clie
     smd = _load_smd()
     make_instance(tmp_root, client, "AB4EJ", RADIOD)
     moves, refused = smd._receiver_moves(
-        [Receiver("AB4EJ-RX888", RADIOD)], frozenset({"wspr-recorder"}),
+        [Receiver("AB4EJ-RX888", RADIOD)],
         tmp_root / "etc", fake_systemctl)
     assert refused == [] and [m.client for m in moves] == [client]
 
@@ -264,7 +273,7 @@ def test_move_never_creates_a_client_with_no_instance(tmp_root, fake_systemctl):
     smd = _load_smd()
     make_instance(tmp_root, "wspr-recorder", "AB4EJ", RADIOD)
     moves, _ = smd._receiver_moves(
-        [Receiver("AB4EJ-RX888", RADIOD)], frozenset({"wspr-recorder", "psk-recorder"}),
+        [Receiver("AB4EJ-RX888", RADIOD)],
         tmp_root / "etc", fake_systemctl)
     assert [m.client for m in moves] == ["wspr-recorder"]
 
@@ -418,3 +427,171 @@ def test_receiver_apply_rerenders_manifest_after_a_move(tmp_root, fake_systemctl
     _apply(smd, tmp_root, [Receiver("N8UR-SIGMOND", RADIOD)], fake_systemctl,
            manifest_run=lambda: calls.append(1) or True)
     assert calls == []
+
+
+# ---- fix round 2 -------------------------------------------------------
+
+def test_failed_move_skips_bind_and_next_apply_moves_again(tmp_root, fake_systemctl):
+    smd = _load_smd()
+    make_instance(tmp_root, "wspr-recorder", "N8UR", RADIOD)
+    fake_systemctl.fail.add(("enable", "wspr-recorder@N8UR-SIGMOND.service"))
+    prof = tmp_root / "etc/sigmond/site-profile.toml"
+    with mock.patch.object(sp, "SITE_PROFILE_PATH", prof), \
+            mock.patch.object(smd, "_sources_bind", return_value=0) as sb:
+        rc = smd._receiver_apply(
+            [Receiver("N8UR-SIGMOND", RADIOD)],
+            profile_clients=frozenset({"wspr-recorder"}),
+            etc_root=tmp_root / "etc", coord_path=tmp_root / "etc/sigmond/c.toml",
+            profile_path=prof, inventory_rows=[], move_run=fake_systemctl,
+            manifest_run=lambda: True)
+    assert rc == 1
+    assert all("wspr-recorder" not in a[2] for a, k in sb.call_args_list)
+    names = sorted(p.name for p in (tmp_root / "etc/wspr-recorder").glob("*.toml*"))
+    assert names == ["N8UR.toml"]
+    fake_systemctl.fail.clear()
+    assert _apply(smd, tmp_root, [Receiver("N8UR-SIGMOND", RADIOD)],
+                  fake_systemctl) == 0
+    assert (tmp_root / "etc/wspr-recorder/N8UR-SIGMOND.toml").exists()
+
+
+def test_copies_keep_owner_and_mode(tmp_root, fake_systemctl):
+    make_instance(tmp_root, "chirp-recorder", "AB4EJ", RADIOD)
+    st = tmp_root / "var/lib/chirp-recorder/AB4EJ"
+    (st / "sub").mkdir()
+    (st / "sub/f.dat").write_text("x")
+    os.chmod(st / "sub/f.dat", 0o640)
+    calls = []
+    with mock.patch.object(IM, "_geteuid", lambda: 0), \
+            mock.patch.object(IM, "_chown", lambda p, u, g: calls.append((Path(p), u, g))):
+        apply_moves([Move("chirp-recorder", "AB4EJ", "AB4EJ-RX888", "AB4EJ-RX888", RADIOD)],
+                    etc_root=tmp_root / "etc", var_root=tmp_root / "var",
+                    run=fake_systemctl)
+    new = tmp_root / "var/lib/chirp-recorder/AB4EJ-RX888"
+    got = {p for p, u, g in calls}
+    assert {new, new / "sub", new / "sub/f.dat", new / "cursor"} <= got
+    for path, u, g in calls:
+        if st.parent / "AB4EJ-RX888" in path.parents or path == new:
+            src = st / path.relative_to(new)
+            assert (u, g) == (src.stat().st_uid, src.stat().st_gid)
+    assert (new / "sub/f.dat").stat().st_mode & 0o777 == 0o640
+
+
+def _journal_for(tmp_root, move, **extra):
+    d = tmp_root / "var" / IM.JOURNAL_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    os.chmod(d, 0o700)
+    body = {"move": move, "was_enabled": True, "was_active": True,
+            "stamp": "20260101T000000Z", "fresh": []}
+    body.update(extra)
+    (d / "x.json").write_text(json.dumps(body))
+    os.chmod(d / "x.json", 0o600)
+    return d
+
+
+def test_journal_with_dotdot_key_is_refused(tmp_root, fake_systemctl):
+    victim = tmp_root / "victim"
+    victim.mkdir()
+    (victim / "keep").write_text("1")
+    _journal_for(tmp_root, {"client": "psk-recorder", "old_key": "N8UR",
+                            "new_key": "../../victim", "new_reporter_id": "X",
+                            "radiod": RADIOD})
+    errs = []
+    assert pending_moves(tmp_root / "var", errors=errs) == []
+    assert errs and "journal" in errs[0]
+    assert (victim / "keep").exists()
+
+
+def test_journal_with_unknown_client_is_refused(tmp_root):
+    _journal_for(tmp_root, {"client": "sshd", "old_key": "A", "new_key": "B",
+                            "new_reporter_id": "B", "radiod": RADIOD})
+    errs = []
+    assert pending_moves(tmp_root / "var", errors=errs) == [] and errs
+
+
+def test_journal_outside_paths_are_never_deleted(tmp_root, fake_systemctl):
+    make_instance(tmp_root, "psk-recorder", "N8UR", RADIOD)
+    victim = tmp_root / "victim"
+    victim.mkdir()
+    (victim / "keep").write_text("1")
+    mv = {"client": "psk-recorder", "old_key": "N8UR", "new_key": "N8UR-SIGMOND",
+          "new_reporter_id": "N8UR-SIGMOND", "radiod": RADIOD}
+    (tmp_root / "var" / IM.JOURNAL_DIR).mkdir(parents=True, exist_ok=True)
+    d = _journal_for(tmp_root, mv, fresh=[str(victim)])
+    (d / "x.json").rename(d / "psk-recorder@N8UR.json")
+    fake_systemctl.fail.add(("enable", "psk-recorder@N8UR-SIGMOND.service"))
+    apply_moves([Move(**mv)], etc_root=tmp_root / "etc",
+                var_root=tmp_root / "var", run=fake_systemctl)
+    assert (victim / "keep").exists()
+
+
+def test_journal_not_owned_by_root_is_refused(tmp_root, fake_systemctl):
+    make_instance(tmp_root, "psk-recorder", "N8UR", RADIOD)
+    mv = {"client": "psk-recorder", "old_key": "N8UR", "new_key": "N8UR-SIGMOND",
+          "new_reporter_id": "N8UR-SIGMOND", "radiod": RADIOD}
+    d = _journal_for(tmp_root, mv)
+    (d / "x.json").rename(d / "psk-recorder@N8UR.json")
+    before = _tree(tmp_root)
+    with mock.patch.object(IM, "_trusted_uid", lambda: os.getuid() + 1):
+        errs = []
+        assert pending_moves(tmp_root / "var", errors=errs) == [] and errs
+        steps = apply_moves([Move(**mv)], etc_root=tmp_root / "etc",
+                            var_root=tmp_root / "var", run=fake_systemctl)
+    assert any(s.startswith("ERROR") for s in steps)
+    assert _tree(tmp_root) == before and fake_systemctl.calls == []
+
+
+def test_journal_dir_writable_by_group_is_refused(tmp_root):
+    mv = {"client": "psk-recorder", "old_key": "N8UR", "new_key": "N8UR-SIGMOND",
+          "new_reporter_id": "N8UR-SIGMOND", "radiod": RADIOD}
+    d = _journal_for(tmp_root, mv)
+    os.chmod(d, 0o770)
+    errs = []
+    assert pending_moves(tmp_root / "var", errors=errs) == [] and errs
+
+
+def test_journal_dir_is_created_private(tmp_root, fake_systemctl):
+    make_instance(tmp_root, "psk-recorder", "N8UR", RADIOD)
+    seen = []
+    real = fake_systemctl.__call__
+
+    def spy(args):
+        d = tmp_root / "var" / IM.JOURNAL_DIR
+        if d.exists():
+            seen.append(d.stat().st_mode & 0o777)
+        return real(args)
+    apply_moves([Move("psk-recorder", "N8UR", "N8UR-SIGMOND", "N8UR-SIGMOND", RADIOD)],
+                etc_root=tmp_root / "etc", var_root=tmp_root / "var", run=spy)
+    assert seen and set(seen) == {0o700}
+
+
+def test_activating_counts_as_active(tmp_root, fake_systemctl):
+    make_instance(tmp_root, "psk-recorder", "N8UR", RADIOD)
+    real = fake_systemctl.__call__
+
+    def act(args):
+        if args == ["is-active", "psk-recorder@N8UR.service"]:
+            fake_systemctl.calls.append(list(args))
+            return 3, "activating"
+        return real(args)
+    apply_moves([Move("psk-recorder", "N8UR", "N8UR-SIGMOND", "N8UR-SIGMOND", RADIOD)],
+                etc_root=tmp_root / "etc", var_root=tmp_root / "var", run=act)
+    assert ["start", "psk-recorder@N8UR-SIGMOND.service"] in fake_systemctl.calls
+
+
+def test_retire_with_nothing_to_rename_prints_no_retired_line(tmp_root, fake_systemctl):
+    steps = apply_retires([Retire("psk-recorder", "GONE", RADIOD)],
+                          etc_root=tmp_root / "etc", var_root=tmp_root / "var",
+                          run=fake_systemctl)
+    assert not [s for s in steps if s.startswith("retired")]
+
+
+def test_resumed_move_is_not_also_retired(tmp_root, fake_systemctl, capsys):
+    smd = _load_smd()
+    make_instance(tmp_root, "psk-recorder", "N8UR", RADIOD)
+    make_instance(tmp_root, "psk-recorder", "N8UR-SIGMOND", RADIOD)
+    mv = Move("psk-recorder", "N8UR", "N8UR-SIGMOND", "N8UR-SIGMOND", RADIOD)
+    d = _journal_for(tmp_root, mv.__dict__)
+    (d / "x.json").rename(d / "psk-recorder@N8UR.json")
+    assert _apply(smd, tmp_root, [Receiver("N8UR-SIGMOND", RADIOD)],
+                  fake_systemctl) == 0
+    assert "retire" not in capsys.readouterr().out

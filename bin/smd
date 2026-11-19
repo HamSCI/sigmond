@@ -22932,13 +22932,13 @@ def _receiver_decides_upload(r) -> bool:
     return r.upload is not None or bool(r.same_antenna_as)
 
 
-def _receiver_moves(receivers, profile_clients, etc_root, run=None):
+def _receiver_moves(receivers, etc_root, run=None):
     """(moves, refusals) over every reporter-keyed client that already has
     an instance: the instance is the evidence the station runs the client,
     so the client set comes from the files, not from the profile.  A
     declared receiver whose reporter id differs from the instance on its
     radiod takes that instance over; a client with no instance there gets
-    none.  Reads files only.  ``profile_clients`` is kept for callers."""
+    none.  Reads files only."""
     plan = _receiver_plan(receivers, etc_root, run)
     return plan.moves, plan.refusals
 
@@ -23005,6 +23005,7 @@ def _receiver_apply(receivers, *, profile_clients,
         return 1
     etc_root = Path(etc_root)
     rc = 0
+    failed_binds = set()
     if validate_all:
         from sigmond import instance_move as _im
         var_root = (Path('/var') if etc_root == Path('/etc')
@@ -23016,10 +23017,17 @@ def _receiver_apply(receivers, *, profile_clients,
             return 1
         for w in plan.warnings:
             _warn(f'receiver apply: {w}')
-        pending = [m for m in _im.pending_moves(var_root)
+        jerrs = []
+        pending = [m for m in _im.pending_moves(var_root, errors=jerrs)
                    if (m.client, m.old_key) not in
                    {(x.client, x.old_key) for x in plan.moves}]
+        for e in jerrs:
+            _err(f'receiver apply: {e}')
+            rc = 1
         moves = pending + list(plan.moves)
+        resumed = {(m.client, m.old_key) for m in moves}
+        plan.retires = [t for t in plan.retires
+                        if (t.client, t.key) not in resumed]
         for m in moves:
             _info(f'{"would move" if dry_run else "move"} '
                   f'{m.client}@{m.old_key} -> {m.client}@{m.new_key} '
@@ -23030,8 +23038,12 @@ def _receiver_apply(receivers, *, profile_clients,
                   f'state kept)')
         if (moves or plan.retires) and not dry_run:
             run = move_run or _im.default_run
+            failed_moves = []
             lines = _im.apply_moves(moves, etc_root=etc_root,
-                                    var_root=var_root, run=run)
+                                    var_root=var_root, run=run,
+                                    failed=failed_moves)
+            failed_binds = {(m.client, m.radiod.lower())
+                            for m in failed_moves}
             lines += _im.apply_retires(plan.retires, etc_root=etc_root,
                                        var_root=var_root, run=run)
             for line in lines:
@@ -23046,6 +23058,15 @@ def _receiver_apply(receivers, *, profile_clients,
                 rc = 1
     for r in receivers:
         clients = effective_clients(r, profile_clients)
+        # A client whose move failed (and rolled back) gets no bind here:
+        # the bind would seed a stub for the new key beside the real old
+        # instance, and the next apply would retire the real one.
+        held = [c for c in clients
+                if (c, (r.radiod or '').lower()) in failed_binds]
+        if held:
+            _warn(f'{r.reporter_id}: not binding {", ".join(held)} after a '
+                  f'failed move; fix the error and re-run')
+            clients = tuple(c for c in clients if c not in held)
         label = f'{r.reporter_id} -> {r.radiod}'
         if dry_run:
             _info(f'{label}: bind {", ".join(clients) or "no clients"}'

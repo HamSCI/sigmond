@@ -28,6 +28,7 @@ systemctl runs only through the injectable ``run``.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -39,11 +40,24 @@ from typing import Callable
 
 from .instance import (InvalidReporterId, display_reporter_id, instance_key,
                        parse_user_reporter_id, systemd_escape)
-from .instance_rekey import BACKUP_DIR
+from .instance_rekey import BACKUP_DIR, CLIENTS
 
 MOVED_SUFFIX = ".moved"
 RETIRED_SUFFIX = ".retired"
 JOURNAL_DIR = "lib/sigmond/instance-move"
+
+# Seams for tests: a copy keeps its source's owner (the daemon runs as its
+# own user), and the journal must belong to the user smd runs as.
+_chown = os.chown
+_geteuid = os.geteuid
+
+
+def _trusted_uid() -> int:
+    return 0
+
+
+class JournalError(Exception):
+    """A journal or its directory that cannot be trusted."""
 
 
 def default_run(args: list) -> tuple:
@@ -300,6 +314,33 @@ def _label(src: Path, etc_root: Path) -> str:
         return src.name
 
 
+def _own(src: Path, dst: Path) -> None:
+    if _geteuid() == 0:
+        st = src.stat()
+        _chown(dst, st.st_uid, st.st_gid)
+
+
+def _copy_file(src: Path, dst: Path) -> None:
+    shutil.copy2(src, dst)
+    _own(src, dst)
+
+
+def _copy_tree(src: Path, dst: Path) -> None:
+    """Copy a directory with each file's and directory's mode and owner."""
+    dst.mkdir(parents=True, exist_ok=True)
+    shutil.copystat(src, dst)
+    _own(src, dst)
+    for child in sorted(src.iterdir()):
+        target = dst / child.name
+        if child.is_dir() and not child.is_symlink():
+            _copy_tree(child, target)
+        elif child.is_symlink():
+            if not target.exists() and not target.is_symlink():
+                os.symlink(os.readlink(child), target)
+        else:
+            _copy_file(child, target)
+
+
 def _backup(srcs: list, backup: Path, etc_root: Path) -> None:
     for src in srcs:
         if not src.exists():
@@ -312,7 +353,14 @@ def _backup(srcs: list, backup: Path, etc_root: Path) -> None:
             shutil.copy2(src, dst)
 
 
-def _rm(p: Path) -> None:
+def _rm(p: Path, roots: tuple, allowed: list) -> None:
+    """Remove a copy this module made: only a path recomputed for the move
+    (``allowed``) that resolves inside the etc or var tree."""
+    if p not in allowed:
+        raise JournalError(f"refusing to remove {p}: not one of the move's paths")
+    real = p.parent.resolve() / p.name
+    if not any(real.is_relative_to(Path(r).resolve()) for r in roots):
+        raise JournalError(f"refusing to remove {p}: outside the etc/var trees")
     if p.is_dir() and not p.is_symlink():
         shutil.rmtree(p)
     elif p.exists() or p.is_symlink():
@@ -341,66 +389,162 @@ class _Sys:
     def state(self, unit: str) -> tuple:
         _, en = self.call("is-enabled", unit)
         _, ac = self.call("is-active", unit)
-        return ((en or "").strip().splitlines()[:1] == ["enabled"],
-                (ac or "").strip().splitlines()[:1] == ["active"])
+        return (((en or "").strip().splitlines() or [""])[0] == "enabled",
+                ((ac or "").strip().splitlines() or [""])[0]
+                in ("active", "activating"))
+
+
+_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _valid_key(k) -> bool:
+    return isinstance(k, str) and bool(_KEY_RE.match(k)) and ".." not in k
+
+
+def _valid_move(d) -> Move:
+    """A Move from untrusted JSON, or JournalError."""
+    try:
+        m = Move(**{f: d[f] for f in
+                    ("client", "old_key", "new_key", "new_reporter_id",
+                     "radiod")})
+    except (KeyError, TypeError) as exc:
+        raise JournalError(f"bad move record: {exc}")
+    if m.client not in CLIENTS:
+        raise JournalError(f"unknown client {m.client!r}")
+    if not (_valid_key(m.old_key) and _valid_key(m.new_key)):
+        raise JournalError("a key is not a valid instance key")
+    for v in (m.new_reporter_id, m.radiod):
+        if not isinstance(v, str) or "\0" in v:
+            raise JournalError("a field holds a bad value")
+    try:
+        parse_user_reporter_id(m.new_reporter_id)
+    except (InvalidReporterId, ValueError):
+        raise JournalError("new_reporter_id is not a reporter id")
+    return m
+
+
+def _check_owner(p: Path, what: str) -> None:
+    st = p.lstat()
+    if st.st_uid != _trusted_uid():
+        raise JournalError(f"{what} {p} is not owned by the trusted user")
+    if st.st_mode & 0o022:
+        raise JournalError(f"{what} {p} is writable by group or other")
+
+
+def _journal_dir(var_root: Path, create: bool = False) -> Path:
+    d = Path(var_root) / JOURNAL_DIR
+    if create and not d.exists():
+        d.mkdir(parents=True, mode=0o700)
+        os.chmod(d, 0o700)
+        if _geteuid() == 0:
+            _chown(d, 0, 0)
+    if d.exists():
+        if d.is_symlink() or not d.is_dir():
+            raise JournalError(f"{d} is not a plain directory")
+        _check_owner(d, "journal directory")
+    return d
 
 
 def _journal(var_root: Path, client: str, old: str) -> Path:
     return Path(var_root) / JOURNAL_DIR / f"{client}@{old}.json"
 
 
-def pending_moves(var_root: Path) -> list:
-    """Moves a crash left unfinished (their journals), to resume."""
+def _read_journal(path: Path) -> dict:
+    """The journal's content, after the owner/mode checks; JournalError
+    when anything is off.  Holds no paths: the move recomputes them."""
+    _check_owner(path, "journal")
+    try:
+        j = json.loads(path.read_text())
+        _valid_move(j["move"])
+        idx = [int(i) for i in j["fresh"]]
+        return {"move": j["move"], "was_enabled": bool(j["was_enabled"]),
+                "was_active": bool(j["was_active"]),
+                "stamp": re.fullmatch(r"[0-9]{8}T[0-9]{6}Z",
+                                      str(j["stamp"])).group(0),
+                "fresh": [i for i in idx if 0 <= i < 5]}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise JournalError(f"unreadable journal {path}: {exc}")
+
+
+def pending_moves(var_root: Path, errors: list = None) -> list:
+    """Moves a crash left unfinished (their journals), to resume.  A
+    journal that cannot be trusted adds a line to ``errors`` and is
+    skipped."""
     out = []
-    d = Path(var_root) / JOURNAL_DIR
+    try:
+        d = _journal_dir(var_root)
+    except JournalError as exc:
+        if errors is not None:
+            errors.append(f"ERROR: journal: {exc}")
+        return out
     for p in sorted(d.glob("*.json")) if d.is_dir() else []:
         try:
-            m = json.loads(p.read_text())["move"]
-            out.append(Move(**m))
-        except (OSError, ValueError, KeyError, TypeError):
-            continue
+            out.append(_valid_move(_read_journal(p)["move"]))
+        except JournalError as exc:
+            if errors is not None:
+                errors.append(f"ERROR: journal {p.name}: {exc}")
     return out
 
 
 def apply_moves(moves: list, *, etc_root: Path, var_root: Path,
-                run: Callable = default_run) -> list:
+                run: Callable = default_run, failed: list = None) -> list:
     """Carry out the moves.  Returns step lines; a line starting "ERROR:"
     marks a move that failed and was rolled back.  A move whose journal
-    exists resumes."""
+    exists resumes.  Each Move that failed is appended to ``failed``."""
     etc_root, var_root = Path(etc_root), Path(var_root)
     steps: list = []
     sysd = _Sys(run, steps)
     for m in moves:
-        _move_one(m, etc_root, var_root, sysd, steps)
+        if not _move_one(m, etc_root, var_root, sysd, steps) \
+                and failed is not None:
+            failed.append(m)
     return steps
 
 
 def _move_one(m: Move, etc_root: Path, var_root: Path, sysd: _Sys,
-              steps: list) -> None:
+              steps: list) -> bool:
+    """One move; True when it completed."""
+    try:
+        m = _valid_move(m.__dict__)
+        _journal_dir(var_root)
+    except JournalError as exc:
+        steps.append(f"ERROR: move refused: {exc}")
+        return False
     c, old, new = m.client, m.old_key, m.new_key
     old_unit, new_unit = f"{c}@{old}.service", f"{c}@{new}.service"
     jpath = _journal(var_root, c, old)
     ofiles, odirs = _paths(etc_root, var_root, c, old)
     nfiles, ndirs = _paths(etc_root, var_root, c, new)
     resume = jpath.exists()
+    allowed = nfiles + ndirs
     if resume:
-        j = json.loads(jpath.read_text())
+        try:
+            j = _read_journal(jpath)
+        except JournalError as exc:
+            steps.append(f"ERROR: {c}@{old} not moved: {exc}")
+            return False
         was_enabled, was_active = j["was_enabled"], j["was_active"]
-        stamp, fresh = j["stamp"], [Path(p) for p in j["fresh"]]
+        stamp, fresh = j["stamp"], [allowed[i] for i in j["fresh"]]
         steps.append(f"resuming the move of {c}@{old} to {c}@{new}")
     else:
         if nfiles[0].exists():
             steps.append(f"ERROR: {nfiles[0]} already exists; "
                          f"{c}@{old} not moved")
-            return
+            return False
         was_enabled, was_active = sysd.state(old_unit)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        fresh = [p for p in nfiles + ndirs if not p.exists()]
-        jpath.parent.mkdir(parents=True, exist_ok=True)
-        jpath.write_text(json.dumps({
-            "move": m.__dict__, "was_enabled": was_enabled,
-            "was_active": was_active, "stamp": stamp,
-            "fresh": [str(p) for p in fresh]}))
+        fresh = [p for p in allowed if not p.exists()]
+        try:
+            _journal_dir(var_root, create=True)
+        except JournalError as exc:
+            steps.append(f"ERROR: {c}@{old} not moved: {exc}")
+            return False
+        fd = os.open(jpath, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps({
+                "move": m.__dict__, "was_enabled": was_enabled,
+                "was_active": was_active, "stamp": stamp,
+                "fresh": [allowed.index(p) for p in fresh]}))
     backup = var_root / BACKUP_DIR[len("var/"):] / stamp
     olds = _old_spellings(old, "")
     try:
@@ -422,13 +566,13 @@ def _move_one(m: Move, etc_root: Path, var_root: Path, sysd: _Sys,
             if not use.exists():
                 continue
             dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(use, dst)
+            _copy_file(use, dst)
             if src.exists():
                 src.rename(moved)
                 steps.append(f"{src} -> {dst} (old kept as {moved.name})")
         for src, dst in zip(odirs, ndirs):
             if src.is_dir() and (resume or not dst.exists()):
-                shutil.copytree(src, dst, dirs_exist_ok=True)
+                _copy_tree(src, dst)
                 steps.append(f"copied {src} -> {dst} (old kept)")
         if nfiles[0].exists():
             _set_reporter_id(nfiles[0], m.new_reporter_id)
@@ -456,7 +600,7 @@ def _move_one(m: Move, etc_root: Path, var_root: Path, sysd: _Sys,
                 if moved.exists() and not src.exists():
                     moved.rename(src)
             for p in fresh:
-                _rm(p)
+                _rm(p, (etc_root, var_root), allowed)
             sysd.call("daemon-reload")
             if was_enabled:
                 sysd.call("disable", new_unit)
@@ -468,9 +612,10 @@ def _move_one(m: Move, etc_root: Path, var_root: Path, sysd: _Sys,
         except Exception as exc2:                           # noqa: BLE001
             steps.append(f"ERROR: rollback of {c}@{old} also failed: {exc2}; "
                          f"re-run receiver apply to resume")
-        return
+        return False
     jpath.unlink(missing_ok=True)
     steps.append(f"backup of every moved file: {backup}")
+    return True
 
 
 def apply_retires(retires: list, *, etc_root: Path, var_root: Path,
@@ -501,8 +646,9 @@ def apply_retires(retires: list, *, etc_root: Path, var_root: Path,
             sysd.must("daemon-reload")
             if was_enabled:
                 sysd.must("disable", unit)
-            steps.append(f"retired {r.client}@{r.key}; state kept; "
-                         f"backup {backup}")
+            if renamed:
+                steps.append(f"retired {r.client}@{r.key}; state kept; "
+                             f"backup {backup}")
         except Exception as exc:                            # noqa: BLE001
             steps.append(f"ERROR: retiring {r.client}@{r.key} failed: {exc}")
             for f, g in renamed:
