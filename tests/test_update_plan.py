@@ -463,7 +463,7 @@ _OFF_PIN = {'behind': 4, 'dirty': [], 'owner': 'sigmond', 'installer': False,
             'native_rebuild': {
                 'builder': 'ubersdr-decoders',
                 'head': '529ec5d2' + '0' * 32,
-                'pin': '8719788abb7718412a77ba85d0d4d6c717d1a58e'}}
+                'pin': '5eeeb53576d8d3f9c73de8b8fa9a3d9a39175395'}}
 
 
 def test_a_native_source_off_its_pin_plans_its_build():
@@ -473,7 +473,7 @@ def test_a_native_source_off_its_pin_plans_its_build():
               and a.kind == 'native-build']
     assert [b.target for b in builds] == ['ubersdr-decoders']
     assert builds[0].detail.startswith(
-        'rebuild ubersdr-decoders: pin 529ec5d → 8719788')
+        'rebuild ubersdr-decoders: pin 529ec5d → 5eeeb53')
     assert builds[0].run_as == 'root'
     assert builds[0].verify
 

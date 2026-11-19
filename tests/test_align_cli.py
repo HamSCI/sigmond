@@ -54,6 +54,7 @@ def run(live, dirty=None, files=None, recorded="v3.36", release=REL, no_cost=Tru
         mock.patch.object(smd, "_align_units_started_at", return_value=None),
         mock.patch.object(smd, "_align_head_moved_at", return_value=None),
         mock.patch.object(smd, "_align_radiod_built_at", return_value=None),
+        mock.patch.object(smd, "_native_rebuilds_due", _native_due_off_host),
         # The drift report reads the host (topology, units, decoders);
         # tests/test_drift_build_report.py drives it with fakes.
         mock.patch.object(smd, "_align_drift_report", side_effect=_empty_drift),
@@ -623,6 +624,16 @@ _LIVE_PASSED = {"at": "2026-09-24T12:00:00Z", "restarted": ["hf-timestd"], "fail
                 "notes": [], "complete": True}
 
 
+_REAL_NATIVE_DUE = smd._native_rebuilds_due
+
+
+def _native_due_off_host(base):
+    """The host's own ubersdr_wsprd checkout is not these tests' business:
+    a run on the default base reads no native sources; a run on a test's
+    own base tree reads it for real."""
+    return [] if Path(base) == Path("/opt/git/sigmond") else _REAL_NATIVE_DUE(base)
+
+
 def _quiet_live_stages():
     """Task 7 wired image refresh, bring-up, restarts and fast checks into
     --apply. Tests written for the moves alone stub every one of them, so
@@ -646,7 +657,8 @@ def _quiet_live_stages():
         # dry run against the host (systemctl, /etc).  It died on a NameError
         # until the drift final fixes, which hid that these harnesses let it
         # through; tests/test_drift_final_fixes.py drives it for real.
-        _align_refresh_drift=lambda args: None)
+        _align_refresh_drift=lambda args: None,
+        _native_rebuilds_due=_native_due_off_host)
 
 
 def _no_real_record_live():

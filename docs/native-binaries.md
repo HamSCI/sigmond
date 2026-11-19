@@ -156,7 +156,7 @@ A checkout off its pin gets its build. When a sigmond commit moves a pin,
 the checkout and the installed binary both still hold the old commit.
 `smd update` then plans one step for the build that owns the source, for
 example `[native-build] ubersdr-decoders` with the line
-`rebuild ubersdr-decoders: pin 529ec5d → 8719788`. The build fetches the
+`rebuild ubersdr-decoders: pin 529ec5d → 5eeeb53`. The build fetches the
 new pin, checks it out, rebuilds, and writes its build manifest. onion's
 build belongs to ka9q-web, so ka9q-web rebuilds too. `smd doctor` reports a
 checkout off its pin as `off-pin` (or `detached`, on a detached HEAD).

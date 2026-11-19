@@ -1451,7 +1451,7 @@ _JT9_DECODE_SRC = Path('/opt/git/sigmond/psk-recorder/vendor/jt9-decode')
 # into an arithmetic contract we did not write.  Contrast _build_wsjtx_decoders,
 # where the lesson was to KEEP an upstream flag; here it is to add none.
 _UBERSDR_REPO   = 'https://github.com/madpsy/ubersdr_wsprd.git'
-_UBERSDR_COMMIT = '8719788abb7718412a77ba85d0d4d6c717d1a58e'   # 2026-11-07 madpsy main (PR #4: MSK144 speed-ups + F32 I/Q); parity-checked on the devbox 2026-11-08, field-tested at UACNJ 11-08
+_UBERSDR_COMMIT = '5eeeb53576d8d3f9c73de8b8fa9a3d9a39175395'   # madpsy main 5eeeb53 (v3.93 align moved the checkout here; v3.94 rebuilds the decoders from it)
 _UBERSDR_SRC    = Path('/opt/git/sigmond/ubersdr_wsprd')
 
 # Both decoder implementations live here; /usr/local/bin/{wsprd,jt9} are
@@ -6981,6 +6981,8 @@ _PRELOAD_MODULES = {
               # reached through _align_fast_checks and the bring-up
               # helpers align calls after the move
               'sigmond.heartbeat', 'sigmond.doctor', 'sigmond.lifecycle',
+              # the native-rebuild failure markers (_align_native_decoders)
+              'sigmond.safe_write',
               'sigmond.topology', 'sigmond.instance',
               'sigmond.uploader_manifest', 'sigmond.environment',
               'sigmond.environment_kinds', 'sigmond.discovery',
@@ -9127,6 +9129,43 @@ def _align_native_build(name: str, repo: Path) -> int:
     return 0 if _build_ka9q_web_with_onion(repo, force=True) else 1
 
 
+def _align_native_decoders(apply: bool, base) -> int:
+    """The native rebuilds `_native_rebuilds_due` names (UberSDR decoders,
+    wsjtx decoders, onion): a checkout off sigmond's pin, or at it beside a
+    build from another commit.  v3.93 moved the ubersdr_wsprd checkout and
+    built nothing; the decoders kept the old commit on every station.
+
+    Dry run: one `native rebuild due` line per builder, nothing built.
+    --apply: run each builder as `smd admin native-build` does.  A failure
+    is reported and counted, and leaves the old binaries and a failure
+    marker for `smd doctor`.  Returns the number of failed builds (dry run:
+    the number due)."""
+    base = Path(base)
+    failed = 0
+    seen = set()
+    for _src, builder, head, pin in _native_rebuilds_due(base):
+        if builder in seen:
+            continue
+        seen.add(builder)
+        if not apply:
+            print(f'  native rebuild due: {builder} '
+                  f'(built {head[:7]}, pin {pin[:7]})')
+            failed += 1
+            continue
+        print(f'  native rebuild: {builder} (built {head[:7]}, pin {pin[:7]}) ...')
+        if _run_native_builder(builder, base):
+            _record_native_build(builder, head, pin)
+            _clear_native_build_failed(builder)
+            print(f'  {builder}: rebuilt at {pin[:9]}')
+        else:
+            _err(f'{builder}: rebuild FAILED - the old build stays; '
+                 f'`smd admin native-build --apply {builder}` retries it')
+            _mark_native_build_failed(
+                builder, f'rebuild {head[:9]} -> {pin[:9]} failed')
+            failed += 1
+    return failed
+
+
 def _align_deploy_build(name: str, repo: Path, base) -> 'int | None':
     """`Ctx.deploy_build`: a component with no install.sh but a deploy.toml
     [build] (station-web, hamsci-physics) builds as root through
@@ -9629,7 +9668,9 @@ def _align_apply(args) -> int:
                             for s in steps)
         if own_units:
             steps = steps + _align_own_units(Path(base) / 'sigmond')
+        native_failed = _align_native_decoders(True, base)
         rc = _align_make_live(args, rel, steps, base=base, catalog=catalog, now=_now)
+        rc = rc or (1 if native_failed else 0)
         # Final review I1: the timers start only once the bring-up and its
         # restarts are done.  The location-check service re-renders and can
         # restart recorders; started before _align_make_live, its first
@@ -10387,6 +10428,7 @@ def cmd_align(args) -> int:
         print(f'    {it.component:<16} {line}')
     if rate_limited:
         print(f'  commit distances skipped: {rate_limited}')
+    native_due = _align_native_decoders(False, base)
     # A candidate has no tag on GitHub yet: read its files at its commit.
     files = align.image_file_drift(rel.appliance_commit if rel.candidate else rel.tag)
     from sigmond import align_apply as _aa
@@ -10414,7 +10456,7 @@ def cmd_align(args) -> int:
     # station never ran it (KJ6MKI, 2026-11-11).
     counts['skipped'] = len(skip_missing)
     counts['missing'] -= counts['skipped']
-    print(f"  summary: {counts['move']} to move, {len(rebuilds)} to rebuild, "
+    print(f"  summary: {counts['move']} to move, {len(rebuilds) + native_due} to rebuild, "
           f"{counts['ahead']} left ahead, "
           f"{counts['refuse']} refused, {counts['missing']} to install, "
           f"{counts['skipped']} not on this station (skipped), "
@@ -10438,7 +10480,7 @@ def cmd_align(args) -> int:
         sink['report'], sink['plan'] = report, plan
     else:
         _align_print_drift(report)
-    pending = (counts['move'] or rebuilds or counts['refuse'] or counts['missing'] or stale
+    pending = (counts['move'] or rebuilds or native_due or counts['refuse'] or counts['missing'] or stale
                or unverified or stale_now)
     return 1 if pending else 0
 
