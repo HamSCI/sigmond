@@ -100,3 +100,22 @@ A difference someone means stays visible but does not alarm while it lasts:
 - **A fault does not hold back a fleet roll.**  It should prompt a fix on that station; `smd fleet
   update` proceeds and names the stations with open faults in its summary.
 - **Temporary tests remind their owner to restore baseline** (above).
+
+## Amendment 2026-11-19: the board learns each station's identity from the station
+
+Michael, 19 November: the fleetboard showed AB4EJ after the station became AB4EJ-RX888, and
+KPH's map icon sat in the ocean.  Both came from names and grids typed into `ops/fleet.toml`.
+He approved this approach: the board takes each station's name and position from what the
+station reports about itself, and the fleet file keeps only how to reach each host.
+
+- The daily `station_drift` row (Task 9) also carries the station's identity: a stable
+  `host_key` (the first 12 hex digits of the SHA-256 of `/etc/machine-id`, which survives a
+  rename), the hostname, and one entry per receiver on the host: reporter id, radiod id, grid6
+  and position source (`gpsdo` or `operator`).  Only the grid6 leaves the station in this row;
+  the precise position stays in the station's configuration snapshot.
+- `ops/bin/fleet-map-export` builds `fleet.station_map` from the newest row per `host_key`.
+  The station's current reporter ids name it; every other id seen for the same `host_key`
+  becomes an alias, so a rename keeps its history on the board.
+- `fleet.toml`'s `[board.*]` entries keep authority only for stations that send no row
+  (KJ6MKI, W0WWV, hosts not yet on this release).  Where both exist, the station wins and the
+  export prints the difference so the hand entry can go.

@@ -164,6 +164,8 @@ Rules: defaults and caps from Global Constraints (`--until` beyond the cap clamp
 
 Row columns: `time` (generated_at), `reporter_id`, `release`, `baseline`, `n_fault`, `n_drift`, `n_accepted`, `counts_json` (Report.counts()), `faults_json` (each fault item, max 50, detail truncated to 200 chars), `reminders_json`, `schema_version` = 1.
 
+Identity columns (amendment 2026-11-19, spec §Amendment): `host_key` (first 12 hex of sha256 of `/etc/machine-id`), `hostname`, `receivers_json` (a list of `{reporter_id, radiod_id, grid6, pos_source}`, one per receiver this host serves; `pos_source` is `gpsdo` when the location came from the GPSDO, else `operator`).  No lat/lon in the row.  Extra tests: `test_row_carries_identity` (two receivers, grid6 only, no lat/lon key anywhere in the row), `test_host_key_stable_across_rename` (same machine-id, different reporter → same host_key).
+
 - [ ] **Step 1: Failing tests** — `test_report_writes_json_atomically`, `test_report_inserts_one_sink_row` (writer stubbed; fields as above), `test_report_takes_no_lifecycle_lock`, `test_sigmond_pipeline_renders_drift_pipeline_when_feature_present`, `test_drift_pipeline_absent_without_sigmondb_tar`.
 - [ ] **Step 2:** FAIL.  **Step 3:** Implement; the timer installs through Task 4's `install_own_units` and is enabled by bring-up and by `smd align --apply` (enable only; start leaves it to the calendar).  **Step 4:** PASS.  **Step 5:** commit `drift: daily timer, drift.json and the sigmondb row`.
 
@@ -186,6 +188,15 @@ Rules: each fault item opens `drift_fault` (subject `<station> <item key>`), clo
 
 - [ ] **Step 1: Failing tests** — `test_fault_opens_and_clears_alarm`, `test_reminder_opens_test_restore`, `test_drift_only_no_alarm`, `test_stale_row_shows_not_alarms`, `test_one_station_many_faults_one_alarm_each`.
 - [ ] **Step 2:** FAIL.  **Step 3:** Implement.  **Step 4:** PASS + fleetboard suite.  **Step 5:** commit `fleetboard: drift check, fault and test-restore alarms`.
+
+### Task 12b: The station map from the stations (ops repo)
+
+**Files:**
+- Modify: `ops/bin/fleet-map-export` (build rows from the newest `sigmondb.station_drift` row per `host_key`: name and reporters from `receivers_json`, grid6 from it, aliases = every other reporter id seen for that `host_key` in the table's life plus `fleet.toml` aliases; `[board.*]` entries fill in only for stations with no row; print each difference between a hand entry and the station's row)
+- Test: `ops/tests/test_fleet_map_export.py` additions
+
+- [ ] **Step 1: Failing tests** — `test_station_row_names_the_station`, `test_rename_keeps_old_id_as_alias` (two rows, same host_key, AB4EJ then AB4EJ-RX888 → name AB4EJ-RX888, alias AB4EJ), `test_board_entry_fills_only_rowless_stations`, `test_difference_printed_when_hand_entry_disagrees`.
+- [ ] **Step 2:** FAIL.  **Step 3:** Implement.  **Step 4:** PASS.  **Step 5:** commit `fleet-map-export: the station map comes from the stations`.
 
 ### Task 12: Docs and the fleet summary
 
