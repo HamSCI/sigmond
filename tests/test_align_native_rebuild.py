@@ -78,7 +78,9 @@ class _Rig(unittest.TestCase):
         for p in (self.radiod_bin, self.web_bin):
             p.write_text("binary\n")
             os.utime(p, (B4_BINARY_AT, B4_BINARY_AT))
+        self.marker = root / "align-radiod-rebuilt"
         for name, path in (("_BUILD_MANIFEST_DIR", self.manifests),
+                           ("_ALIGN_RADIOD_REBUILT", self.marker),
                            ("_ALIGN_RADIOD_BINARY", self.radiod_bin),
                            ("_KA9Q_WEB_BIN", self.web_bin)):
             p = mock.patch.object(smd, name, path)
@@ -110,13 +112,25 @@ class _Rig(unittest.TestCase):
         return {n: self._head(n) for n in self.NAMES}
 
     def _builders(self):
+        """Recorders standing in for the compile step.  On success each
+        installs a new binary (new bytes, mtime now), as `make install`
+        does; on failure the installed binary stays as it was."""
+        def install(name, binary, src):
+            head = smd._git_head(Path(src))
+            self.calls.append((name, Path(src), True, head))
+            if self.build_ok[name]:
+                binary.write_text(f"built from {head}\n")
+            return self.build_ok[name]
+
         def radiod(src, force=False):
-            self.calls.append(("ka9q-radio", Path(src), force, smd._git_head(Path(src))))
-            return self.build_ok["ka9q-radio"]
+            ok = install("ka9q-radio", self.radiod_bin, src)
+            self.calls[-1] = self.calls[-1][:2] + (force,) + self.calls[-1][3:]
+            return ok
 
         def web(src, *, force=False):
-            self.calls.append(("ka9q-web", Path(src), force, smd._git_head(Path(src))))
-            return self.build_ok["ka9q-web"]
+            ok = install("ka9q-web", self.web_bin, src)
+            self.calls[-1] = self.calls[-1][:2] + (force,) + self.calls[-1][3:]
+            return ok
         return dict(_build_ka9q_radio=radiod, _build_ka9q_web_with_onion=web)
 
     # --- drivers ----------------------------------------------------------
@@ -230,6 +244,7 @@ class AlignApplyNativeRebuildTests(_Rig):
         rc, out, _ = self._apply()
         web = [c for c in self.calls if c[0] == "ka9q-web"]
         self.assertEqual(len(web), 1, out)
+        self.assertEqual(self.web_bin.read_text(), f"built from {self.new['ka9q-web']}\n")
         # Built at the release pin, not at the commit it moved from.
         self.assertEqual(web[0][3], self.new["ka9q-web"])
         self.assertFalse([c for c in self.calls if c[0] == "ka9q-radio"], out)
@@ -260,11 +275,55 @@ class AlignApplyNativeRebuildTests(_Rig):
         self.assertEqual(step.outcome, "failed")
         self.assertIn("no build record", step.detail)
         self.assertIn("ka9q-web: failed", out)
+        # The stub installs a new binary only on success (see
+        # test_moved_ka9q_web_builds_after_checkout): this one stays.
         self.assertEqual(self.web_bin.read_text(), before)
         # Nothing restarts after a failed step: the restart stage never runs
         # (only the read-only "still stale" report reads the services).
         self.assertNotIn("  restarts:", out)
         self.assertFalse([k for k in self.staleness_calls if "rebuilt" in k])
+
+    def test_radiod_rebuild_failure_fails_apply(self):
+        """B4's case with a build that fails: the item fails, the apply
+        exits nonzero, radiod's binary stays and nothing restarts."""
+        self._record("ka9q-web", self.new["ka9q-web"])
+        self.build_ok["ka9q-radio"] = False
+        before = self.radiod_bin.read_text()
+        rc, out, m_record = self._apply()
+        self.assertNotEqual(rc, 0, out)
+        steps = m_record.call_args[0][1]
+        step = next(s for s in steps if s.component == "ka9q-radio")
+        self.assertEqual(step.outcome, "failed")
+        self.assertFalse(step.built)
+        self.assertIn("no build record; rebuild failed", step.detail)
+        self.assertEqual(len([c for c in self.calls if c[0] == "ka9q-radio"]), 1, out)
+        self.assertEqual(self.radiod_bin.read_text(), before)
+        self.assertNotIn("  restarts:", out)
+        self.assertFalse([k for k in self.staleness_calls if "rebuilt" in k])
+        self.assertFalse(self.marker.exists())
+
+    def test_moved_radiod_builds_exactly_once(self):
+        """_move builds a moved ka9q-radio, forced.  The stub writes no build
+        record, so native_stale would call it stale if apply_plan asked
+        again: one call proves it does not."""
+        self._record("ka9q-web", self.new["ka9q-web"])
+        _git("checkout", "-q", "--detach", self.old["ka9q-radio"], cwd=self.base / "ka9q-radio")
+        rc, out, _ = self._apply()
+        radiod = [c for c in self.calls if c[0] == "ka9q-radio"]
+        self.assertEqual(len(radiod), 1, out)
+        self.assertEqual(radiod[0][2:], (True, self.new["ka9q-radio"]))
+        self.assertIn("ka9q-radio: moved", out)
+        self.assertEqual(rc, 0, out)
+
+    def test_rebuilt_radiod_leaves_a_restart_marker(self):
+        """A rebuild notes the new binary's mtime, so a run that does not
+        restart radiod (--no-restart, a failed restart) leaves the restart
+        for the next run to find."""
+        self._record("ka9q-web", self.new["ka9q-web"])
+        rc, out, _ = self._apply()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(float(self.marker.read_text().strip()),
+                         self.radiod_bin.stat().st_mtime)
 
 
 class AlignDryRunNativeRebuildTests(_Rig):
@@ -315,6 +374,73 @@ class AlignStalenessRebuiltTests(unittest.TestCase):
             rebuilt = smd._align_staleness("/x", services, {}, rebuilt={"ka9q-radio"})
         self.assertNotIn("ka9q-radio", quiet["stale"])
         self.assertIn("ka9q-radio", rebuilt["stale"])
+
+
+class AlignRadiodRestartDueTests(_Rig):
+    """Reviewer Minor 1: a radiod align rebuilt but did not restart stays a
+    restart due on later runs, through the marker, while an identical-bytes
+    reinstall by `smd update` / `smd install --force` (no marker) still
+    restarts nothing."""
+
+    START = datetime(2026, 11, 19, 10, 0, tzinfo=timezone.utc).timestamp()
+
+    def _staleness(self):
+        services = {"ka9q-radio": ["radiod@rx888.service"], "ka9q-web": ["ka9q-web.service"]}
+        cat = {"ka9q-web": type("E", (), {"requires": ("ka9q-radio",)})()}
+        with mock.patch.object(smd, "_align_units_started_at", return_value=self.START), \
+             mock.patch.object(smd, "_align_head_moved_at", return_value=self.START - 3600), \
+             mock.patch.object(smd, "_align_consumes", return_value={}):
+            return smd._align_staleness(str(self.base), services, cat)
+
+    def _rebuild_now(self):
+        built = self.START + 600
+        os.utime(self.radiod_bin, (built, built))
+        smd._align_note_radiod_rebuilt()
+        return built
+
+    def test_rebuilt_not_restarted_is_due_next_run(self):
+        self._rebuild_now()
+        st = self._staleness()
+        self.assertEqual(st["stale"].get("ka9q-radio"), smd._ALIGN_RADIOD_REBUILT_REASON)
+        # ...and its consumers follow, as for any radiod restart.
+        first, comps, _ = smd._align_plan_restarts([], [], st, say=lambda m: None)
+        self.assertTrue(first)
+        self.assertIn("ka9q-web", comps)
+
+    def test_identical_bytes_reinstall_without_marker_restarts_nothing(self):
+        later = self.START + 600
+        os.utime(self.radiod_bin, (later, later))
+        self.assertNotIn("ka9q-radio", self._staleness()["stale"])
+
+    def test_reinstall_after_the_marker_falls_back_to_the_guard(self):
+        self._rebuild_now()
+        later = self.START + 1200
+        os.utime(self.radiod_bin, (later, later))     # another install since
+        self.assertNotIn("ka9q-radio", self._staleness()["stale"])
+
+    def test_radiod_restarted_since_is_not_due(self):
+        self._rebuild_now()
+        self.START += 3600
+        self.assertNotIn("ka9q-radio", self._staleness()["stale"])
+
+    def test_locally_managed_radiod_is_never_due(self):
+        self._rebuild_now()
+        self.local = LocallyManaged(frozenset({"ka9q-radio"}), "Phil")
+        self.assertNotIn("ka9q-radio", self._staleness()["stale"])
+
+    def test_dry_run_names_the_restart(self):
+        self._rebuild_now()
+        lines = []
+        with mock.patch.object(smd, "_align_services",
+                               return_value={"ka9q-radio": ["radiod@rx888.service"]}), \
+             mock.patch.object(smd, "_align_units_started_at", return_value=self.START), \
+             mock.patch.object(smd, "_align_head_moved_at", return_value=self.START - 3600), \
+             mock.patch.object(smd, "_align_consumes", return_value={}):
+            n = smd._align_print_restarts(str(self.base), [], catalog={}, say=lines.append)
+        radiod = next(l for l in lines if l.strip().startswith("radiod"))
+        self.assertIn("-- binary rebuilt after radiod started; --apply RESTARTS radiod", radiod)
+        self.assertTrue(radiod.isascii(), radiod)
+        self.assertEqual(n, 1)
 
 
 if __name__ == "__main__":

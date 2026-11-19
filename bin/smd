@@ -8016,6 +8016,41 @@ def _align_radiod_built_at() -> Optional[float]:
 
 _ALIGN_RADIOD_READY = '/usr/local/sbin/sigmond-radiod-ready'
 
+# align rebuilt radiod in place (its binary trailed the checkout) and has
+# not restarted it yet.  Holds the new binary's mtime.  The restart stage
+# reads it, so a run under --no-restart, or one whose restart failed,
+# leaves the restart due for the next run (v3.94 Task 2 review, Minor 1).
+_ALIGN_RADIOD_REBUILT = Path('/var/lib/sigmond/align-radiod-rebuilt')
+_ALIGN_RADIOD_REBUILT_REASON = 'binary rebuilt after radiod started'
+
+
+def _align_note_radiod_rebuilt() -> None:
+    """Record the radiod binary align just built.  Best effort: without the
+    note, a later run only misses a restart this run did not do."""
+    built = _align_radiod_built_at()
+    if built is None:
+        return
+    try:
+        _ALIGN_RADIOD_REBUILT.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _ALIGN_RADIOD_REBUILT.with_name(_ALIGN_RADIOD_REBUILT.name + '.tmp')
+        tmp.write_text(f'{built!r}\n')
+        os.replace(tmp, _ALIGN_RADIOD_REBUILT)
+    except OSError as exc:
+        _warn(f'align: could not note the radiod rebuild ({exc}); a later run '
+              f'will not know radiod still needs a restart')
+
+
+def _align_radiod_rebuilt_at() -> Optional[float]:
+    """The mtime of a radiod binary align rebuilt, while that binary is
+    still the one installed; None otherwise (no note, or another install
+    has replaced it since: then the same-bytes guard decides)."""
+    try:
+        noted = float(_ALIGN_RADIOD_REBUILT.read_text().strip())
+    except (OSError, ValueError):
+        return None
+    built = _align_radiod_built_at()
+    return noted if built is not None and built == noted else None
+
 
 def _align_run(argv, *, run, timeout, action, **kw) -> object:
     """`run(argv, capture_output=True, text=True, timeout=timeout, **kw)`,
@@ -8328,7 +8363,10 @@ def _align_staleness(base, services: dict, catalog=None, *, run=subprocess.run,
       names what THIS run rebuilt because its binary trailed the checkout
       (`align_apply.NATIVE_COMPONENTS`): those bytes differ, so radiod's
       binary mtime counts whether or not the checkout moved, and
-      ka9q-web's moved time is its installed binary's mtime.
+      ka9q-web's moved time is its installed binary's mtime.  A radiod an
+      EARLIER align rebuilt and never restarted (the note
+      `_align_note_radiod_rebuilt` leaves) is stale too, while that binary
+      is still installed and radiod started before it was built.
     * ``radiod_consumers``: the running services whose catalog entry
       ``requires`` ka9q-radio — the declaration the installer already uses
       to order radiod's consumers after lan.target.  A component absent
@@ -8392,6 +8430,10 @@ def _align_staleness(base, services: dict, catalog=None, *, run=subprocess.run,
     radiod_consumers = {c for c in running if c != RADIOD and _reads_radiod(c, catalog)}
     stale = align_live.stale_components(running, moved_at, started_at, consumes)
     radiod_start = started_at.get(RADIOD)
+    if radiod_start is not None and RADIOD not in local and RADIOD not in stale:
+        noted = _align_radiod_rebuilt_at()
+        if noted is not None and noted > radiod_start:
+            stale[RADIOD] = _ALIGN_RADIOD_REBUILT_REASON
     if radiod_start is not None:
         why = 'radiod restarted after it started'
         for c in sorted(radiod_consumers):
@@ -8612,7 +8654,11 @@ def _align_print_restarts(base, moving, *, catalog=None, say=print) -> int:
         stale, RADIOD in stale, running, st['radiod_consumers'])
     radiod = pred_radiod or now_radiod
     rows = []
-    if radiod:
+    if radiod and stale.get(RADIOD) == _ALIGN_RADIOD_REBUILT_REASON and not pred_radiod:
+        rows.append(('radiod', f'-- {_ALIGN_RADIOD_REBUILT_REASON}; --apply RESTARTS radiod '
+                               f'first -- recording gap of about '
+                               f'{align_live.RADIOD_GAP_ESTIMATE_S} s'))
+    elif radiod:
         why = ('ka9q-radio moved and its binary was rebuilt after it started' if now_radiod
                else 'ka9q-radio moves and is rebuilt')
         rows.append(('radiod', f'{why}; restarts first — recording gap of about '
@@ -9725,6 +9771,10 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
         record_update(HISTORY_FILE, e)
 
     _align_print_steps(move_steps)
+    # Before any early return: a run that stops here restarts nothing, and
+    # the next run must still find the radiod this one rebuilt.
+    if any(s.component == RADIOD and getattr(s, 'built', False) for s in move_steps):
+        _align_note_radiod_rebuilt()
     if any(s.outcome in _ALIGN_BLOCKING for s in move_steps):
         align_apply.record(rel, move_steps, manifest_path=MANIFEST_PATH,
                            history=history, now=now)
