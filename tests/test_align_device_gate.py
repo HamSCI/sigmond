@@ -232,6 +232,8 @@ def _drive(*, ready, samples=False, dry=False, no_restart=False, quiet=False,
             result["render"] = gmag_webui.render_unit(checkout=base / "gmag-webui")
             result["sightings"] = (sorted(p.name for p in purpose.iterdir())
                                    if purpose.is_dir() else [])
+            result["baks"] = {p.name: p.read_text() for p in unit_dir.iterdir()
+                              if ".bak-drift-" in p.name}
     return sysd, out.getvalue(), topology, asked
 
 
@@ -739,3 +741,24 @@ def test_sighting_record_is_written_without_following_a_link(tmp_path):
         devices.record_sighting("gmag-webui")
     assert victim.read_text() == "precious\n"
     assert not (purpose / "mag-recorder.magnetometer").is_symlink()
+
+
+# --- final review M7: a differing gmag-webui unit is kept before re-render ---
+
+def test_gmag_unit_backed_up_before_rerender():
+    import re
+    res = {}
+    sysd, out, _, _ = _drive(ready={"mag-recorder": True, "gmag-webui": True},
+                             gmag_unit=_OLD_UNIT, result=res)
+    assert res["unit"] == res["render"]
+    assert list(res["baks"].values()) == [_OLD_UNIT], res["baks"]
+    name = next(iter(res["baks"]))
+    assert re.fullmatch(r"gmag-webui\.service\.bak-drift-\d{8}T\d{6}Z", name), name
+    assert name in out
+
+
+def test_gmag_unit_dry_run_backs_up_nothing():
+    res = {}
+    _drive(ready={"mag-recorder": True, "gmag-webui": True},
+           gmag_unit=_OLD_UNIT, result=res, dry=True)
+    assert res["baks"] == {}

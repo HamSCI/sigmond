@@ -9399,7 +9399,8 @@ def _align_gmag_webui_unit(apply: bool, *, base='/opt/git/sigmond', say=print,
     A unit path that is a symlink (an operator's mask -> /dev/null, or a
     `systemctl link`) stays as it is, one line.  Only an installed unit is
     rewritten (never a new install), atomically
-    and 0644, then one daemon-reload.  A running gmag-webui restarts once,
+    and 0644, then one daemon-reload; the installed copy is kept first as
+    ``gmag-webui.service.bak-drift-<UTC stamp>``.  A running gmag-webui restarts once,
     because its unit changed; not under --no-restart (``start`` False),
     and not while /dev/ttyMAG0 is absent, since the new condition would
     keep the restarted unit down (a line says so each time).  Enables
@@ -9439,6 +9440,14 @@ def _align_gmag_webui_unit(apply: bool, *, base='/opt/git/sigmond', say=print,
         say(f"  would re-render {gw.SERVICE}: the installed unit differs from "
             f"sigmond's render")
         return 1
+    # Final review M7: keep the differing copy first, as align keeps its
+    # own units it replaces (drift.units.install_own_units).
+    from datetime import datetime, timezone
+    import shutil as _sh
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    bak = path.with_name(f'{gw.SERVICE}.bak-drift-{stamp}')
+    _sh.copy2(path, bak)
+    say(f'  {gw.SERVICE}: the old copy is {bak}')
     import tempfile as _tf
     fd, tmp = _tf.mkstemp(dir=path.parent, prefix=f'.{gw.SERVICE}.')
     try:
