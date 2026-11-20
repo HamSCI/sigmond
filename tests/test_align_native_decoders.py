@@ -104,6 +104,19 @@ class AlignNativeDecodersTests(_DecoderRig):
         self.assertEqual([m[0] for m in self.marked], ["ubersdr-decoders"])
         self.assertEqual(self.recorded, [])
 
+    def test_decoder_failure_after_a_clean_live_still_starts_timers(self):
+        """Final review M4: the alignment is recorded; the timers start on
+        make_live's clean result while the run still exits 1, and a line
+        names the failure."""
+        self.build_rc = False
+        seen = []
+        rc, out, _ = self._apply(_align_start_timers=lambda **k: seen.append(k))
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(len(seen), 1, out)
+        self.assertEqual(seen[0]["rc"], 0, out)
+        self.assertTrue([l for l in out.splitlines()
+                         if l.startswith("  exit 1:") and "ubersdr-decoders" in l], out)
+
     def test_decoders_build_before_the_live_stages(self):
         order = []
         with mock.patch.object(smd, "_run_native_builder",
@@ -155,6 +168,31 @@ class OnionDoubleBuildTests(_DecoderRig):
         self._record("ka9q-web", self.new["ka9q-web"])
         rc, out, _ = self._apply()
         self.assertEqual(self.builds, ["ka9q-web"], out)
+
+    def test_onion_alone_restarts_ka9q_web(self):
+        """Final review M1: the decoder stage's ka9q-web build (onion off
+        its pin) joins `rebuilt`, so the restart stage restarts ka9q-web."""
+        self._record("ka9q-web", self.new["ka9q-web"])
+        rc, out, _ = self._apply()
+        self.assertEqual(self.builds, ["ka9q-web"], out)
+        self.assertIn("ka9q-web", self.staleness_calls[-1].get("rebuilt"), out)
+
+    def test_dry_run_lists_ka9q_web_restart_for_onion_alone(self):
+        self._record("ka9q-web", self.new["ka9q-web"])
+        rc, out = self._dry_run(extra=[
+            mock.patch.object(smd, "_align_services",
+                              return_value={"ka9q-web": ["ka9q-web.service"]}),
+            mock.patch.object(smd, "_align_units_started_at", return_value=1000.0)])
+        restarts = out.split("  restarts:")[1].splitlines()
+        self.assertTrue([l for l in restarts if l.strip().startswith("ka9q-web")], out)
+
+    def test_failed_ka9q_web_step_is_not_built_again(self):
+        """Final review M2: ka9q-web's own rebuild failed this run; the
+        decoder stage must not run the same builder for onion."""
+        self.build_ok["ka9q-web"] = False
+        rc, out, _ = self._apply(_mark_native_build_failed=lambda b, why: None)
+        self.assertEqual(len([c for c in self.calls if c[0] == "ka9q-web"]), 1, out)
+        self.assertNotIn("ka9q-web", self.builds, out)
 
 
 class OldTargetTests(unittest.TestCase):

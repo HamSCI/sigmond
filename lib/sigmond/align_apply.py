@@ -380,6 +380,9 @@ class Step:
     bytes: Optional[int] = None
     # A deploy.toml [build] ran for this component in this run.
     built: bool = False
+    # A native rebuild of this component ran in this run and failed, and
+    # the failure does not block the run (ka9q-web: final review I3).
+    build_failed: bool = False
 
 
 _BUILT_NOTE = "deploy.toml [build] rebuilt its venv"
@@ -611,10 +614,14 @@ def _native_rebuild(step: Step, ctx: Ctx) -> Step:
     """Rebuild a NATIVE_COMPONENT whose binary trails its checkout.
 
     The step keeps its outcome and gains ``built``, which tells the restart
-    stage to restart what runs the binary.  A failed build fails the step:
-    the apply exits nonzero and nothing restarts, so the running binary
-    stays.  The checkout stays where it is; the build record still names
-    the old commit, so the next run tries again."""
+    stage to restart what runs the binary.  A failed radiod build fails the
+    step: the apply exits nonzero and nothing restarts, so the running
+    binary stays.  A failed ka9q-web build keeps the step's outcome and
+    sets ``build_failed`` instead (final review I3): the CLI exits 1 and
+    leaves a failure marker, restarts no ka9q-web, and runs the rest of
+    the alignment, since a web UI on its old binary blocks nothing.  The
+    checkout stays where it is; the build record still names the old
+    commit, so the next run tries again."""
     name = step.component
     if name not in NATIVE_COMPONENTS or ctx.native_stale is None or ctx.native_build is None:
         return step
@@ -635,9 +642,10 @@ def _native_rebuild(step: Step, ctx: Ctx) -> Step:
         err = f"build exit {rc}" if rc else ""
     head = f"{step.detail}; " if step.detail else ""
     if err:
-        return Step(name, "failed",
-                    f"{head}{why}; rebuild failed ({err}) -- the installed binary stays",
-                    step.bytes)
+        detail = f"{head}{why}; rebuild failed ({err}) -- the installed binary stays"
+        if name != RADIOD:
+            return Step(name, step.outcome, detail, step.bytes, build_failed=True)
+        return Step(name, "failed", detail, step.bytes)
     return Step(name, step.outcome, f"{head}{why}; rebuilt", step.bytes, built=True)
 
 

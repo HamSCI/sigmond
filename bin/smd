@@ -9059,7 +9059,8 @@ def _align_native_build(name: str, repo: Path) -> int:
     return 0 if _build_ka9q_web_with_onion(repo, force=True) else 1
 
 
-def _align_native_decoders(apply: bool, base, covered=()) -> int:
+def _align_native_decoders(apply: bool, base, covered=(), ran_out=None,
+                           failed_out=None) -> int:
     """The native rebuilds `_native_rebuilds_due` names (UberSDR decoders,
     wsjtx decoders, onion): a checkout off sigmond's pin, or at it beside a
     build from another commit.  v3.93 moved the ubersdr_wsprd checkout and
@@ -9071,10 +9072,14 @@ def _align_native_decoders(apply: bool, base, covered=()) -> int:
     marker for `smd doctor`.  Returns the number of failed builds (dry run:
     the number due).
 
-    `covered` names builders this run already rebuilds by another route
-    (onion rides the ka9q-web builder, which align builds itself when
-    ka9q-web moves or trails its build): skipped, so nothing builds or
-    counts twice."""
+    `covered` names builders this run already rebuilt, or tried to, by
+    another route (onion rides the ka9q-web builder, which align builds
+    itself when ka9q-web moves or trails its build): skipped, so nothing
+    builds or counts twice, and a failed ka9q-web build is not retried.
+
+    ``ran_out`` collects the builders that rebuilt (dry run: that are
+    due): a ka9q-web build here restarts ka9q-web like any other
+    (final review M1).  ``failed_out`` collects the builders that failed."""
     base = Path(base)
     failed = 0
     seen = set()
@@ -9086,18 +9091,24 @@ def _align_native_decoders(apply: bool, base, covered=()) -> int:
             print(f'  native rebuild due: {builder} '
                   f'(built {head[:7]}, pin {pin[:7]})')
             failed += 1
+            if ran_out is not None:
+                ran_out.append(builder)
             continue
         print(f'  native rebuild: {builder} (built {head[:7]}, pin {pin[:7]}) ...')
         if _run_native_builder(builder, base):
             _record_native_build(builder, head, pin)
             _clear_native_build_failed(builder)
             print(f'  {builder}: rebuilt at {pin[:9]}')
+            if ran_out is not None:
+                ran_out.append(builder)
         else:
             _err(f'{builder}: rebuild FAILED - the old build stays; '
                  f'`smd admin native-build --apply {builder}` retries it')
             _mark_native_build_failed(
                 builder, f'rebuild {head[:9]} -> {pin[:9]} failed')
             failed += 1
+            if failed_out is not None:
+                failed_out.append(builder)
     return failed
 
 
@@ -10046,6 +10057,18 @@ def _align_apply(args) -> int:
         # file goes, and the operator catalog keeps only what differs.
         pins_failed = (_align_station_pins(True)
                        | _align_catalog_prune(True))
+        # A ka9q-web rebuild that failed blocks nothing (final review I3):
+        # the old binary keeps running, and smd doctor reads the marker.
+        web_failed = [s for s in steps if getattr(s, 'build_failed', False)]
+        for s in web_failed:
+            _mark_native_build_failed(
+                s.component, 'smd align --apply rebuild failed; the old binary stays')
+        for s in steps:
+            if (getattr(s, 'built', False)
+                    and s.component in align_apply.NATIVE_COMPONENTS):
+                _clear_native_build_failed(s.component)
+        native_ran: list = []
+        native_failed_names: list = []
         if old_code:
             # This process holds the OLD pin constants: building now would
             # check out and build the old pin.
@@ -10054,20 +10077,37 @@ def _align_apply(args) -> int:
                   '(or smd admin native-build --apply)')
             native_failed = 0
         else:
+            # Every builder this run already tried, built or failed (M2).
             native_failed = _align_native_decoders(
                 True, base, covered={s.component for s in steps
-                                     if getattr(s, 'built', False)})
+                                     if getattr(s, 'built', False)
+                                     or getattr(s, 'build_failed', False)},
+                ran_out=native_ran, failed_out=native_failed_names)
         declared_timers: list = []
-        rc = _align_make_live(args, rel, steps, base=base, catalog=catalog, now=_now,
-                              timers_out=declared_timers)
-        rc = rc or (1 if native_failed or pins_failed else 0)
+        live_rc = _align_make_live(
+            args, rel, steps, base=base, catalog=catalog, now=_now,
+            timers_out=declared_timers,
+            native_rebuilt={b for b in native_ran
+                            if b in align_apply.NATIVE_COMPONENTS})
+        failures = [f'{s.component} rebuild failed' for s in web_failed]
+        if native_failed:
+            failures.append(f'native rebuild failed: {", ".join(native_failed_names)}')
+        if pins_failed:
+            failures.append('the pin retirement or catalog prune failed')
+        rc = live_rc or (1 if failures else 0)
         # Final review I1: the timers start only once the bring-up and its
         # restarts are done.  The location-check service re-renders and can
         # restart recorders; started before _align_make_live, its first
-        # tick (OnActiveSec=2min) landed mid-bring-up.
+        # tick (OnActiveSec=2min) landed mid-bring-up.  M4: a failure that
+        # blocks nothing (above) does not hold them; make_live's own
+        # result does.
         if own_units:
-            _align_start_timers(rc=rc, no_restart=bool(getattr(args, 'no_restart', False)),
+            _align_start_timers(rc=live_rc,
+                                no_restart=bool(getattr(args, 'no_restart', False)),
                                 declared=declared_timers)
+        if failures:
+            print(f'  exit 1: {"; ".join(failures)} - see above'
+                  + ('; the rest of the alignment finished' if live_rc == 0 else ''))
         return rc
 
 
@@ -10295,7 +10335,7 @@ def _align_report_stale_after_failure(move_steps, *, base, catalog, say=print) -
 
 
 def _align_make_live(args, rel, move_steps, *, base, catalog, now,
-                     timers_out=None) -> int:
+                     timers_out=None, native_rebuilt=()) -> int:
     """Everything `--apply` does after the moves, in order (Plan 2b):
 
     image-file refresh -> bring-up re-runs -> records -> restart of stale
@@ -10308,6 +10348,12 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now,
     manifest and aligned.json never claim an alignment whose bring-up did
     not finish — and nothing restarts after either.  The moves' history
     lines are still written then: those checkouts did move.
+
+    ``native_rebuilt``: the NATIVE_COMPONENTS the native-rebuild stage
+    rebuilt before this (onion rides ka9q-web's build): they restart as
+    the moves' own rebuilds do (final review M1).  A move step whose
+    ka9q-web build failed (``build_failed``) restarts no ka9q-web for its
+    own sake: its old binary runs on (final review I3).
 
     Called with the lifecycle lock already held by `_align_apply`.
     Restarts run in-process (`_align_restart`), never a child `smd
@@ -10355,8 +10401,9 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now,
     # is never a no-op: this run re-checks what it restarted (below).
     # Read before `record` rewrites aligned.json without it.
     prior_live = _align_aligned_live()
-    changed = any(s.outcome in ('moved', 'installed') or getattr(s, 'built', False)
-                  for s in move_steps)
+    changed = bool(native_rebuilt) or any(
+        s.outcome in ('moved', 'installed') or getattr(s, 'built', False)
+        for s in move_steps)
     refreshed = any(s.outcome == 'refreshed' for s in image_steps)
     if (not changed and not refreshed and _align_aligned_release() == _align_record_key(rel)
             and _align_live_passed(prior_live)):
@@ -10406,6 +10453,8 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now,
     # checkout): the restart stage below restarts what runs it.
     rebuilt = {s.component for s in move_steps
                if getattr(s, 'built', False) and s.component in align_apply.NATIVE_COMPONENTS}
+    rebuilt |= set(native_rebuilt)
+    build_failed = {s.component for s in move_steps if getattr(s, 'build_failed', False)}
     try:
         services = _align_services()
         staleness = _align_staleness(base, services, catalog or None, rebuilt=rebuilt)
@@ -10418,6 +10467,9 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now,
         _align_print_steps([step])
         _align_print_summary(steps + [step])
         return 1
+    for c in sorted(build_failed - rebuilt):
+        if staleness['stale'].pop(c, None) is not None:
+            print(f'  {c} not restarted: its rebuild failed, and its old binary runs on')
     radiod_first, comps, uploader = _align_plan_restarts(move_steps, bringup_steps, staleness)
 
     if getattr(args, 'no_restart', False):
@@ -10937,9 +10989,11 @@ def cmd_align(args) -> int:
         print(f'    {it.component:<16} {line}')
     if rate_limited:
         print(f'  commit distances skipped: {rate_limited}')
+    native_builders: list = []
     native_due = _align_native_decoders(
         False, base, covered=rebuilds | {it.component for it in plan
-                                         if it.status == 'move'})
+                                         if it.status == 'move'},
+        ran_out=native_builders)
     _align_follow_devices(False, start=not getattr(args, 'no_restart', False))
     _align_gmag_webui_unit(False, base=base)
     _align_enable_declared_units(False, base=base)
@@ -10960,7 +11014,8 @@ def cmd_align(args) -> int:
         print(f"    {f['path']:<40} {f['note'] or f['status']}")
     moving = [it.component for it in plan
               if it.status in ('move', 'missing') and it.component not in ahead_components
-              and it.component not in skip_missing] + sorted(rebuilds)
+              and it.component not in skip_missing] + sorted(
+                  rebuilds | (set(native_builders) & set(_aa.NATIVE_COMPONENTS)))
     # The catalog cmd_align already read (empty under --no-cost, and then
     # _align_staleness reads it itself: the kinds decide radiod consumers).
     stale_now = _align_print_restarts(base, moving, catalog=catalog)

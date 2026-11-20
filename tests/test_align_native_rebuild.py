@@ -135,30 +135,40 @@ class _Rig(unittest.TestCase):
 
     # --- drivers ----------------------------------------------------------
 
-    def _apply(self, rel=None):
+    def _apply(self, rel=None, stale=None, **extra):
+        """``stale``: what the staleness read reports (component -> why;
+        each one running).  ``extra``: further smd attributes to patch.
+        ``self.restarts`` collects the components each restart call got."""
         rel = rel or self._release()
         out = io.StringIO()
         staleness_calls = []
+        self.restarts = []
 
         def staleness(*a, **k):
             staleness_calls.append(k)
-            return _staleness()
+            return _staleness(stale=stale, running=set(stale or ()))
+
+        def restart(radiod_first, comps, services, **k):
+            self.restarts.append((radiod_first, list(comps)))
+            return []
+        patches = dict(
+            _runuser=lambda user, argv: argv,
+            _align_own_units=lambda *a, **k: [],
+            _align_start_timers=lambda **k: None,
+            _refresh_cli_reference=lambda *a, **k: None,
+            **self._builders())
+        patches.update(extra)
         with contextlib.ExitStack() as st:
-            m_record, _ = _apply_patches(
-                st, rel=rel, live=self._live(),
-                _runuser=lambda user, argv: argv,
-                _align_own_units=lambda *a, **k: [],
-                _align_start_timers=lambda **k: None,
-                _refresh_cli_reference=lambda *a, **k: None,
-                **self._builders())
+            m_record, _ = _apply_patches(st, rel=rel, live=self._live(), **patches)
             # After _quiet_live_stages: watch what the restart stage is told.
             st.enter_context(mock.patch.object(smd, "_align_staleness", staleness))
+            st.enter_context(mock.patch.object(smd, "_align_restart", restart))
             st.enter_context(contextlib.redirect_stdout(out))
             rc = smd.cmd_align(_apply_args(self.base))
         self.staleness_calls = staleness_calls
         return rc, out.getvalue(), m_record
 
-    def _dry_run(self, rel=None):
+    def _dry_run(self, rel=None, extra=()):
         rel = rel or self._release()
         args = _apply_args(self.base, apply=False)
         out = io.StringIO()
@@ -176,6 +186,7 @@ class _Rig(unittest.TestCase):
                 mock.patch("sigmond.align_apply.alignment_summary", return_value=None),
                 mock.patch("sigmond.catalog.load_catalog", return_value={}),
                 *[mock.patch.object(smd, k, v) for k, v in self._builders().items()],
+                *extra,
             ]:
                 st.enter_context(p)
             st.enter_context(contextlib.redirect_stdout(out))
@@ -264,24 +275,49 @@ class AlignApplyNativeRebuildTests(_Rig):
                                      if line.strip().startswith("ka9q-radio")
                                      for w in line.split()])
 
-    def test_rebuild_failure_fails_apply(self):
+    def test_ka9q_web_rebuild_failure_does_not_block_the_alignment(self):
+        """Final review I3: a failed ka9q-web build exits 1 and leaves a
+        native-build-failed marker, restarts no ka9q-web (its old binary
+        runs on), and the rest of the live stages still run."""
         self._record("ka9q-radio", self.new["ka9q-radio"])
         self.build_ok["ka9q-web"] = False
         before = self.web_bin.read_text()
-        rc, out, m_record = self._apply()
-        self.assertNotEqual(rc, 0, out)
+        marked = []
+        rc, out, m_record = self._apply(
+            stale={"ka9q-web": "its checkout moved after it started",
+                   "psk-recorder": "its checkout moved after it started"},
+            _mark_native_build_failed=lambda b, why: marked.append((b, why)))
+        self.assertEqual(rc, 1, out)
         steps = m_record.call_args[0][1]
         step = next(s for s in steps if s.component == "ka9q-web")
-        self.assertEqual(step.outcome, "failed")
-        self.assertIn("no build record", step.detail)
-        self.assertIn("ka9q-web: failed", out)
-        # The stub installs a new binary only on success (see
-        # test_moved_ka9q_web_builds_after_checkout): this one stays.
+        self.assertEqual(step.outcome, "current")
+        self.assertTrue(step.build_failed)
+        self.assertFalse(step.built)
+        self.assertIn("no build record; rebuild failed", step.detail)
+        self.assertEqual([m[0] for m in marked], ["ka9q-web"], out)
         self.assertEqual(self.web_bin.read_text(), before)
-        # Nothing restarts after a failed step: the restart stage never runs
-        # (only the read-only "still stale" report reads the services).
-        self.assertNotIn("  restarts:", out)
-        self.assertFalse([k for k in self.staleness_calls if "rebuilt" in k])
+        # The rest of make_live ran: recorded, and the restart stage ran
+        # for everything but ka9q-web.
+        self.assertIn("  restarts:", out)
+        self.assertEqual(self.restarts, [(False, ["psk-recorder"])], out)
+        self.assertNotIn("ka9q-web", self.staleness_calls[-1].get("rebuilt"))
+        self.assertIn("ka9q-web rebuild failed", out)
+
+    def test_moved_ka9q_web_rebuild_failure_does_not_block(self):
+        self._record("ka9q-radio", self.new["ka9q-radio"])
+        self._record("ka9q-web", self.old["ka9q-web"])
+        _git("checkout", "-q", "--detach", self.old["ka9q-web"], cwd=self.base / "ka9q-web")
+        self.build_ok["ka9q-web"] = False
+        rc, out, m_record = self._apply(
+            stale={"ka9q-web": "its checkout moved after it started"},
+            _mark_native_build_failed=lambda b, why: None)
+        self.assertEqual(rc, 1, out)
+        step = next(s for s in m_record.call_args[0][1] if s.component == "ka9q-web")
+        self.assertEqual(step.outcome, "moved")
+        self.assertTrue(step.build_failed)
+        self.assertIn("  restarts:", out)
+        self.assertFalse([c for rf, comps in self.restarts for c in comps
+                          if c == "ka9q-web"], out)
 
     def test_radiod_rebuild_failure_fails_apply(self):
         """B4's case with a build that fails: the item fails, the apply
