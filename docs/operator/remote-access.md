@@ -454,7 +454,7 @@ Plainly:
   read-only dashboard: a login, as `hamsci`/`sigmond` on the VM or `root` on the
   host. Someone using it can read and change anything on the station. That is
   the trade — it is what makes "just ask, they'll fix it"
-  ([INSTALL.md §11](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#11-if-something-goes-wrong))
+  ([INSTALL.md §11](https://github.com/HamSCI/sigmond-proxmox/blob/main/INSTALL.md#11-if-something-goes-wrong))
   possible.
 - **The tunnel itself forwards nothing but those six ports.** It is not a
   route onto your home network: no other device of yours becomes reachable

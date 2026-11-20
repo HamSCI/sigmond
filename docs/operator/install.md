@@ -2,11 +2,16 @@
 
 > **Audience:** operator
 > **Status:** pointer
-> **Verified against:** sigmond f3b0c6e on 2026-11-18 — whole page re-read; the relayed ports, the private VM address and the install steps checked against pm-align.py, the wizard and sigmond-appliance INSTALL.md. Earlier: sigmond 007bf72 on 2026-10-10 — remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; walk-through fixes (live dasi002 + b4) as of 4aec0c2
-> **See instead:** [sigmond-appliance/INSTALL.md](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md)
+> **Verified against:** sigmond f3b0c6e on 2026-11-18 — whole page re-read; the relayed ports, the private VM address and the install steps checked against pm-align.py, the wizard and sigmond-proxmox INSTALL.md. Earlier: sigmond 007bf72 on 2026-10-10 — remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; walk-through fixes (live dasi002 + b4) as of 4aec0c2
+> **See instead:** [sigmond-proxmox/INSTALL.md](https://github.com/HamSCI/sigmond-proxmox/blob/main/INSTALL.md)
 
 The install walkthrough belongs to the repository that builds the USB image, so
 it lives there instead of being duplicated here.
+
+Two install paths exist.  A dedicated mini-PC takes the Proxmox USB image,
+described in sigmond-proxmox's `INSTALL.md` (linked above).  A Linux machine you
+already run takes the bare-metal path in
+[install-bare-metal.md](../install-bare-metal.md).
 
 What to expect before you start: budget about **45 minutes** end to end — the
 installer runs unattended for roughly 10 minutes and then **turns the machine

@@ -9,7 +9,7 @@
 > machine, with no Proxmox, follow [install-bare-metal.md](install-bare-metal.md); `smd bringup`
 > runs the steps below and the bring-up after them.  For a dedicated computer from the Proxmox USB image (a Proxmox host
 > with the station in a VM), follow
-> [sigmond-appliance INSTALL.md](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md).
+> [sigmond-proxmox INSTALL.md](https://github.com/HamSCI/sigmond-proxmox/blob/main/INSTALL.md).
 > This page stays as the reference for the `install.sh` bootstrap step by step.
 
 A short operator-focused guide to getting `smd` on a fresh Linux host.

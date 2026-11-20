@@ -159,5 +159,5 @@ of [`../contributor/docs-gap-ledger.md`](../contributor/docs-gap-ledger.md).
 
 ## Next
 
-- Burning the image and the first boot: [sigmond-appliance/INSTALL.md](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md).
+- Burning the image and the first boot: [sigmond-proxmox/INSTALL.md](https://github.com/HamSCI/sigmond-proxmox/blob/main/INSTALL.md).
 - Everything else an operator needs: [Operator guide](../operator/README.md).

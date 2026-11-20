@@ -15,7 +15,7 @@ brings a running station to the same list. This page covers the Proxmox
 image, the one path that bakes anything in.
 
 Two repositories meet here. `HamSCI/sigmond` is the software — `smd`, the
-catalog, the client integration. `HamSCI/sigmond-appliance` (slated for a
+catalog, the client integration. `HamSCI/sigmond-proxmox` (slated for a
 rename to sigmond-proxmox) is a *build pipeline*. It turns whatever sigmond
 stands at build time into a USB stick that bare-metal-installs Proxmox VE
 unattended, imports a decoder VM, and runs a first-boot console wizard for the
@@ -202,7 +202,7 @@ from. Both are in [`orchestration.md`](orchestration.md) §Updates and
 A release climbs four rungs — **built → tested → blessed → rolled** — and each
 has a concrete evidence requirement, precisely so "verified" can mean one thing
 again (source:
-[`sigmond-appliance/docs/RELEASE.md`](https://github.com/HamSCI/sigmond-appliance/blob/main/docs/RELEASE.md#the-four-rungs)).
+[`sigmond-proxmox/docs/RELEASE.md`](https://github.com/HamSCI/sigmond-proxmox/blob/main/docs/RELEASE.md#the-four-rungs)).
 Read that page for the full statement; the summary a contributor needs is
 [`../../CONTRIBUTING.md`](../../CONTRIBUTING.md) §6.
 
@@ -304,7 +304,7 @@ where it bites — check it.
 ## 6. Known disagreements
 
 Three defects in the appliance repo stay open as `docs-gap` issues
-([query](https://github.com/HamSCI/sigmond-appliance/issues?q=label%3Adocs-gap)).
+([query](https://github.com/HamSCI/sigmond-proxmox/issues?q=label%3Adocs-gap)).
 This page records them and fixes none:
 
 - `sigmond-appliance/README.md` §Pipeline still describes the v2 scripts
@@ -325,7 +325,7 @@ This page records them and fixes none:
   stated for the person who owns the station.
 - [`../operator/install.md`](../operator/install.md) → `sigmond-appliance/INSTALL.md`
   — what the operator actually experiences at first boot.
-- [`sigmond-appliance/docs/RELEASE.md`](https://github.com/HamSCI/sigmond-appliance/blob/main/docs/RELEASE.md)
+- [`sigmond-proxmox/docs/RELEASE.md`](https://github.com/HamSCI/sigmond-proxmox/blob/main/docs/RELEASE.md)
   — the four rungs in full.
 - [`dev-setup.md`](dev-setup.md) ★ — getting a working checkout before any of
   this matters.

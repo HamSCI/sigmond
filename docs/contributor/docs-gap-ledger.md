@@ -15,7 +15,7 @@ Every filed issue carries the `docs-gap` label; bug-class rows also carry `bug`.
 |------|--------|-------|
 | sigmond | 37 | <https://github.com/HamSCI/sigmond/issues?q=label%3Adocs-gap> |
 | hf-timestd | 9 | <https://github.com/HamSCI/hf-timestd/issues?q=label%3Adocs-gap> |
-| sigmond-appliance | 6 | <https://github.com/HamSCI/sigmond-appliance/issues?q=label%3Adocs-gap> |
+| sigmond-appliance | 6 | <https://github.com/HamSCI/sigmond-proxmox/issues?q=label%3Adocs-gap> |
 | ka9q-python | 5 | <https://github.com/HamSCI/ka9q-python/issues?q=label%3Adocs-gap> |
 | meteor-scatter | 3 | <https://github.com/HamSCI/meteor-scatter/issues?q=label%3Adocs-gap> |
 | mag-recorder | 2 | <https://github.com/HamSCI/mag-recorder/issues?q=label%3Adocs-gap> |

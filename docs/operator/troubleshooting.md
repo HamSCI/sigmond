@@ -258,7 +258,7 @@ while the site switch reads `upload`.
   row of the table above, and does not belong on that path.)
 - `site sink: off` with the reason `new station: …` → nobody has raised the switch
   since the install. Check the station
-  ([INSTALL.md §9](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#9-fifteen-minutes-later--check-its-alive)),
+  ([INSTALL.md §9](https://github.com/HamSCI/sigmond-proxmox/blob/main/INSTALL.md#9-fifteen-minutes-later--check-its-alive)),
   then run `smd sink upload`. It refuses while GRAPE or the magnetometer
   packages a day (about 01:00 to 05:00 UTC); run it again when that finishes.
 - `site sink: off`, `site sink: fill` or `site sink: hold (legacy)` with any other reason →
@@ -1053,7 +1053,7 @@ At 80 %. Not at 94 %.
 machine's USB ports belong to the [decoder VM](glossary.md) — the radio needs
 them — so the keyboard no longer types into the host. The monitor shows a panel
 with the station's addresses and logins. That is correct and deliberate
-([INSTALL.md §8](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#8-remove-the-stick--it-powers-off--switch-it-back-on);
+([INSTALL.md §8](https://github.com/HamSCI/sigmond-proxmox/blob/main/INSTALL.md#8-remove-the-stick--it-powers-off--switch-it-back-on);
 [day-2.md](day-2.md#power-loss-reboots-and-moving-the-box)).
 
 **What to do:** drive the station from another computer over the network. You
@@ -1576,7 +1576,7 @@ touching one program and bouncing the whole station.
 | **Restart one *cheap* client** | `mag-recorder`, `gpsdo-monitor`, `igmp-querier` or `gmag-webui` is `failed` or stuck | A decode cycle or two of that one program — nothing else moves, **except `gmag-webui`, which drags `mag-recorder` with it** | `[VM]`: `smd restart <name>`. **Never `sudo smd`.** These four declare no radio dependency ([the table](#restarting-one-client-is-often-not-one-client)) |
 | **Restart anything else — which bounces the radio** | A spot recorder, `hf-timestd`, `ka9q-web` or the radio itself needs restarting | **The whole station**: every recorder loses its anchor, and the timing products need about ten minutes to re-settle | ⛔ Not narrow. `psk-recorder`, `wspr-recorder`, `meteor-scatter`, `hfdl-recorder`, `codar-sounder`, `hf-timestd` and `ka9q-web` all pull `ka9q-radio` in with them. Prefer `smd restart all` — one bounce, everything re-anchored together — over restarting one name and leaving the rest stale |
 | **Reboot — or power off** | Nothing above worked, and your fleet admin agrees | About ten minutes of everything | ⛔ **These are not the same thing.** A reboot holds USB power, so a wedged RX888 stays wedged; only a full **power-off** resets it (source: `sigmond-wizard.sh`). If the radio is the problem, power off. Otherwise a reboot is enough |
-| **Reinstall** | Never on your own initiative | Everything, including your PSWS registration unless the keys were saved first | Only with your fleet admin. First run `smd psws save-keys` and put the file on the stick ([INSTALL.md §4](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#4-reflashing-or-replacing-a-station-keep-its-keys)) |
+| **Reinstall** | Never on your own initiative | Everything, including your PSWS registration unless the keys were saved first | Only with your fleet admin. First run `smd psws save-keys` and put the file on the stick ([INSTALL.md §4](https://github.com/HamSCI/sigmond-proxmox/blob/main/INSTALL.md#4-reflashing-or-replacing-a-station-keep-its-keys)) |
 
 Two commands that are **not** on this table because they are decisions, not
 repairs: `smd update --apply` (only when your admin says a release is

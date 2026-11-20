@@ -222,7 +222,7 @@ is [`native-binaries.md`](../native-binaries.md). Not restated here.
 Turning a sigmond checkout into a bootable station image is a separate,
 nested pipeline — a different repo (`sigmond-appliance`), run on a
 different machine (B3's PM and a nested build/test VM), not part of this
-dev setup. See [`sigmond-appliance/README.md`](https://github.com/HamSCI/sigmond-appliance/blob/main/README.md)
+dev setup. See [`sigmond-proxmox/README.md`](https://github.com/HamSCI/sigmond-proxmox/blob/main/README.md)
 and [`appliance-boundary.md`](appliance-boundary.md) ★ for what the image
 bakes vs. first boot vs. how a change reaches a station. Not restated.
 

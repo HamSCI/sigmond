@@ -6,7 +6,7 @@
 > **Canonical for:** installing sigmond on a machine you already run (no Proxmox)
 > **The other way:** to turn a dedicated mini-PC into a station from the Proxmox USB image (Proxmox
 > host plus a decoder VM), follow the appliance guide,
-> [sigmond-appliance INSTALL.md](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md).
+> [sigmond-proxmox INSTALL.md](https://github.com/HamSCI/sigmond-proxmox/blob/main/INSTALL.md).
 
 This guide installs sigmond from its repositories onto a Debian machine you already run: no USB
 image, no Proxmox.  You keep the machine and its operating system; sigmond adds a station to it.
@@ -45,12 +45,15 @@ puts `smd` on your PATH.  Open a new shell afterwards (or `newgrp sigmond`).
 
 ```bash
 smd bringup dasi2 --callsign AC0G --grid EM38ww --reporter AC0G/S \
+                  --release-list /opt/git/sigmond/sigmond/release/components.toml \
                   --psws-station-id S000418 \
                   --psws-instrument hf-timestd=367 \
                   --psws-instrument mag-recorder=401
 ```
 
 Use your own callsign, grid, reporter ID and PSWS ids (section 4 says where they come from).
+`--release-list` makes bring-up install the commits of the release you checked out in section 2,
+not the newest main of each component.
 `--dry-run` shows every step first.
 `--non-interactive` accepts radiod's defaults; fine-tune clients afterwards with
 `smd config edit`.  The `dasi2` profile gives a local radiod and the core clients: hf-timestd,

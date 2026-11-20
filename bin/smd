@@ -9291,7 +9291,7 @@ def _align_install_missing(name, sha, *, base, catalog):
 def _align_refresh_image_files(ref, base='/opt/git/sigmond') -> list:
     """The `--apply` write half of `align.image_file_drift`'s read-only
     compare: every image-carried helper script (`align.IMAGE_FILES`) found
-    'differs' or 'absent' gets replaced from sigmond-appliance's copy at
+    'differs' or 'absent' gets replaced from sigmond-proxmox's copy at
     ``ref`` via `align_apply.refresh_image_file`.  ``ref`` is the release's
     appliance_commit (final review / I7) — verified against the tag — so
     the compare and the refresh both read the verified bytes. A 'current' file is left alone (no

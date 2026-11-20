@@ -11,7 +11,7 @@ you when you need something from another path.
 ## I install a station
 You have a computer and an RX888, and you want a working station. Sigmond
 installs two ways, and each has its own guide.
-→ **[Proxmox USB image](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md)** — for a dedicated mini-PC. The stick turns it into a Proxmox host with the station in a virtual machine. No Linux experience needed.
+→ **[Proxmox USB image](https://github.com/HamSCI/sigmond-proxmox/blob/main/INSTALL.md)** — for a dedicated mini-PC. The stick turns it into a Proxmox host with the station in a virtual machine. No Linux experience needed.
 → **[Bare metal](install-bare-metal.md)** — for a Debian machine you already run. `install.sh` and `smd bringup` add the station to it.
 
 ## I host a station (amateur radio operator)

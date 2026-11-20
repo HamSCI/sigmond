@@ -71,7 +71,7 @@ The *designator* is the station name you give the setup wizard, which names the
 VM after it and adds `-PM` for the host (source:
 `sigmond/scripts/proxmox/sigmond-wizard.sh`, `ask_names()`). The station's
 monitor prints the addresses; one password unlocks both machines at first —
-change it with `passwd` in each ([INSTALL.md §10](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#10-logins--and-change-the-password)).
+change it with `passwd` in each ([INSTALL.md §10](https://github.com/HamSCI/sigmond-proxmox/blob/main/INSTALL.md#10-logins--and-change-the-password)).
 
 ⚠ **Write down the host address when the install shows it.** The VM address
 beside it (`10.99.0.2` on a station with the private link) works only from the

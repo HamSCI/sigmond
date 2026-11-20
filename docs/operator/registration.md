@@ -37,7 +37,7 @@ prints that address for your station.
 ## 1. What the wizard already did
 
 The setup wizard you answered during the install
-([INSTALL.md §7](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#7-answer-the-setup-questions))
+([INSTALL.md §7](https://github.com/HamSCI/sigmond-proxmox/blob/main/INSTALL.md#7-answer-the-setup-questions))
 collected your whole identity and wrote it to one file,
 `/etc/sigmond/site-profile.toml`, from which every recorder is configured. You
 do not edit that file by hand and you do not repeat yourself per program.
@@ -93,7 +93,7 @@ PSWS enrollment — site
 > wizard from scratch: from the **host**, run `sigmond-setup --reconfigure`. It
 > asks the questions again but pre-fills only some answers: type your reporter
 > ID again, and type the PSWS IDs at their questions
-> ([INSTALL.md §12](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#12-moving-a-station-staged-in-one-place-deployed-in-another)).
+> ([INSTALL.md §12](https://github.com/HamSCI/sigmond-proxmox/blob/main/INSTALL.md#12-moving-a-station-staged-in-one-place-deployed-in-another)).
 
 ---
 
@@ -123,7 +123,7 @@ answer to go and correct. A real station's reporter ID is `CALL` or
 **How to confirm:** go to [wsprnet.org](https://wsprnet.org), open the
 **Database** tab, and search for your reporter ID in the *Reporter* field. Rows
 should appear about fifteen minutes after you run `smd sink upload`
-([INSTALL.md §9](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#9-fifteen-minutes-later--check-its-alive)).
+([INSTALL.md §9](https://github.com/HamSCI/sigmond-proxmox/blob/main/INSTALL.md#9-fifteen-minutes-later--check-its-alive)).
 That command refuses while GRAPE or the magnetometer packages a day (about
 01:00 to 05:00 UTC); run it again when that finishes.
 
@@ -556,7 +556,7 @@ onto the install stick. The installer restores the keys, and **your PSWS
 registration carries over**, so you never touch the portal again. If the file
 missed the stick, copy it to the new station and run
 `smd psws restore-keys site-keys.tar.gz`. Either way, finish with
-`smd psws verify`. [INSTALL.md §4](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#4-reflashing-or-replacing-a-station-keep-its-keys) gives the steps. Skipping them costs you
+`smd psws verify`. [INSTALL.md §4](https://github.com/HamSCI/sigmond-proxmox/blob/main/INSTALL.md#4-reflashing-or-replacing-a-station-keep-its-keys) gives the steps. Skipping them costs you
 a fresh registration.
 
 If you did not save them, that is recoverable: register the new station's key
@@ -581,7 +581,7 @@ nothing. Then check the identity in the `[VM]` with
 `smd sink status` says `site sink: off` with the reason `new station: …`, run
 `smd sink upload`. For any other reason, ask your fleet admin. Check wsprnet
 about fifteen minutes later
-([INSTALL.md §12](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#12-moving-a-station-staged-in-one-place-deployed-in-another)).
+([INSTALL.md §12](https://github.com/HamSCI/sigmond-proxmox/blob/main/INSTALL.md#12-moving-a-station-staged-in-one-place-deployed-in-another)).
 
 ---
 

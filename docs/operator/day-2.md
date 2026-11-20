@@ -26,7 +26,7 @@ console panel prints these addresses for your station.
 
 | Window | Address | What "good" looks like |
 |---|---|---|
-| **Live receiver** (ka9q-web) | `http://<host address>:8081` | A waterfall with **signals in it** — bright horizontal traces, not a flat empty wash. This is the one page that proves the antenna, the [RX888](glossary.md) and [radiod](glossary.md) are all doing their jobs ([INSTALL.md §9](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#9-fifteen-minutes-later--check-its-alive)). |
+| **Live receiver** (ka9q-web) | `http://<host address>:8081` | A waterfall with **signals in it** — bright horizontal traces, not a flat empty wash. This is the one page that proves the antenna, the [RX888](glossary.md) and [radiod](glossary.md) are all doing their jobs ([INSTALL.md §9](https://github.com/HamSCI/sigmond-proxmox/blob/main/INSTALL.md#9-fifteen-minutes-later--check-its-alive)). |
 | **Timing dashboard** (hf-timestd) | `http://<host address>:8000` | The page loads and its health/metrology panels show **recent** timestamps and a current timing tier — the same tier `smd status` prints. (`hf-timestd/docs/REQUIREMENTS.md` `HFT-F-050`: a FastAPI dashboard on port 8000 serving station/health/metrology/stability/propagation routes.) |
 | **Magnetometer dashboard** (gmag-webui) — only if you have an RM3100 | `http://<host address>:8082` | A trace that **moves**. Geomagnetic field readings always wiggle; a dead-flat unchanging line is a stuck sensor, not a quiet day. Report it. (Port: `lib/sigmond/gmag_webui.py`, `PORT = 8082`.) |
 | **Proxmox** (the `[host]`) | `https://<host address>:8006` | Your one [decoder VM](glossary.md) — the one named after your [designator](glossary.md) — shows **running**. That is all you ever need Proxmox for. |
@@ -406,7 +406,7 @@ smd sink status
 
 If it answers `⚠ site sink: off` and the reason reads `new station: …`, nobody has
 raised the switch since the install: finish
-[INSTALL.md §9](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#9-fifteen-minutes-later--check-its-alive)
+[INSTALL.md §9](https://github.com/HamSCI/sigmond-proxmox/blob/main/INSTALL.md#9-fifteen-minutes-later--check-its-alive)
 and run `smd sink upload`. It refuses while GRAPE or the magnetometer packages a
 day (about 01:00 to 05:00 UTC); run it again when that finishes. Any other
 `⚠ site sink: off`, `⚠ site sink: fill` or `⚠ site sink: hold (legacy)`
@@ -800,20 +800,20 @@ Full list and reasoning → [do-not-touch.md](do-not-touch.md).
 wrong thing — the host boots, the decoder VM starts, `radiod` starts, the
 recorders start, and spots resume. **Allow about 10 minutes** before you judge
 it — a fresh install budgets fifteen before it expects signs of life
-([INSTALL.md §9, "Fifteen minutes later — check it's alive"](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#9-fifteen-minutes-later--check-its-alive)),
+([INSTALL.md §9, "Fifteen minutes later — check it's alive"](https://github.com/HamSCI/sigmond-proxmox/blob/main/INSTALL.md#9-fifteen-minutes-later--check-its-alive)),
 and a reboot is the easier case. Do not power-cycle it again while you wait.
 
 If spots have not resumed after **30 minutes**, that is a fault: check the
 antenna is still connected, then run `smd status` and send the output to your
 fleet admin ([troubleshooting.md](troubleshooting.md);
-[INSTALL.md §11](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#11-if-something-goes-wrong)).
+[INSTALL.md §11](https://github.com/HamSCI/sigmond-proxmox/blob/main/INSTALL.md#11-if-something-goes-wrong)).
 
 **The station's own keyboard no longer types into the host, and that is
 normal.** After the first reboot following installation, the USB ports belong
 to the decoder VM — the radio needs them. The monitor shows a panel with the
 station's addresses and logins. That is correct and deliberate; you drive the
 station from another computer over the network from then on
-([INSTALL.md §8](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#8-remove-the-stick--it-powers-off--switch-it-back-on)).
+([INSTALL.md §8](https://github.com/HamSCI/sigmond-proxmox/blob/main/INSTALL.md#8-remove-the-stick--it-powers-off--switch-it-back-on)).
 A keyboard at the station can still reach a login on the host;
 [remote-access.md §4](remote-access.md#4-the-switch-off-on-status) says how, and
 on which stations. You can unplug the monitor and keyboard whenever you like.
@@ -826,7 +826,7 @@ station ID skips PSWS, so have them at hand. It keeps your remote-access
 number, the remote-access switch and the site sink switch as they were. The wizard carries the new
 location to the recorders, the timing station and the magnetometer, and
 restarts the recorders itself. Full steps:
-[INSTALL.md §12](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#12-moving-a-station-staged-in-one-place-deployed-in-another).
+[INSTALL.md §12](https://github.com/HamSCI/sigmond-proxmox/blob/main/INSTALL.md#12-moving-a-station-staged-in-one-place-deployed-in-another).
 
 ---
 
@@ -887,7 +887,7 @@ passwd
 ```
 
 Full detail, including the factory default and the Proxmox GUI login:
-[INSTALL.md §10](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#10-logins--and-change-the-password).
+[INSTALL.md §10](https://github.com/HamSCI/sigmond-proxmox/blob/main/INSTALL.md#10-logins--and-change-the-password).
 
 If you typed a wrong answer to the setup wizard — reporter ID, grid square,
 PSWS ids — you do not reinstall: run `sigmond-setup --reconfigure` from the

@@ -21,7 +21,7 @@ Two ways, both current:
 
 - **A dedicated mini-PC, from the USB image.**  The image turns the machine into a Proxmox host
   with the station in a VM; you answer a few questions and it does the rest.  Follow
-  [sigmond-appliance INSTALL.md](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md).
+  [sigmond-proxmox INSTALL.md](https://github.com/HamSCI/sigmond-proxmox/blob/main/INSTALL.md).
 - **A Linux machine you already run (bare metal).**  Sigmond installs from these repositories onto
   your own Debian.  Follow [docs/install-bare-metal.md](docs/install-bare-metal.md).
 

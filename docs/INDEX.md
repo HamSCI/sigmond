@@ -18,7 +18,7 @@ Front door for each audience: [docs/README.md](README.md).
 
 | Doc | What it gives you |
 |---|---|
-| [sigmond-appliance INSTALL.md](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md) ★ | The Proxmox USB image path: gather the facts, write the stick, the two boots, the setup wizard, the first check, and moving or reflashing a station |
+| [sigmond-proxmox INSTALL.md](https://github.com/HamSCI/sigmond-proxmox/blob/main/INSTALL.md) ★ | The Proxmox USB image path: gather the facts, write the stick, the two boots, the setup wizard, the first check, and moving or reflashing a station |
 | [install-bare-metal.md](install-bare-metal.md) ★ | The bare-metal path: `install.sh`, `smd bringup`, PSWS ids, releasing uploads, checking, and `smd align` |
 | [install-quickstart.md](install-quickstart.md), [installation-guide.md](installation-guide.md), [greenfield-runbook.md](greenfield-runbook.md) | Reference for doing a bare-metal step by hand (see section 3) |
 
@@ -43,7 +43,7 @@ Front door for each audience: [docs/README.md](README.md).
 | [commands/smd.md](commands/smd.md) | Real `smd` output from AC0G-B4, one section per read-only command, feeding the station Commands page: what each command is for and how to read what it prints |
 | [operator/do-not-touch.md](operator/do-not-touch.md) ★ | The guard rails: the seventeen things an operator must not do on a station — `sudo smd`, `apt`/`pip`/`git pull`, a client's own `install.sh`, `smd install ka9q-radio`, `smd apply`, `smd config <client> edit`, hand-edits to `/etc/radio` or `/etc/sigmond`, CPU/VM changes, moving without `--reconfigure` — each with the cited reason and what to do if you already did it, plus what you may do freely |
 | [operator/hardware.md](operator/hardware.md) (pointer) | Redirects to `hardware/shopping-list.md` — the parts list is shared with the scientist path |
-| [operator/install.md](operator/install.md) (pointer) | Redirects to sigmond-appliance's `INSTALL.md`, plus what to expect from the ~45-minute install |
+| [operator/install.md](operator/install.md) (pointer) | Redirects to sigmond-proxmox's `INSTALL.md`, plus what to expect from the ~45-minute install |
 | [operator/satellite-link.md](operator/satellite-link.md) | The satellite-link guard (`[link_schedule]`) for stations whose internet comes and goes, and what its probe costs |
 
 ## 2. Scientist (record a signal)

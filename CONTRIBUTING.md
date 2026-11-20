@@ -214,7 +214,7 @@ needs to know the mechanism exists.
   confirmation at a terminal — it reads `/dev/tty` explicitly so a pipe
   or an automated caller can't satisfy it.
 * The first Release is
-  [v3.32](https://github.com/HamSCI/sigmond-appliance/releases/tag/v3.32):
+  [v3.32](https://github.com/HamSCI/sigmond-proxmox/releases/tag/v3.32):
   the record carries the manifest, the sha256, and the test verdict. The
   image itself stays on the artifact store — GitHub caps release assets
   at 2 GiB and the image exceeds that (`sigmond-appliance/docs/RELEASE.md`

@@ -34,7 +34,7 @@ station, so an operator can watch them work.
 
 | Task | Why it exists | Main commands | Read more |
 |---|---|---|---|
-| Cut and prove a release | A station should run only a combination of code that someone has tested together | `smd version`, `smd align --manifest`, the appliance's `bless-release.sh` | [RELEASE.md](https://github.com/HamSCI/sigmond-appliance/blob/main/docs/RELEASE.md) |
+| Cut and prove a release | A station should run only a combination of code that someone has tested together | `smd version`, `smd align --manifest`, the appliance's `bless-release.sh` | [RELEASE.md](https://github.com/HamSCI/sigmond-proxmox/blob/main/docs/RELEASE.md) |
 | Keep stations current | Fixes help no one until they reach the stations | `smd update`, `smd align`, `pm-align`, `smd version` | [day-2 §Updates](../operator/day-2.md#updates--who-decides-and-what-you-run) |
 | Watch the fleet | A station can run, look healthy, and send nothing | `smd status`, `smd check`, `smd align`, `smd watch uploads`, `smd sink status` | [day-2](../operator/day-2.md), [registration §6](../operator/registration.md#6-confirming-everything-flows) |
 | Manage storage | Raw IQ fills a disk in hours, and a full disk stops a station | `smd storage status`, `smd archive add\|remove\|status` | [storage design](../superpowers/specs/2026-11-04-storage-capacity-design.md) |
@@ -63,7 +63,7 @@ consists of three things.
 ### How a release earns the word "blessed"
 
 The sigmond-appliance repository's
-[RELEASE.md](https://github.com/HamSCI/sigmond-appliance/blob/main/docs/RELEASE.md)
+[RELEASE.md](https://github.com/HamSCI/sigmond-proxmox/blob/main/docs/RELEASE.md)
 holds the full procedure.  Its shape runs like this.
 
 1. **Build.**  A build machine first assembles a golden VM, a template station
@@ -478,4 +478,4 @@ those checks pass on the station it targeted.
 | [superpowers/specs/2026-11-04-storage-capacity-design.md](../superpowers/specs/2026-11-04-storage-capacity-design.md) | The storage ledger |
 | [superpowers/specs/2026-09-24-smd-align-design.md](../superpowers/specs/2026-09-24-smd-align-design.md) | `smd align` and `pm-align` |
 | [CONTRIBUTING.md](../../CONTRIBUTING.md) | Update orientations (§3), pins (§5), cutting a release (§6), the heartbeat and board (§10) |
-| [sigmond-appliance RELEASE.md](https://github.com/HamSCI/sigmond-appliance/blob/main/docs/RELEASE.md) | The release ladder in full |
+| [sigmond-proxmox RELEASE.md](https://github.com/HamSCI/sigmond-proxmox/blob/main/docs/RELEASE.md) | The release ladder in full |
