@@ -23,10 +23,13 @@ def env(tmp_path):
     return base, repo, ud
 
 
-def _items(env, enabled, is_enabled=lambda n: True):
+def _items(env, enabled, is_enabled=lambda n: True,
+           service_active=lambda s: True, template_instances=lambda t: 0):
     base, repo, ud = env
     return units.unit_items(base, enabled, sigmond_repo=repo, unit_dir=ud,
-                            is_enabled=is_enabled)
+                            is_enabled=is_enabled,
+                            service_active=service_active,
+                            template_instances=template_instances)
 
 
 def test_missing_declared_unit_is_fault(env):
@@ -47,7 +50,7 @@ def test_declared_timer_not_enabled_is_fault(env):
     (ud / "foo.timer").write_text("x")
     got = _items(env, {"foo": True}, is_enabled=lambda n: False)
     assert [(i.severity, i.subject, i.fix) for i in got] == [
-        ("fault", "foo.timer", "smd enable foo")]
+        ("fault", "foo.timer", "smd align --apply")]
     assert _items(env, {"foo": True}) == []
 
 
@@ -183,3 +186,99 @@ def test_templated_timer_needs_no_enablement(env):
     (ud / "foo-x@.timer").write_text("x")
     assert _items(env, {"foo": True}, is_enabled=lambda n: False) == []
     assert _items(env, {"foo": False}, is_enabled=lambda n: True) == []
+
+
+# ---- v3.94 Task 4 -----------------------------------------------------------
+
+def test_template_missing_without_instances_no_item(env):
+    """WB6CXC: one radiod, so ka9q-web runs as plain ka9q-web.service and
+    no ka9q-web@ instance exists; the missing template is no fault."""
+    base, _, ud = env
+    _comp(base, "web", '[systemd]\nunits = ["web.service"]\n'
+                       'templated_units = ["web@.service"]\n')
+    (ud / "web.service").write_text("x")
+    asked = []
+
+    def inst(t):
+        asked.append(t)
+        return 0
+    assert _items(env, {"web": True}, template_instances=inst) == []
+    assert asked == ["web@.service"]
+
+
+def test_template_missing_with_second_target_faults(env):
+    """KFS-MAIN: a second radiod has a ka9q-web@<id> instance, so the
+    template really is needed and its absence stays a fault."""
+    base, _, ud = env
+    _comp(base, "web", '[systemd]\nunits = ["web.service"]\n'
+                       'templated_units = ["web@.service"]\n')
+    (ud / "web.service").write_text("x")
+    got = _items(env, {"web": True},
+                 template_instances=lambda t: 1 if t == "web@.service" else 0)
+    assert [(i.kind, i.severity, i.subject, i.fix) for i in got] == [
+        ("unit", "fault", "web@.service", "smd align --apply")]
+
+
+def test_units_of_stopped_component_not_faults(env):
+    """KFS-OMNI stops hf-timestd on purpose: topology enables it, its core
+    recorder is inactive, timestd-events.timer is not enabled.  No fault;
+    one drift item naming the stopped service."""
+    base, _, ud = env
+    _comp(base, "hf-timestd",
+          '[systemd]\nunits = ["timestd-metrology.target", '
+          '"timestd-core-recorder.service", "timestd-fusion.service", '
+          '"timestd-events.timer", "timestd-missing.timer"]\n'
+          'templated_units = ["timestd-metrology@.service"]\n')
+    for u in ("timestd-metrology.target", "timestd-core-recorder.service",
+              "timestd-fusion.service", "timestd-events.timer"):
+        (ud / u).write_text("x")
+    asked = []
+
+    def active(s):
+        asked.append(s)
+        return False
+    got = _items(env, {"hf-timestd": True}, is_enabled=lambda n: False,
+                 service_active=active, template_instances=lambda t: 3)
+    assert [(i.kind, i.severity, i.subject, i.detail, i.fix) for i in got] == [
+        ("unit", "drift", "timestd-core-recorder.service",
+         "hf-timestd is enabled but timestd-core-recorder.service is not "
+         "running", "smd start hf-timestd")]
+    assert asked == ["timestd-core-recorder.service"]
+
+
+def test_running_component_still_faults(env):
+    """The same component with its core recorder active reports as before."""
+    base, _, ud = env
+    _comp(base, "hf-timestd",
+          '[systemd]\nunits = ["timestd-core-recorder.service", '
+          '"timestd-events.timer"]\n')
+    for u in ("timestd-core-recorder.service", "timestd-events.timer"):
+        (ud / u).write_text("x")
+    got = _items(env, {"hf-timestd": True}, is_enabled=lambda n: False,
+                 service_active=lambda s: s == "timestd-core-recorder.service")
+    assert [(i.severity, i.subject) for i in got] == [
+        ("fault", "timestd-events.timer")]
+
+
+def test_component_running_rule():
+    from sigmond.drift.units import component_running
+    act = {"a.service": True}.get
+    assert component_running(["a.service", "b.service"], True,
+                             lambda s: bool(act(s)))
+    assert not component_running(["x@.service", "b.service", "a.service"],
+                                 True, lambda s: bool(act(s)))
+    assert component_running(["x@.service", "t.timer"], True,
+                             lambda s: False)       # declares no service
+    assert component_running([], True, lambda s: False)
+    assert not component_running(["a.service"], False, lambda s: True)
+
+
+def test_disabled_timer_fix_is_align_apply(env):
+    base, _, ud = env
+    _comp(base, "foo", '[systemd]\nunits = ["foo.service", "foo.timer"]\n')
+    (ud / "foo.service").write_text("x")
+    (ud / "foo.timer").write_text("x")
+    got = _items(env, {"foo": True}, is_enabled=lambda n: n != "foo.timer")
+    assert [(i.subject, i.detail, i.fix) for i in got] == [
+        ("foo.timer", "foo timer foo.timer is installed but not enabled",
+         "smd align --apply")]

@@ -104,6 +104,7 @@ def tree(tmp_path, monkeypatch):
             sigmond_repo=base / "sigmond", unit_dir=units,
             decoder_dir=tmp_path / "decoders", stamp_dir=tmp_path / "stamps",
             enabled={"psk-recorder": True}, is_enabled=lambda u: False,
+            service_active=lambda u: True, template_instances=lambda u: 0,
             client_configs={"psk-recorder": [psk_cfg]},
             catalog_override=tmp_path / "none-catalog.toml",
             pins_file=tmp_path / "none-pins.toml",
@@ -293,3 +294,76 @@ def test_exceptions_header_names_the_real_verb(tmp_path):
                             now=datetime(2026, 11, 19, tzinfo=timezone.utc))
     head = p.read_text().splitlines()[0]
     assert "smd align --accept" in head and "smd drift" not in head
+
+
+# ---- v3.94 Task 4: WB6CXC end to end -----------------------------------------
+
+def _git_repo(path):
+    path.mkdir(parents=True, exist_ok=True)
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+           "PATH": "/usr/bin:/bin"}
+    for cmd in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "x"]):
+        subprocess.run(["git", "-C", str(path)] + cmd, check=True, env=env,
+                       capture_output=True)
+
+
+def test_wb6cxc_report_shows_only_the_real_timer_fault(tree, tmp_path,
+                                                       monkeypatch):
+    """WB6CXC, 2026-11-19: one radiod (plain ka9q-web.service, no
+    ka9q-web@ instance), mag-recorder enabled but stopped on purpose,
+    UberSDR decoders built at sigmond's pin while the ubersdr_wsprd
+    checkout sits ahead.  Through the real `smd align --report`, the only
+    fault left is the sigmond-drift.timer that really is not installed."""
+    from sigmond import decoder_choice
+    base, units = tmp_path / "git", tmp_path / "units"
+    (base / "mag-recorder").mkdir()
+    (base / "mag-recorder" / "deploy.toml").write_text(
+        '[systemd]\nunits = ["mag-recorder.service", '
+        '"mag-recorder-upload.timer"]\n')
+    (base / "psk-recorder").mkdir(exist_ok=True)
+    (base / "psk-recorder" / "deploy.toml").write_text(
+        '[systemd]\nunits = ["psk-recorder@.service"]\n')
+    for u in ("ka9q-web.service", "psk-recorder@.service",
+              "mag-recorder.service", "mag-recorder-upload.timer"):
+        (units / u).write_text("[Unit]\n")
+    _git_repo(base / "ubersdr_wsprd")          # HEAD is not sigmond's pin
+    dec = tmp_path / "decoders" / "ubersdr"
+    dec.mkdir(parents=True)
+    (dec / "wsprd").write_text("")
+    (dec / ".provenance").write_text(
+        f"{smd._UBERSDR_COMMIT} parity=verified\n")
+    monkeypatch.setattr(decoder_choice, "BIN_DIR", tmp_path / "bin")
+    monkeypatch.setattr(decoder_choice, "COORDINATION_TOML",
+                        tmp_path / "none.toml")
+    monkeypatch.setattr(smd, "_COMPONENT_PINS_FILE", tmp_path / "no-pins")
+    monkeypatch.delenv("SIGMOND_TRACK_MAIN", raising=False)
+
+    tree_readers = br.station_readers
+    seen = {}
+
+    def wb6cxc_readers(**kw):
+        r = tree_readers(**kw)
+        seen["native_pins"] = br._v(r.native_pins)
+        return dataclasses.replace(
+            r, enabled={"psk-recorder": True, "mag-recorder": True,
+                        "ka9q-web": True},
+            service_active=lambda s: s == "ka9q-web.service",
+            template_instances=lambda t: 1 if t == "psk-recorder@.service"
+            else 0)
+    monkeypatch.setattr(br, "station_readers", wb6cxc_readers)
+
+    with dry_station():
+        rc, out = _cmd(_args(report=True))
+    assert rc == 0, out
+    # smd filled the pins from _native_pin, not the checkout.
+    assert seen["native_pins"]["ubersdr_wsprd"] == smd._UBERSDR_COMMIT
+    doc = json.loads(tree.drift_json.read_text())
+    faults = {i["key"] for i in doc["items"] if i["severity"] == "fault"}
+    # The fixture holds no aligned record, so source:baseline drifts too.
+    drifts = {i["key"]: i for i in doc["items"]
+              if i["severity"] == "drift" and i["kind"] != "source"}
+    assert faults == {"unit:sigmond-drift.timer"}, doc["items"]
+    assert set(drifts) == {"unit:mag-recorder.service"}, doc["items"]
+    assert drifts["unit:mag-recorder.service"]["fix"] == \
+        "smd start mag-recorder"

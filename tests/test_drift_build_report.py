@@ -31,6 +31,8 @@ def _readers(tmp_path, **kw):
                     sigmond_repo=tmp_path / "sigmond",
                     exceptions_path=tmp_path / "exc.toml", now=NOW,
                     is_enabled=lambda u: False, unit_env=lambda u: {},
+                    service_active=lambda u: True,
+                    template_instances=lambda u: 0,
                     catalog_override=tmp_path / "none-catalog.toml",
                     pins_file=tmp_path / "none-pins.toml",
                     coordination=tmp_path / "none-coord.toml")

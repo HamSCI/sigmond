@@ -5,9 +5,10 @@ Three checks, all reusing what sigmond already records:
 * a component whose deploy.toml declares a ``[build]`` carries a stamp; a
   stale stamp means its venv came from other code than its checkout holds.
   Components with an install.sh own their build and carry no stamp: skipped.
-* the UberSDR decoder build: its ``.provenance`` commit against the
-  ubersdr_wsprd checkout, and ``--msk144`` in its jt9 while meteor-scatter
-  runs.
+* the UberSDR decoder build: its ``.provenance`` commit against sigmond's
+  native pin for ubersdr_wsprd (the checkout HEAD only when no pin is
+  given; a checkout may sit ahead of the pin on purpose), and
+  ``--msk144`` in its jt9 while meteor-scatter runs.
 * the live decoder: wsjtx while a parity-verified ubersdr build exists.
 
 An operator override of the decoder choice suppresses the live-decoder and
@@ -59,11 +60,20 @@ def _stamp_items(base: Path, components: Iterable[str],
     return out
 
 
-def _provenance_item(base: Path, decoder_dir: Path) -> Optional[Item]:
-    head = build_stamp.head_of(Path(base) / _UBERSDR_SRC)
+def _same(a: str, b: str) -> bool:
+    n = min(len(a), len(b))
+    return n >= 7 and a[:n] == b[:n]
+
+
+def _provenance_item(base: Path, decoder_dir: Path,
+                     pin: Optional[str] = None) -> Optional[Item]:
+    if pin:
+        want, label = pin, "pin"
+    else:
+        want, label = build_stamp.head_of(Path(base) / _UBERSDR_SRC), "checkout"
     ubersdr = Path(decoder_dir) / "ubersdr"
-    if head is None or not ubersdr.is_dir():
-        return None  # no checkout to compare, or no ubersdr build here
+    if want is None or not ubersdr.is_dir():
+        return None  # nothing to compare, or no ubersdr build here
     try:
         m = _HEX40.search((ubersdr / ".provenance").read_text())
     except OSError:
@@ -71,11 +81,14 @@ def _provenance_item(base: Path, decoder_dir: Path) -> Optional[Item]:
     if not m:
         return Item("build", "fault", "ubersdr-decoders",
                     "UberSDR decoders have no provenance commit; "
-                    f"checkout at {_short(head)}", _NATIVE)
-    if m.group(0) != head:
-        return Item("build", "fault", "ubersdr-decoders",
-                    f"UberSDR decoders built from {_short(m.group(0))}, "
-                    f"checkout at {_short(head)}", _NATIVE)
+                    f"{label} at {_short(want)}", _NATIVE)
+    if not _same(m.group(0), want):
+        built = _short(m.group(0))
+        detail = (f"UberSDR decoders built from {built}, pin {_short(want)}"
+                  if pin else
+                  f"UberSDR decoders built from {built}, checkout at "
+                  f"{_short(want)}")
+        return Item("build", "fault", "ubersdr-decoders", detail, _NATIVE)
     return None
 
 
@@ -112,12 +125,14 @@ def build_items(base: Path, components: Iterable[str], *,
                 enabled: Mapping[str, bool],
                 decoder_dir: Path = decoder_choice.DECODER_DIR,
                 run=subprocess.run,
-                stamp_dir: Optional[Path] = None) -> list:
+                stamp_dir: Optional[Path] = None,
+                native_pins: Optional[Mapping[str, str]] = None) -> list:
     items = _stamp_items(base, components, stamp_dir)
     held = decoder_choice.operator_override()
     # A wrong-commit build is wrong whichever decoder the operator chose;
     # the override silences only the MSK144 and live-decoder items.
-    candidates = [_provenance_item(base, decoder_dir)]
+    candidates = [_provenance_item(
+        base, decoder_dir, (native_pins or {}).get(_UBERSDR_SRC))]
     if not held:
         if enabled.get("meteor-scatter"):
             candidates.append(_msk144_item(decoder_dir, run))

@@ -187,3 +187,39 @@ def test_operator_override_keeps_provenance_fault(tmp_path, monkeypatch):
     assert [i.subject for i in items] == ["ubersdr-decoders"]
     # Final review I4: align never rebuilds the decoders; native-build does.
     assert items[0].fix == "smd admin native-build --apply ubersdr-decoders"
+
+
+# ---- v3.94 Task 4 -----------------------------------------------------------
+
+PIN = "8719788" + "c" * 33
+AHEAD = "5eeeb53" + "d" * 33
+
+
+def test_decoders_at_native_pin_clean_when_checkout_ahead(tmp_path, monkeypatch):
+    """W7WKR: decoders built at sigmond's pin while the ubersdr_wsprd
+    checkout sits ahead of it; no item."""
+    _repo(tmp_path, "ubersdr_wsprd")
+    _heads(monkeypatch, {"ubersdr_wsprd": AHEAD})
+    items = builds.build_items(tmp_path, [], enabled={},
+                               decoder_dir=_dec(tmp_path, sha=PIN),
+                               native_pins={"ubersdr_wsprd": PIN})
+    assert items == []
+
+
+def test_decoders_off_native_pin_fault_names_the_pin(tmp_path, monkeypatch):
+    _repo(tmp_path, "ubersdr_wsprd")
+    _heads(monkeypatch, {"ubersdr_wsprd": PIN})   # checkout equals the build
+    items = builds.build_items(tmp_path, [], enabled={},
+                               decoder_dir=_dec(tmp_path, sha=PIN),
+                               native_pins={"ubersdr_wsprd": AHEAD})
+    assert [(i.severity, i.subject, i.detail, i.fix) for i in items] == [
+        ("fault", "ubersdr-decoders",
+         "UberSDR decoders built from 8719788, pin 5eeeb53",
+         "smd admin native-build --apply ubersdr-decoders")]
+
+
+def test_decoders_pin_needs_no_checkout(tmp_path):
+    items = builds.build_items(tmp_path, [], enabled={},
+                               decoder_dir=_dec(tmp_path, sha=PIN),
+                               native_pins={"ubersdr_wsprd": AHEAD})
+    assert [i.subject for i in items] == ["ubersdr-decoders"]

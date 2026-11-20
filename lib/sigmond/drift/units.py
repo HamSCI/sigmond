@@ -1,8 +1,13 @@
 """Drift items for the unit kind.
 
-* every unit an enabled component's deploy.toml declares must exist in the
-  unit directory; a templated unit counts when its template file exists
-  (instances are never required); a listed timer must be enabled.
+* every unit a running component's deploy.toml declares must exist in the
+  unit directory; a missing template (``x@.service``) is a fault only
+  while an instance of it is enabled or active (a second radiod's
+  ka9q-web@<id>); a listed timer must be enabled.
+* a component topology enables but whose main service is stopped (an
+  operator stopped it on purpose, as KFS-OMNI does hf-timestd) raises no
+  fault for its units, only one drift item naming the stopped service.
+  ``component_running`` is the one place that rule lives.
 * sigmond's own systemd/sigmond-*.{service,timer,path} must match the
   installed copies byte for byte.  Whether they are enabled stays out of
   scope: several install on purpose without enabling.
@@ -50,6 +55,27 @@ def _declared(base: Path, name: str) -> list:
     return component_state._systemd_unit_names(deploy or {})
 
 
+declared_units = _declared
+
+
+def main_service(units) -> "str | None":
+    """The first declared non-template ``.service``, or None."""
+    for u in units:
+        if u.endswith(".service") and "@." not in u:
+            return u
+    return None
+
+
+def component_running(units, enabled: bool,
+                      service_active: Callable[[str], bool]) -> bool:
+    """True when topology enables the component and its main service
+    (``main_service(units)``) is active, or it declares no such service."""
+    if not enabled:
+        return False
+    svc = main_service(units)
+    return svc is None or bool(service_active(svc))
+
+
 def _exists(unit_dir: Path, unit: str) -> bool:
     p = Path(unit_dir) / unit
     return p.exists() or p.is_symlink()
@@ -72,14 +98,24 @@ def _differs(src: Path, dst: Path) -> bool:
 def unit_items(base: Path, enabled: Mapping[str, bool], *,
                sigmond_repo: Path,
                unit_dir: Path = Path("/etc/systemd/system"),
-               is_enabled: Callable[[str], bool]) -> list:
+               is_enabled: Callable[[str], bool],
+               service_active: Callable[[str], bool],
+               template_instances: Callable[[str], int]) -> list:
     out = []
     unit_dir = Path(unit_dir)
     for name in sorted(enabled):
         units = _declared(base, name)
         if enabled[name]:
+            if not component_running(units, True, service_active):
+                svc = main_service(units)
+                out.append(Item("unit", "drift", svc,
+                                f"{name} is enabled but {svc} is not "
+                                "running", f"smd start {name}"))
+                continue
             for u in units:
                 if not _exists(unit_dir, u):
+                    if "@." in u and template_instances(u) <= 0:
+                        continue  # no instance needs the template
                     out.append(Item("unit", "fault", u,
                                     f"{name} declares {u}; not installed in "
                                     f"{unit_dir}", _APPLY))
@@ -87,7 +123,7 @@ def unit_items(base: Path, enabled: Mapping[str, bool], *,
                       and not is_enabled(u)):
                     out.append(Item("unit", "fault", u,
                                     f"{name} timer {u} is installed but not "
-                                    "enabled", f"smd enable {name}"))
+                                    "enabled", _APPLY))
         else:
             for u in units:
                 if ("@." not in u and _exists(unit_dir, u)

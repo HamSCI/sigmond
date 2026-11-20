@@ -10128,7 +10128,10 @@ def _align_drift_report(rel, plan, files, base):
         host_record=_align_json_file(
             Path('/etc/sigmond-appliance/host-aligned.json')),
         file_drift=files, manifest=dict(rel.components or {}),
-        base=Path(base))
+        base=Path(base),
+        # The decoder check compares against the commit sigmond builds from,
+        # never the checkout HEAD (W7WKR 2026-11-19: checkout ahead of pin).
+        native_pins=lambda: {n: _native_pin(n) for n in _native_constants()})
     return br.build(br.station_name(), readers=readers)
 
 

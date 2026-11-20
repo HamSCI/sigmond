@@ -50,6 +50,35 @@ def _systemctl_enabled(unit: str) -> bool:
     return r.returncode == 0
 
 
+def _systemctl_active(unit: str) -> bool:
+    try:
+        r = subprocess.run(["systemctl", "is-active", "--quiet", unit],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0
+
+
+def _systemctl_template_instances(template: str) -> int:
+    """How many instances of ``x@.service`` systemd has loaded: enabled
+    ones load at boot, so an enabled-but-stopped instance counts too."""
+    prefix, _, suffix = template.partition("@")
+    try:
+        r = subprocess.run(
+            ["systemctl", "list-units", "--all", "--no-legend", "--plain",
+             "--no-pager", f"{prefix}@*{suffix}"],
+            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    n = 0
+    for line in (r.stdout or "").splitlines():
+        parts = line.split()
+        if (parts and parts[0].startswith(prefix + "@")
+                and parts[0].endswith(suffix) and parts[0] != template):
+            n += 1
+    return n
+
+
 @dataclass
 class Readers:
     """Inputs of the six collectors (Tasks 2-6) and the exceptions file
@@ -70,6 +99,9 @@ class Readers:
     sigmond_repo: Optional[Path] = None  # default: base / "sigmond"
     unit_dir: Path = Path("/etc/systemd/system")
     is_enabled: Callable[[str], bool] = _systemctl_enabled
+    service_active: Callable[[str], bool] = _systemctl_active
+    template_instances: Callable[[str], int] = _systemctl_template_instances
+    native_pins: Any = field(default_factory=dict)  # source -> full sha
     # override (Task 5)
     client_configs: Any = field(default_factory=dict)
     catalog_override: Path = Path("/etc/sigmond/catalog.toml")
@@ -95,11 +127,14 @@ def build(station: str, *, readers: Readers) -> Report:
         ("build", lambda: build_items(base, list(_v(r.components) or ()),
                                       enabled=_v(r.enabled) or {},
                                       decoder_dir=Path(r.decoder_dir),
-                                      run=r.run, stamp_dir=r.stamp_dir)),
+                                      run=r.run, stamp_dir=r.stamp_dir,
+                                      native_pins=_v(r.native_pins) or {})),
         ("unit", lambda: unit_items(base, _v(r.enabled) or {},
                                     sigmond_repo=sigmond_repo,
                                     unit_dir=Path(r.unit_dir),
-                                    is_enabled=r.is_enabled)),
+                                    is_enabled=r.is_enabled,
+                                    service_active=r.service_active,
+                                    template_instances=r.template_instances)),
         ("override", lambda: override_items(
             client_configs=_v(r.client_configs) or {},
             catalog_override=r.catalog_override, pins_file=r.pins_file,
@@ -188,7 +223,8 @@ def _unit_refs(enabled: Callable[[], dict]) -> list:
 
 def station_readers(*, plan, release: Optional[str], baseline: str,
                     host_record, file_drift, manifest,
-                    base: Path = Path("/opt/git/sigmond")) -> Readers:
+                    base: Path = Path("/opt/git/sigmond"),
+                    native_pins: Any = None) -> Readers:
     """Readers for this station.  Everything not passed in is read lazily,
     inside the collector that needs it."""
     base = Path(base)
@@ -203,6 +239,7 @@ def station_readers(*, plan, release: Optional[str], baseline: str,
         plan=plan, release=release, baseline=baseline,
         host_record=host_record, file_drift=file_drift, manifest=manifest,
         base=base, components=lambda: _checkout_names(base),
+        native_pins=native_pins if native_pins is not None else {},
         enabled=enabled,
         client_configs=lambda: _client_configs(enabled),
         catalog_names=_catalog_names,
