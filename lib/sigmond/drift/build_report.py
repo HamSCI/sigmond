@@ -120,6 +120,9 @@ class Readers:
     gated: Any = field(default_factory=dict)
     device_ready: Callable = lambda name: None
     device_seen: Callable = lambda name: True
+    # units a component's own service profile leaves off (hf-timestd), or
+    # None when unknown (final review I1)
+    left_off: Callable = lambda name: None
     # exceptions (Task 7)
     exceptions_path: Optional[Path] = None  # default: the module's path
     now: Optional[datetime] = None
@@ -140,6 +143,16 @@ def build(station: str, *, readers: Readers) -> Report:
                 probed[name] = None
         return probed[name]
 
+    def left_off(name):
+        # Read once per report; a failed read keeps the old fault.
+        key = ("left_off", name)
+        if key not in probed:
+            try:
+                probed[key] = r.left_off(name)
+            except Exception:  # noqa: BLE001
+                probed[key] = None
+        return probed[key]
+
     def dormant() -> set:
         gated = _v(r.gated) or {}
         on = _v(r.enabled) or {}
@@ -159,7 +172,7 @@ def build(station: str, *, readers: Readers) -> Report:
                                     is_enabled=r.is_enabled,
                                     service_active=r.service_active,
                                     template_instances=r.template_instances,
-                                    dormant=dormant())),
+                                    dormant=dormant(), left_off=left_off)),
         ("unit", lambda: device_items(_v(r.enabled) or {},
                                       gated=_v(r.gated) or {},
                                       ready=ready,
@@ -268,6 +281,11 @@ def _device_seen(name: str) -> bool:
     return devices.seen_before(name)
 
 
+def _profile_left_off(base: Path, name: str):
+    from sigmond.drift.units import profile_left_off
+    return profile_left_off(base, name)[0]
+
+
 def station_readers(*, plan, release: Optional[str], baseline: str,
                     host_record, file_drift, manifest,
                     base: Path = Path("/opt/git/sigmond"),
@@ -300,7 +318,8 @@ def station_readers(*, plan, release: Optional[str], baseline: str,
         catalog_names=_catalog_names,
         unit_refs=lambda: _unit_refs(enabled),
         gated=_gated, device_ready=_device_ready,
-        device_seen=_device_seen)
+        device_seen=_device_seen,
+        left_off=lambda name: _profile_left_off(base, name))
 
 
 # ---------------------------------------------------------------------------

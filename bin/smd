@@ -9473,14 +9473,15 @@ def _align_device_steps(*, start: bool, base='/opt/git/sigmond') -> list:
 
 
 def _align_enable_declared_units(apply: bool, *, base='/opt/git/sigmond',
-                                 say=print, start_timers: bool = True) -> int:
-    """Link and enable the `[systemd] units` of every running component.
+                                 say=print, timers_out=None) -> int:
+    """Link and enable the declared `.timer` units of every running component.
 
-    A unit a component adds after its first install stayed disabled: only
+    A timer a component adds after its first install stayed disabled: only
     install.sh enabled units, and updates never re-run it (2026-11-19:
-    timestd-events.timer, hamsci-physics-iri-update.timer).  A component's
-    declared units are its intended state, so this enables
-    timestd-events.timer even where hf-timestd's install.sh withholds it.
+    timestd-events.timer, hamsci-physics-iri-update.timer).  Services stay
+    with the component's own install: on an rtp station hf-timestd's
+    profile keeps timestd-fusion.service off, and enabling every declared
+    unit would have switched it on (final review I1).
 
     A component qualifies when it has a catalog checkout under `base`,
     topology enables it, the site does not manage it by hand, and it runs
@@ -9490,16 +9491,22 @@ def _align_enable_declared_units(apply: bool, *, base='/opt/git/sigmond',
     report faults it, and align's install stages own the repair, so it is
     skipped here too.
 
-    Per component: deploy.toml links, then `installer.apply_systemd_enables`,
-    which enables (never starts) each non-template unit with an [Install]
-    section, and starts only a timer it enabled, and only with
-    ``start_timers`` (False under --no-restart: hf-timestd's watchdog
-    timers restart its recorder).  A unit a live `unit:` drift exception
-    covers stays as it is (B4 suspends HPPS by hand); an exceptions file
-    that cannot be read enables nothing.  A declared unit systemd does not
-    know goes unmentioned: the drift report faults it.  Dry run: one
-    `would enable <unit> (<component>)` line each, nothing changed.
-    Returns the units enabled, or that --apply would enable."""
+    hf-timestd decides which of its timers run (its service profile): a
+    timer `hf-timestd profile show --json` leaves off stays off.  When
+    that command fails or its JSON lacks the services map, nothing of
+    hf-timestd's is enabled, and one line says why.
+
+    Per component: deploy.toml links, then `installer.apply_systemd_enables`
+    over its timers, which enables (never starts) each one with an
+    [Install] section.  Nothing starts here: the timers this enables go
+    into ``timers_out``, and `_align_start_timers` starts them once the
+    restarts and checks are done (hf-timestd's watchdog timers restart its
+    recorder).  A unit a live `unit:` drift exception covers stays as it
+    is (B4 suspends HPPS by hand); an exceptions file that cannot be read
+    enables nothing.  A declared unit systemd does not know goes
+    unmentioned: the drift report faults it.  Dry run: one `would enable
+    <unit> (<component>)` line each, nothing changed.  Returns the units
+    enabled, or that --apply would enable."""
     from sigmond.catalog import load_catalog
     from sigmond.drift import build_report as drift_report
     from sigmond.drift import units as drift_units
@@ -9517,7 +9524,6 @@ def _align_enable_declared_units(apply: bool, *, base='/opt/git/sigmond',
         say(f'  declared units: {err}; none enabled')
         return 0
     count = 0
-    held = []
     for name in sorted(enabled):
         if not enabled[name] or name not in catalog or name in local:
             continue
@@ -9531,16 +9537,23 @@ def _align_enable_declared_units(apply: bool, *, base='/opt/git/sigmond',
         svc = drift_units.main_service(units)
         if svc is not None and not os.path.lexists(_ALIGN_UNIT_DIR / svc):
             continue
-        skip = {u for u in units if u in excepted}
-        for u in sorted(skip):
+        timers = [u for u in units if u.endswith('.timer') and '@.' not in u]
+        if not timers:
+            continue
+        off, why = drift_units.profile_left_off(base, name)
+        if off is None:
+            say(f'  {name}: declared timers not enabled: {why}')
+            continue
+        for u in sorted(u for u in timers if u in excepted):
             say(f'  {name}: left {u} as it is: a drift exception covers unit:{u}')
+        skip = {u for u in units if u not in timers or u in excepted or u in off}
         try:
             msgs = apply_deploy_toml_links(repo, dry_run=not apply)
             if apply and any(m.strip().startswith('linked ') for m in msgs):
                 subprocess.run(['systemctl', 'daemon-reload'], capture_output=True,
                                text=True, check=False, timeout=60)
             msgs += apply_systemd_enables(repo, dry_run=not apply,
-                                          start_timers=start_timers, skip=skip)
+                                          start_timers=False, skip=skip)
         except Exception as exc:                               # noqa: BLE001
             say(f'  {name}: declared units not enabled: {exc}')
             continue
@@ -9559,30 +9572,27 @@ def _align_enable_declared_units(apply: bool, *, base='/opt/git/sigmond',
                 say(f'  {name}: {msg}')
                 if msg.startswith('enabled '):
                     count += 1
-                    unit = msg.split()[1]
-                    if not start_timers and unit.endswith('.timer'):
-                        held.append(unit)
-    if held:
-        say(f'  not started (--no-restart): {", ".join(held)}; they start at the '
-            f'next boot, or with: systemctl start {" ".join(held)}')
+                    if timers_out is not None:
+                        timers_out.append(msg.split()[1])
     return count
 
 
-def _align_declared_units_steps(base, *, start_timers: bool) -> list:
+def _align_declared_units_steps(base, *, timers_out=None) -> list:
     """`_align_enable_declared_units` as one bring-up Step, or none when it
     had nothing to say.  Never blocking: a unit left disabled stays a
-    drift fault."""
+    drift fault.  The timers it enabled go into ``timers_out``."""
     from sigmond import align_apply
     lines = []
     if _align_enable_declared_units(True, base=base, say=lines.append,
-                                    start_timers=start_timers) or lines:
+                                    timers_out=timers_out) or lines:
         return [align_apply.Step('declared units', 'ran',
                                  '; '.join(ln.strip() for ln in lines))]
     return []
 
 
 def _align_bringup(*, run=subprocess.run, say=print, site_timing_refreshed: bool = False,
-                   base='/opt/git/sigmond', start_timers: bool = True) -> list:
+                   base='/opt/git/sigmond', start_timers: bool = True,
+                   timers_out=None) -> list:
     """Re-run bring-up's own steps, in bring-up's own order, stopping at
     the first failure: `sigmond-site-timing`, `config render --if-present`,
     `admin uploader manifest --write` (never `--enable`: whether to
@@ -9677,11 +9687,13 @@ def _align_bringup(*, run=subprocess.run, say=print, site_timing_refreshed: bool
 
     # After config render: a unit may need what the render writes.  Bring-up
     # runs only after clean moves and image refresh, so the caller's
-    # ``start_timers`` is just "not --no-restart".  Device clients first: a
-    # client switched off for a device never seen then reads stopped, and
-    # the declared-units step leaves it.
+    # ``start_timers`` is just "not --no-restart"; it steers the device
+    # step only.  Declared timers are enabled here and started after the
+    # restarts (``timers_out``, `_align_start_timers`).  Device clients
+    # first: a client switched off for a device never seen then reads
+    # stopped, and the declared-units step leaves it.
     steps += _align_device_steps(start=start_timers, base=base)
-    steps += _align_declared_units_steps(base, start_timers=start_timers)
+    steps += _align_declared_units_steps(base, timers_out=timers_out)
 
     try:
         before = um.MANIFEST_PATH.read_bytes()
@@ -10045,14 +10057,17 @@ def _align_apply(args) -> int:
             native_failed = _align_native_decoders(
                 True, base, covered={s.component for s in steps
                                      if getattr(s, 'built', False)})
-        rc = _align_make_live(args, rel, steps, base=base, catalog=catalog, now=_now)
+        declared_timers: list = []
+        rc = _align_make_live(args, rel, steps, base=base, catalog=catalog, now=_now,
+                              timers_out=declared_timers)
         rc = rc or (1 if native_failed or pins_failed else 0)
         # Final review I1: the timers start only once the bring-up and its
         # restarts are done.  The location-check service re-renders and can
         # restart recorders; started before _align_make_live, its first
         # tick (OnActiveSec=2min) landed mid-bring-up.
         if own_units:
-            _align_start_timers(rc=rc, no_restart=bool(getattr(args, 'no_restart', False)))
+            _align_start_timers(rc=rc, no_restart=bool(getattr(args, 'no_restart', False)),
+                                declared=declared_timers)
         return rc
 
 
@@ -10090,7 +10105,7 @@ def _align_own_units(sigmond_repo, *, unit_dir=Path('/etc/systemd/system'),
 
 def _align_start_timers(*, rc: int, no_restart: bool,
                         unit_dir=None, run=None,
-                        exceptions_path=None) -> None:
+                        exceptions_path=None, declared=()) -> None:
     """After `_align_make_live`: enable and start the daily drift timer (an
     enabled timer that was never started does not fire until a reboot), and
     the location-check timer.  The location-check service can restart
@@ -10105,11 +10120,17 @@ def _align_start_timers(*, rc: int, no_restart: bool,
     timer arrived never ran that enable.  A timer already enabled, not
     installed, or covered by a live `unit:` drift exception stays as it is.
     It starts only on a clean run without --no-restart, as above: several
-    (sdr-recover, storage, timing-reconcile) act on the station."""
+    (sdr-recover, storage, timing-reconcile) act on the station.
+
+    ``declared``: the component timers bring-up enabled this run
+    (`_align_enable_declared_units`), started here on the same terms, never
+    mid-bring-up: hf-timestd's watchdog timers restart its recorder."""
     run = run or subprocess.run
     unit_dir = Path(unit_dir) if unit_dir is not None else _ALIGN_UNIT_DIR
     _align_enable_own_timers(rc=rc, no_restart=no_restart, unit_dir=unit_dir,
                              run=run, exceptions_path=exceptions_path)
+    _align_start_declared_timers(declared, start=rc == 0 and not no_restart,
+                                 no_restart=no_restart, run=run)
     if (Path(unit_dir) / _ALIGN_DRIFT_TIMER).is_file():
         r = _align_run(['systemctl', 'enable', '--now', _ALIGN_DRIFT_TIMER],
                        run=run, timeout=60,
@@ -10130,6 +10151,26 @@ def _align_start_timers(*, rc: int, no_restart: bool,
             print(f'  {_ALIGN_LOCATION_TIMER} enabled but not started ({why}): '
                   f'it can restart recorders; it starts at the next boot, or '
                   f'with: systemctl start {_ALIGN_LOCATION_TIMER}')
+
+
+def _align_start_declared_timers(timers, *, start: bool, no_restart: bool,
+                                 run) -> None:
+    """Start the component timers bring-up enabled, or name them held."""
+    timers = list(dict.fromkeys(timers or ()))
+    if not timers:
+        return
+    if not start:
+        why = '--no-restart' if no_restart else 'align did not finish cleanly'
+        print(f'  not started ({why}): {", ".join(timers)}; they start at the '
+              f'next boot, or with: systemctl start {" ".join(timers)}')
+        return
+    for timer in timers:
+        r = _align_run(['systemctl', 'start', timer], run=run, timeout=60,
+                       action=f'systemctl start {timer}')
+        if r.returncode != 0:
+            print(f'  could not start {timer}: {(r.stderr or "").strip()}')
+        else:
+            print(f'  started {timer}')
 
 
 def _align_unit_needs_enable(unit: str, run) -> bool:
@@ -10246,7 +10287,8 @@ def _align_report_stale_after_failure(move_steps, *, base, catalog, say=print) -
     return names
 
 
-def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
+def _align_make_live(args, rel, move_steps, *, base, catalog, now,
+                     timers_out=None) -> int:
     """Everything `--apply` does after the moves, in order (Plan 2b):
 
     image-file refresh -> bring-up re-runs -> records -> restart of stale
@@ -10324,7 +10366,7 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
             _start = not getattr(args, 'no_restart', False)
             _align_print_steps(_align_device_steps(start=_start, base=base))
             _align_print_steps(_align_declared_units_steps(
-                base, start_timers=_start))
+                base, timers_out=timers_out))
             # Still route: this retries a routing run that failed on an
             # earlier align or update (uniform routing, ruling R7).
             routing_step = _align_routing()
@@ -10333,7 +10375,8 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
 
     bringup_steps = _align_bringup(site_timing_refreshed=any(
         s.component == _ALIGN_SITE_TIMING and s.outcome == 'refreshed' for s in image_steps),
-        base=base, start_timers=not getattr(args, 'no_restart', False))
+        base=base, start_timers=not getattr(args, 'no_restart', False),
+        timers_out=timers_out)
     _align_print_steps(bringup_steps)
     steps = move_steps + image_steps + bringup_steps
     if any(s.outcome in ('failed', 'refused') for s in bringup_steps):

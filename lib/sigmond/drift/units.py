@@ -3,7 +3,8 @@
 * every unit a running component's deploy.toml declares must exist in the
   unit directory; a missing template (``x@.service``) is a fault only
   while an instance of it is enabled or active (a second radiod's
-  ka9q-web@<id>); a listed timer must be enabled.
+  ka9q-web@<id>); a listed timer must be enabled, unless the component's
+  own service profile leaves it off (hf-timestd, ``profile_left_off``).
 * a component topology enables but whose main service is stopped (an
   operator stopped it on purpose, as KFS-OMNI does hf-timestd) raises no
   fault for its units, only one drift item naming the stopped service.
@@ -112,6 +113,51 @@ def component_running(units, enabled: bool,
     return svc is None or bool(service_active(svc))
 
 
+# hf-timestd decides for itself which of its units run: its service profile
+# (archive, rtp, fusion, full) and [services] overrides.  On an rtp station
+# the profile leaves timestd-fusion.service and timestd-chrony-monitor.timer
+# off, so neither align nor the drift report may treat them as wanted.
+HF_TIMESTD = "hf-timestd"
+
+
+def profile_left_off(base: Path, name: str, *, run=None) -> tuple:
+    """(the declared units the component's own service profile leaves off,
+    None), or (None, why) when that cannot be read.
+
+    Only hf-timestd has a profile: `<base>/hf-timestd/venv/bin/hf-timestd
+    profile show --json` (hf-timestd cli.py), whose "services" map holds a
+    row per service with "enabled" and "unit".  Another component leaves
+    nothing off.  A caller that gets None fails closed (align enables
+    nothing for hf-timestd) or keeps its old behaviour (the drift report)."""
+    import json
+    if name != HF_TIMESTD:
+        return frozenset(), None
+    run = run or subprocess.run
+    binary = Path(base) / name / "venv" / "bin" / "hf-timestd"
+    if not binary.is_file():
+        return None, f"no {binary} to read its service profile"
+    try:
+        r = run([str(binary), "profile", "show", "--json"],
+                capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"hf-timestd profile show failed ({exc})"
+    if r.returncode != 0:
+        why = ((r.stderr or "").strip().splitlines() or [""])[-1]
+        return None, (f"hf-timestd profile show failed (exit {r.returncode})"
+                      + (f": {why}" if why else ""))
+    try:
+        rows = json.loads(r.stdout or "")["services"]
+        off = set()
+        for row in rows.values():
+            if not isinstance(row["enabled"], bool) or not isinstance(row["unit"], str):
+                raise TypeError("a service row lacks enabled/unit")
+            if not row["enabled"] and row["unit"]:
+                off.add(row["unit"])
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        return None, f"hf-timestd profile show --json unreadable ({exc})"
+    return off, None
+
+
 def _exists(unit_dir: Path, unit: str) -> bool:
     p = Path(unit_dir) / unit
     return p.exists() or p.is_symlink()
@@ -137,8 +183,13 @@ def unit_items(base: Path, enabled: Mapping[str, bool], *,
                is_enabled: Callable[[str], bool],
                service_active: Callable[[str], bool],
                template_instances: Callable[[str], int],
-               dormant=frozenset()) -> list:
-    """``dormant``: components whose local device reads absent (v3.94
+               dormant=frozenset(),
+               left_off: Callable[[str], "set | None"] = lambda name: None) -> list:
+    """``left_off(name)``: the units the component's own service profile
+    leaves off (`profile_left_off`), or None when unknown.  An installed
+    timer it names raises no "not enabled" fault.
+
+    ``dormant``: components whose local device reads absent (v3.94
     Task 8).  A stopped one raises no "not running" drift: `smd start`
     refuses it, and `smd check` reads it "dormant" (or the device
     collector faults it, when it recorded from the device before)."""
@@ -166,6 +217,7 @@ def unit_items(base: Path, enabled: Mapping[str, bool], *,
                                     f"{name} declares {u}; not installed in "
                                     f"{unit_dir}", _APPLY))
                 elif (u.endswith(".timer") and "@." not in u
+                      and u not in (left_off(name) or ())
                       and not is_enabled(u)):
                     out.append(Item("unit", "fault", u,
                                     f"{name} timer {u} is installed but not "

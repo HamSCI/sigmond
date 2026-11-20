@@ -92,9 +92,6 @@ def _drive(*, dry=False, active=True, enabled=True, unit_file=True,
         st.enter_context(mock.patch.object(smd, "_align_run", fake_align_run))
         st.enter_context(mock.patch.object(smd, "_align_own_units",
                                            lambda *a, **k: []))
-        if not own_timers:
-            st.enter_context(mock.patch.object(smd, "_align_start_timers",
-                                               lambda **k: None))
         if quiet:
             st.enter_context(mock.patch.object(smd, "_align_aligned_release",
                                                lambda: smd._align_record_key(REL)))
@@ -312,3 +309,175 @@ def test_masked_timer_silent():
     calls = _timers(masked={"sigmond-storage.timer"}, out=out)
     assert "sigmond-storage.timer" not in _enabled_by(calls)
     assert "could not enable" not in out.getvalue()
+
+
+# --- final review I1: timers only; hf-timestd's own service profile ----------
+
+_HF_DEPLOY = ('[systemd]\nunits = ["timestd-core-recorder.service", '
+              '"timestd-fusion.service", "timestd-chrony-monitor.timer", '
+              '"timestd-events.timer"]\n')
+_SERVICE = "[Service]\nExecStart=/bin/true\n\n[Install]\nWantedBy=multi-user.target\n"
+
+
+def _profile_json(off):
+    """`hf-timestd profile show --json` as service_profile.summary() writes
+    it (hf-timestd src/hf_timestd/cli.py, `profile show`)."""
+    import json
+    units = {"core_recorder": "timestd-core-recorder.service",
+             "fusion": "timestd-fusion.service",
+             "chrony_monitor": "timestd-chrony-monitor.timer",
+             "prune": "timestd-prune.timer"}
+    return json.dumps({
+        "profile": "rtp", "description": "x", "vtec_available": False,
+        "services": {k: {"enabled": u not in off, "source": "profile", "unit": u,
+                         "systemd": {}}
+                     for k, u in units.items()}})
+
+
+def _drive_hf(*, profile=None, profile_rc=0, dry=False, no_restart=False,
+              stale=True, aligned_rc=None):
+    """cmd_align on a station whose hf-timestd runs the rtp profile: the
+    profile leaves timestd-fusion.service and timestd-chrony-monitor.timer
+    off.  Every declared unit reads disabled but the running main service.
+    Returns (calls, out); a ["RESTART"] entry marks the restart stage."""
+    profile = _profile_json({"timestd-fusion.service", "timestd-chrony-monitor.timer"}) \
+        if profile is None else profile
+    calls = []
+
+    def fake_run(argv, **kw):
+        argv = [str(a) for a in argv]
+        calls.append(argv)
+        if argv[-3:] == ["profile", "show", "--json"]:
+            return subprocess.CompletedProcess(argv, profile_rc, profile, "boom")
+        if argv[:2] == ["systemctl", "is-active"]:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[:2] == ["systemctl", "is-enabled"]:
+            state = "enabled" if argv[-1] == "timestd-core-recorder.service" else "disabled"
+            return subprocess.CompletedProcess(argv, 0 if state == "enabled" else 1,
+                                               state + "\n", "")
+        if argv[:2] == ["systemctl", "cat"]:
+            return subprocess.CompletedProcess(
+                argv, 0, _TIMER if argv[-1].endswith(".timer") else _SERVICE, "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    def fake_align_run(argv, *, run, timeout, action, **kw):
+        if argv[0] == "systemctl":
+            return fake_run(argv)
+        return subprocess.CompletedProcess(list(argv), 0, "", "")
+
+    from tests.test_align_cli import _staleness
+    out = io.StringIO()
+    with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as st:
+        base = Path(tmp)
+        repo = base / "hf-timestd"
+        (repo / "venv" / "bin").mkdir(parents=True)
+        (repo / "venv" / "bin" / "hf-timestd").write_text("#!/bin/sh\n")
+        (repo / "deploy.toml").write_text(_HF_DEPLOY)
+        unit_dir = base / "etc-systemd"
+        unit_dir.mkdir()
+        for u in ("timestd-core-recorder.service", "timestd-fusion.service"):
+            (unit_dir / u).write_text(_SERVICE)
+        for u in ("timestd-chrony-monitor.timer", "timestd-events.timer"):
+            (unit_dir / u).write_text(_TIMER)
+        st.enter_context(mock.patch("sigmond.drift.exceptions.DEFAULT_PATH",
+                                    base / "drift-exceptions.toml"))
+        st.enter_context(mock.patch("sigmond.archive.CONFIG", base / "archive.toml"))
+        real_bringup = smd._align_bringup
+        _apply_patches(st, rel=REL, live={"sigmond": "daba1f6"})
+        st.enter_context(mock.patch.object(smd, "_align_bringup", real_bringup))
+        st.enter_context(mock.patch.object(smd, "_align_run", fake_align_run))
+        st.enter_context(mock.patch.object(smd, "_align_own_units", lambda *a, **k: []))
+        st.enter_context(mock.patch.object(smd, "_ALIGN_UNIT_DIR", unit_dir))
+        st.enter_context(mock.patch("sigmond.catalog.load_catalog",
+                                    return_value={"hf-timestd": object()}))
+        st.enter_context(mock.patch("sigmond.drift.build_report.topology_enabled",
+                                    return_value={"hf-timestd": True}))
+        st.enter_context(mock.patch("sigmond.uploader_manifest.MANIFEST_PATH",
+                                    base / "pipelines.toml"))
+        st.enter_context(mock.patch("subprocess.run", fake_run))
+        st.enter_context(mock.patch("sigmond.align_apply.apply_plan",
+                                    return_value=[align_apply.Step("sigmond", "current")]))
+        st.enter_context(mock.patch.object(
+            smd, "_align_staleness",
+            lambda *a, **k: _staleness(stale={"hf-timestd": "moved"} if stale else {},
+                                       running={"hf-timestd"})))
+        st.enter_context(mock.patch.object(
+            smd, "_align_restart",
+            lambda *a, **k: calls.append(["RESTART"]) or [
+                align_apply.Step("hf-timestd", "restarted")]))
+        if aligned_rc is not None:
+            real_live = smd._align_make_live
+            st.enter_context(mock.patch.object(
+                smd, "_align_make_live",
+                lambda *a, **k: (real_live(*a, **k), aligned_rc)[1]))
+        with contextlib.redirect_stdout(out):
+            smd.cmd_align(_apply_args(tmp, apply=not dry, no_restart=no_restart))
+    return calls, out.getvalue()
+
+
+def _enabled_units(calls):
+    return {c[-1] for c in calls if c[:2] == ["systemctl", "enable"]}
+
+
+def test_rtp_profile_keeps_left_off_units_off():
+    calls, out = _drive_hf()
+    enabled = _enabled_units(calls)
+    assert "timestd-events.timer" in enabled, out
+    assert "timestd-chrony-monitor.timer" not in enabled, out
+    assert "timestd-fusion.service" not in enabled, out
+    # Services stay with the component's install: never enabled here.
+    assert not any(u.endswith(".service") for u in enabled), out
+
+
+def test_declared_timer_starts_only_after_the_restarts():
+    calls, out = _drive_hf()
+    assert ["systemctl", "enable", "--now", "timestd-events.timer"] not in calls, out
+    restart = calls.index(["RESTART"])
+    enable = calls.index(["systemctl", "enable", "timestd-events.timer"])
+    start = calls.index(["systemctl", "start", "timestd-events.timer"])
+    assert enable < restart < start, out
+
+
+def test_dry_run_names_only_the_timer_the_profile_keeps():
+    calls, out = _drive_hf(dry=True)
+    assert "would enable timestd-events.timer (hf-timestd)" in out
+    assert "would enable timestd-chrony-monitor.timer" not in out
+    assert "would enable timestd-fusion.service" not in out
+    assert _mutating(calls) == []
+
+
+def test_profile_command_failure_enables_nothing_for_hf_timestd():
+    calls, out = _drive_hf(profile_rc=1, profile="")
+    assert not {u for u in _enabled_units(calls) if u.startswith("timestd-")}, out
+    lines = [ln for ln in out.splitlines() if "profile" in ln and "hf-timestd" in ln]
+    assert len(lines) == 1, out
+
+
+def test_profile_json_without_services_enables_nothing():
+    calls, out = _drive_hf(profile='{"profile": "rtp"}')
+    assert not {u for u in _enabled_units(calls) if u.startswith("timestd-")}, out
+
+
+def test_dirty_run_starts_no_declared_timer():
+    calls, out = _drive_hf(aligned_rc=1)
+    assert ["systemctl", "enable", "timestd-events.timer"] in calls, out
+    assert ["systemctl", "start", "timestd-events.timer"] not in calls, out
+    assert "not started (align did not finish cleanly): timestd-events.timer" in out
+
+
+def test_profile_reader_parses_hf_timestd_json():
+    from sigmond.drift import units as drift_units
+    with tempfile.TemporaryDirectory() as tmp:
+        b = Path(tmp) / "hf-timestd" / "venv" / "bin"
+        b.mkdir(parents=True)
+        (b / "hf-timestd").write_text("")
+        ok = lambda argv, **kw: subprocess.CompletedProcess(
+            argv, 0, _profile_json({"timestd-chrony-monitor.timer"}), "")
+        off, err = drift_units.profile_left_off(Path(tmp), "hf-timestd", run=ok)
+        assert err is None
+        assert off == {"timestd-chrony-monitor.timer"}
+        bad = lambda argv, **kw: subprocess.CompletedProcess(argv, 0, "not json", "")
+        off, err = drift_units.profile_left_off(Path(tmp), "hf-timestd", run=bad)
+        assert off is None and err
+        # Another component has no profile: nothing left off.
+        assert drift_units.profile_left_off(Path(tmp), "x", run=bad) == (frozenset(), None)

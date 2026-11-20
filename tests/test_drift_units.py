@@ -296,3 +296,32 @@ def test_enabled_component_with_main_service_missing_faults(env):
                  service_active=lambda s: False)
     assert [(i.severity, i.subject, i.fix) for i in got] == [
         ("fault", "timestd-core-recorder.service", "smd align --apply")]
+
+
+def test_timer_the_hf_timestd_profile_leaves_off_is_no_fault(tmp_path):
+    """Final review I1: on an rtp station hf-timestd's profile leaves
+    timestd-chrony-monitor.timer off; the drift report must not fault it."""
+    from sigmond.drift.units import unit_items
+    base = tmp_path / "base"
+    (base / "hf-timestd").mkdir(parents=True)
+    (base / "hf-timestd" / "deploy.toml").write_text(
+        '[systemd]\nunits = ["timestd-core-recorder.service", '
+        '"timestd-chrony-monitor.timer", "timestd-events.timer"]\n')
+    unit_dir = tmp_path / "units"
+    unit_dir.mkdir()
+    for u in ("timestd-core-recorder.service", "timestd-chrony-monitor.timer",
+              "timestd-events.timer"):
+        (unit_dir / u).write_text("x")
+    repo = tmp_path / "sigmond"
+    (repo / "systemd").mkdir(parents=True)
+    kw = dict(sigmond_repo=repo, unit_dir=unit_dir, is_enabled=lambda u: False,
+              service_active=lambda u: True, template_instances=lambda t: 0)
+    left = {"hf-timestd": {"timestd-chrony-monitor.timer"}}
+    items = unit_items(base, {"hf-timestd": True},
+                       left_off=lambda name: left.get(name, frozenset()), **kw)
+    subjects = {i.subject for i in items}
+    assert "timestd-chrony-monitor.timer" not in subjects
+    assert "timestd-events.timer" in subjects
+    # The reader failed (None): the fault stays, as before.
+    items = unit_items(base, {"hf-timestd": True}, left_off=lambda name: None, **kw)
+    assert "timestd-chrony-monitor.timer" in {i.subject for i in items}
