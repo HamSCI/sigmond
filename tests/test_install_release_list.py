@@ -460,7 +460,7 @@ def test_single_client_dirty_checkout_refuses_before_change(tmp_path):
     rc, install, root = _single(_args(client=entry.name, release_list=path),
                                 entry, base)
     assert rc == 1
-    assert not install.called and not root.called
+    assert not install.called      # refused after elevation, before any change
     assert _git(repo, "rev-parse", "HEAD") == c2
 
 
@@ -537,3 +537,90 @@ def test_uvlock_change_on_a_checkout_that_must_move_is_refused(tmp_path):
     assert errors
     assert not rec.ran("fetch") and not rec.ran("checkout")
     assert (repo / "uv.lock").read_text() == "edited\n"
+
+
+# --- security round 1: S1 (no link followed as root), S2 (git as owner) ------
+
+@pytest.mark.parametrize("planted", [".pin", ".git/info", ".git/info/exclude"])
+def test_symlink_in_the_pin_path_refuses_and_writes_nothing(tmp_path, planted):
+    origin, c1, c2 = _origin_with_two_commits(tmp_path)
+    base = tmp_path / "base"
+    repo = _clone(origin, base)
+    victim_dir = tmp_path / "victim"
+    victim_dir.mkdir()
+    victim = victim_dir / "exclude"
+    victim.write_text("root's file\n")
+    target = repo / planted
+    if target.is_dir():
+        import shutil
+        shutil.rmtree(target)
+    elif target.exists():
+        target.unlink()
+    target.symlink_to(victim_dir if planted == ".git/info" else victim)
+    errors = smd._write_release_pins(_rl(**{"ka9q-python": c2}), base)
+    assert len(errors) == 1 and "symlink" in errors[0]
+    assert victim.read_text() == "root's file\n"
+    assert sorted(p.name for p in victim_dir.iterdir()) == ["exclude"]
+    assert not (repo / ".pin").is_file() or (repo / ".pin").is_symlink()
+
+
+def test_pin_written_with_info_missing(tmp_path):
+    import shutil
+    origin, c1, c2 = _origin_with_two_commits(tmp_path)
+    base = tmp_path / "base"
+    repo = _clone(origin, base)
+    shutil.rmtree(repo / ".git" / "info")
+    assert smd._write_release_pins(_rl(**{"ka9q-python": c2}), base) == []
+    assert (repo / ".pin").read_text() == c2 + "\n"
+    assert (repo / ".git" / "info" / "exclude").read_text() == ".pin\n"
+
+
+def test_read_only_queries_run_through_the_owner_path(tmp_path):
+    """Every git command in the seat and the pin pass, the reads included,
+    goes through as_owner: root never runs repo config (fsmonitor, hooks)
+    in a checkout another account owns."""
+    origin, c1, c2 = _origin_with_two_commits(tmp_path)
+    base = tmp_path / "base"
+    _clone(origin, base)
+    through_owner = []
+
+    def as_owner(owner, argv):
+        through_owner.append(list(argv))
+        return argv
+
+    rec = _Recorder()
+    rl = _rl(**{"ka9q-python": c1})
+    assert smd._seat_listed_checkouts(rl, base, run=rec, as_owner=as_owner) == []
+    assert smd._write_release_pins(rl, base, run=rec, as_owner=as_owner) == []
+    git_calls = [a for a in rec.argvs if a and a[0] == "git"]
+    assert git_calls and git_calls == through_owner
+    for verb in ("status", "rev-parse", "for-each-ref", "fetch", "checkout"):
+        assert any(verb in a for a in through_owner), verb
+
+
+def test_root_refuses_git_in_a_checkout_whose_owner_it_cannot_name(tmp_path):
+    origin, c1, c2 = _origin_with_two_commits(tmp_path)
+    base = tmp_path / "base"
+    _clone(origin, base)
+    rec = _Recorder()
+    with mock.patch.object(smd.os, "geteuid", return_value=4242424):
+        errors = smd._seat_listed_checkouts(_rl(**{"ka9q-python": c1}), base,
+                                            run=rec)
+    assert errors and "only root or that owner" in errors[0]
+    assert rec.argvs == []
+
+
+def test_root_runs_git_as_the_owner_by_default(tmp_path):
+    origin, c1, c2 = _origin_with_two_commits(tmp_path)
+    base = tmp_path / "base"
+    _clone(origin, base)
+    seen = []
+
+    def run(argv, *a, **kw):
+        seen.append(list(argv))
+        return subprocess.run(argv[argv.index("--") + 1:], *a, **kw)
+
+    with mock.patch.object(smd.os, "geteuid", return_value=0):
+        smd._seat_listed_checkouts(_rl(**{"ka9q-python": c1}), base,
+                                   run=run, check_only=True)
+    assert seen and all(a[:2] == ["runuser", "-u"] for a in seen)

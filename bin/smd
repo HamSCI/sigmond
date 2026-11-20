@@ -14543,14 +14543,16 @@ def _install_single_client_run(args) -> int:
 
     # --release-list: wd-rac has no checkout, and ka9q-radio refuses below
     # whatever the list says, so neither needs a row.  Every other path
-    # checks its row and the station's checkouts here, reading only, then
-    # seats them (_release_begin) just before its first change.
+    # checks its row here.  The checkouts are checked by _release_begin,
+    # after elevation (git runs as each checkout's owner, which takes
+    # root) and before the path's first change: its first pass refuses
+    # the whole run before its second moves anything.
     release_rows = rl is not None and entry.name not in ('wd-rac', 'ka9q-radio')
     if release_rows:
         native = entry.name in _NATIVE_NAMES
         if _release_install_check(rl, [] if native else [entry],
                                   {entry.name} if native else set(),
-                                  catalog, pull=pull):
+                                  catalog, pull=pull, checkouts=False):
             return 1
         import dataclasses as _dc
         catalog = _catalog_at_release(catalog, rl)
@@ -14857,29 +14859,64 @@ def _release_checkouts(rl, base: Path) -> list:
     return out
 
 
+def _release_owner(repo: Path):
+    """(name, uid) of the account that owns checkout ``repo``, by lstat."""
+    import pwd as _pwd
+    uid = os.lstat(repo).st_uid
+    try:
+        return _pwd.getpwuid(uid).pw_name, uid
+    except KeyError:
+        return '', uid
+
+
+def _release_owner_run(repo: Path, run, as_owner):
+    """``run`` for git in ``repo``, as the checkout's owner.
+
+    Even a read-only git command runs repo config (core.fsmonitor, hooks,
+    filters), so root never runs one in a checkout another account owns:
+    as root every argv goes through ``as_owner`` (runuser -u <owner>).  A
+    caller who owns the checkout runs it directly.  Anyone else is refused
+    with ApplyError.  Tests pass their own ``as_owner``."""
+    from sigmond import align_apply
+    owner, uid = _release_owner(repo)
+    if as_owner is None:
+        if os.geteuid() == uid:
+            return owner, run
+        if os.geteuid() != 0 or not owner:
+            raise align_apply.ApplyError(
+                f'{repo}: owned by uid {uid}; only root or that owner may '
+                f'run git in it')
+        as_owner = align_apply._default_as_owner
+
+    def orun(argv, *a, **kw):
+        return run(as_owner(owner, argv), *a, **kw)
+    return owner, orun
+
+
 def _release_head(repo: Path, run) -> str:
+    """HEAD of ``repo``; ``run`` is already the owner's (_release_owner_run)."""
     from sigmond import align_apply
     r = run(align_apply.git(repo, 'rev-parse', 'HEAD'),
             capture_output=True, text=True, timeout=30)
     return (r.stdout or '').strip() if r.returncode == 0 else ''
 
 
-def _release_unshallow(repo: Path, row: str, owner: str, run, as_owner) -> None:
+def _release_unshallow(repo: Path, row: str, orun) -> None:
     """A --depth 1 clone (sigmond#13: install.sh pre-clones that way) lacks
     an older row even after a fetch; deepen it, as the owner, only then."""
     from sigmond import align_apply
     try:
-        align_apply.resolve(repo, row, run=run)
+        align_apply.resolve(repo, row, run=orun)
         return
     except align_apply.ApplyError:
         pass
-    r = run(align_apply.git(repo, 'rev-parse', '--is-shallow-repository'),
-            capture_output=True, text=True, timeout=30)
+    r = orun(align_apply.git(repo, 'rev-parse', '--is-shallow-repository'),
+             capture_output=True, text=True, timeout=30)
     if (r.stdout or '').strip() == 'true':
-        run(as_owner(owner, align_apply.git(repo, 'fetch', '--unshallow', 'origin')),
-            capture_output=True, text=True, timeout=300,
-            stdin=subprocess.DEVNULL,
-            env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'})
+        orun(align_apply.git(repo, 'fetch', '--unshallow', 'origin'),
+             capture_output=True, text=True, timeout=300,
+             stdin=subprocess.DEVNULL,
+             env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'})
 
 
 def _seat_listed_checkouts(rl, base: Path, *, pull: bool = True,
@@ -14894,15 +14931,17 @@ def _seat_listed_checkouts(rl, base: Path, *, pull: bool = True,
     origin branch contains (local commits), or, under --no-pull, lacks its
     row.  Only a clean first pass lets the second fetch and check out.
     ``check_only`` stops after the first pass (a dry run, and the install's
-    refusals before its first change)."""
+    refusals before its first change).  Every git command, the reads
+    included, runs as the checkout's owner (_release_owner_run)."""
     from sigmond import align_apply
-    kw = {} if as_owner is None else {'as_owner': as_owner}
+    identity = lambda _owner, argv: argv          # orun already switched user
     todo, errors = [], []
     for name, row, repo in _release_checkouts(rl, base):
         try:
-            dirty = [f for f in align_apply.dirty_files(repo, run=run)
+            owner, orun = _release_owner_run(repo, run, as_owner)
+            dirty = [f for f in align_apply.dirty_files(repo, run=orun)
                      if f != '.pin']
-            head = _release_head(repo, run)
+            head = _release_head(repo, orun)
             # A uv.lock that an install's `uv sync` rewrote, in a checkout
             # already at its row, is install churn (align discards it too):
             # nothing here moves that checkout, so the next bring-up step
@@ -14914,7 +14953,7 @@ def _seat_listed_checkouts(rl, base: Path, *, pull: bool = True,
                 continue
             if head == row:
                 continue
-            if not head or not align_apply.in_origin_history(repo, head, run=run):
+            if not head or not align_apply.in_origin_history(repo, head, run=orun):
                 errors.append(f'{name}: {repo} sits at {head[:12] or "?"}, '
                               f'which no origin branch holds (local commits?) '
                               f'- push or move them; --release-list never '
@@ -14922,59 +14961,113 @@ def _seat_listed_checkouts(rl, base: Path, *, pull: bool = True,
                 continue
             if not pull:
                 try:
-                    align_apply.resolve(repo, row, run=run)
+                    align_apply.resolve(repo, row, run=orun)
                 except align_apply.ApplyError:
                     errors.append(f'{name}: row {row[:12]} is not in {repo}, '
                                   f'and --no-pull fetches nothing')
                     continue
-        except align_apply.ApplyError as exc:
+        except (align_apply.ApplyError, OSError) as exc:
             errors.append(f'{name}: {exc}')
             continue
-        todo.append((name, row, repo))
+        todo.append((name, row, repo, owner, orun))
     if errors or check_only:
         return errors
-    for name, row, repo in todo:
-        try:
-            owner = repo.owner()
-        except (KeyError, OSError):
-            owner = ''
+    for name, row, repo, owner, orun in todo:
         try:
             if pull:
-                align_apply.fetch(repo, owner, run=run, **kw)
-                _release_unshallow(repo, row, owner, run,
-                                   as_owner or align_apply._default_as_owner)
-            full = align_apply.resolve(repo, row, run=run)
-            align_apply.checkout(repo, owner, full, run=run, **kw)
+                align_apply.fetch(repo, owner, run=orun, as_owner=identity)
+                _release_unshallow(repo, row, orun)
+            full = align_apply.resolve(repo, row, run=orun)
+            align_apply.checkout(repo, owner, full, run=orun, as_owner=identity)
             _ok(f'{name}: at release row {row[:12]}')
         except align_apply.ApplyError as exc:
             errors.append(f'{name}: {exc}')
     return errors
 
 
-def _write_release_pins(rl, base: Path, *, run=subprocess.run) -> list:
+def _release_write_pin(repo: Path, row: str) -> None:
+    """Write ``repo/.pin`` and list it in ``.git/info/exclude``, as root,
+    without following a link the checkout's owner planted.
+
+    Refuses (OSError, nothing written) when the checkout, .git, .git/info,
+    exclude or .pin is a symlink, or when .git or .git/info belongs to
+    anyone but the checkout's owner.  The writes go through
+    sigmond.safe_write: an O_NOFOLLOW directory descriptor, a fresh
+    O_EXCL temp file fchown'd to the directory's owner, then rename."""
+    import errno as _errno
+    import stat as _stat
+    from sigmond.safe_write import _open_parent, rewrite_owned, write_owned
+    git_dir = repo / '.git'
+    info = git_dir / 'info'
+    for p in (repo, git_dir, info, info / 'exclude', repo / '.pin'):
+        try:
+            st = os.lstat(p)
+        except FileNotFoundError:
+            if p in (repo, git_dir):
+                raise
+            continue
+        if _stat.S_ISLNK(st.st_mode):
+            raise OSError(_errno.ELOOP, f'{p}: a symlink; refusing to write '
+                          f'the pin through it')
+    uid = os.lstat(repo).st_uid
+    gfd = _open_parent(git_dir)
+    try:
+        gst = os.fstat(gfd)
+        if gst.st_uid != uid:
+            raise OSError(_errno.EPERM, f'{git_dir}: owned by uid '
+                          f'{gst.st_uid}, not the checkout\'s owner {uid}')
+        try:
+            os.mkdir('info', 0o755, dir_fd=gfd)
+        except FileExistsError:
+            pass
+        else:
+            if os.geteuid() == 0:
+                os.chown('info', gst.st_uid, gst.st_gid, dir_fd=gfd,
+                         follow_symlinks=False)
+    finally:
+        os.close(gfd)
+    ifd = _open_parent(info)
+    try:
+        if os.fstat(ifd).st_uid != uid:
+            raise OSError(_errno.EPERM, f'{info}: not owned by the '
+                          f'checkout\'s owner {uid}')
+    finally:
+        os.close(ifd)
+
+    def _with_pin(old):
+        lines = (old or '').splitlines()
+        if '.pin' not in lines:
+            lines.append('.pin')
+        return '\n'.join(lines) + '\n'
+
+    rewrite_owned(info / 'exclude', _with_pin, mode=None, keep_owner=True)
+    write_owned(repo / '.pin', row + '\n', mode=0o644)
+
+
+def _write_release_pins(rl, base: Path, *, run=subprocess.run,
+                        as_owner=None) -> list:
     """After the install: each listed checkout (natives aside: their builds
-    own their sources) must sit at its row; write its .pin and chown it as
-    `_align_install_missing` does.  Returns the errors."""
+    own their sources) must sit at its row; write its .pin through
+    _release_write_pin.  HEAD is read as the checkout's owner.  Returns
+    the errors."""
     from sigmond import align_apply
     natives = _native_build_pins()
     errors = []
     for name, row, repo in _release_checkouts(rl, base):
         if name in natives:
             continue
-        head = _release_head(repo, run)
+        try:
+            _owner, orun = _release_owner_run(repo, run, as_owner)
+            head = _release_head(repo, orun)
+        except (align_apply.ApplyError, OSError) as exc:
+            errors.append(f'{name}: {exc}')
+            continue
         if head != row:
             errors.append(f'{name}: {repo} sits at {head[:12] or "?"}, '
                           f'not its row {row[:12]} - no .pin written')
             continue
         try:
-            align_apply.write_pin(repo, row)
-            try:
-                owner = repo.owner()
-            except (KeyError, OSError):
-                owner = ''
-            _align_chown(repo / '.pin', owner)
-            _align_chown(repo / '.git' / 'info' / 'exclude', owner)
-            _align_chown(repo / '.git' / 'info', owner)
+            _release_write_pin(repo, row)
         except OSError as exc:
             errors.append(f'{name}: could not write {repo}/.pin: {exc}')
     return errors
@@ -15007,15 +15100,19 @@ def _install_suite_targets(args):
     return topology, components, catalog, _classify_install_targets(components, catalog)
 
 
-def _release_install_check(rl, entries, natives, catalog, *, pull: bool) -> int:
+def _release_install_check(rl, entries, natives, catalog, *, pull: bool,
+                           checkouts: bool = True) -> int:
     """The refusals that need the install's targets: a component with no row,
-    then any checkout _seat_listed_checkouts would refuse.  Reads only;
-    1 after the ERROR lines, else 0."""
+    then (``checkouts``) any checkout _seat_listed_checkouts would refuse.
+    Reads only; 1 after the ERROR lines, else 0.  The checkout pass runs
+    git as each checkout's owner, so it needs root (or that owner)."""
     missing = _release_missing_rows(rl, entries, natives, catalog)
     if missing:
         _release_err(f'release list {rl.version} has no row for '
                      f'{", ".join(missing)}; refusing before any change')
         return 1
+    if not checkouts:
+        return 0
     errors = _seat_listed_checkouts(rl, _RELEASE_BASE, pull=pull, check_only=True)
     for e in errors:
         _release_err(e)
