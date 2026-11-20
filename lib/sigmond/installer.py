@@ -540,7 +540,7 @@ def unit_not_ready(unit: str, run=None, unit_text: Optional[str] = None) -> list
 
 def apply_systemd_enables(repo_dir: Path, dry_run: bool = False,
                           *, start_timers: bool = True,
-                          elevate=None) -> list[str]:
+                          elevate=None, skip=()) -> list[str]:
     """Ensure every non-template unit in `[systemd] units` is enabled.
 
     A unit can be installed (link/copy step in deploy.toml writes the file
@@ -572,6 +572,9 @@ def apply_systemd_enables(repo_dir: Path, dry_run: bool = False,
 
     A unit whose service user or executable does not exist yet is not
     enabled, and says why (unit_not_ready; WWV-2, 2026-11-16).
+
+    A unit named in ``skip`` is left as it is, silently: the caller says
+    why (smd align passes the units a drift exception covers).
     """
     elevate = elevate or (lambda argv: argv)
     deploy_toml = repo_dir / 'deploy.toml'
@@ -588,7 +591,7 @@ def apply_systemd_enables(repo_dir: Path, dry_run: bool = False,
     for unit in units:
         # Template units (`foo@.service`) can't be enabled directly;
         # their instances are wanted by a parent target.
-        if '@.' in unit:
+        if '@.' in unit or unit in skip:
             continue
         r = subprocess.run(
             ['systemctl', 'is-enabled', unit],

@@ -10,6 +10,7 @@ are stubbed."""
 
 import contextlib
 import io
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -25,9 +26,23 @@ _DEPLOY = '[systemd]\nunits = ["x.service", "x-events.timer"]\n'
 _TIMER = "[Timer]\nOnCalendar=hourly\n\n[Install]\nWantedBy=timers.target\n"
 
 
-def _drive(*, dry=False, active=True, enabled=True, unit_file=True):
+def _exceptions_text(units):
+    from datetime import datetime, timedelta, timezone
+    today = datetime.now(timezone.utc).date()
+    return "".join(
+        f'[[exception]]\nkey = "unit:{u}"\nreason = "A/B"\nby = "mjh"\n'
+        f'kind = "test"\nstart = {today}\n'
+        f'until = {today + timedelta(days=3)}\n' for u in units)
+
+
+def _drive(*, dry=False, active=True, enabled=True, unit_file=True,
+           timer_state="disabled", exceptions=None, no_restart=False,
+           quiet=False, own_timers=()):
     """Run cmd_align against a tmp checkout of component `x`.  Returns the
-    systemctl argv list and the printed output."""
+    systemctl argv list and the printed output.  ``exceptions`` is the
+    drift-exceptions file text (None: no file); ``quiet`` makes --apply
+    find the station aligned with nothing to do; ``own_timers`` are sigmond
+    timers installed (and disabled) in the unit dir."""
     calls = []
 
     def fake_run(argv, **kw):
@@ -37,17 +52,21 @@ def _drive(*, dry=False, active=True, enabled=True, unit_file=True):
         if argv[:2] == ["systemctl", "is-active"]:
             return subprocess.CompletedProcess(argv, 0 if active else 3, "", "")
         if argv[:2] == ["systemctl", "is-enabled"]:
-            state = "enabled" if argv[-1] == "x.service" else "disabled"
+            state = ("enabled" if argv[-1] == "x.service"
+                     else timer_state if argv[-1] == "x-events.timer" else "disabled")
             return subprocess.CompletedProcess(argv, 0 if state == "enabled" else 1,
                                                state + "\n", "")
         if argv[:2] == ["systemctl", "cat"]:
-            if argv[-1] == "x-events.timer":
+            if argv[-1] == "x-events.timer" and timer_state != "not-found":
                 return subprocess.CompletedProcess(argv, 0, _TIMER, "")
             return subprocess.CompletedProcess(argv, 1, "", "No files found")
         return ok
 
     def fake_align_run(argv, *, run, timeout, action, **kw):
-        # The bring-up's child smd runs (config render, manifest, doctor).
+        # The bring-up's child smd runs (config render, manifest, doctor)
+        # succeed; systemctl answers as fake_run does.
+        if argv[0] == "systemctl":
+            return fake_run(argv)
         return subprocess.CompletedProcess(list(argv), 0, "", "")
 
     out = io.StringIO()
@@ -60,14 +79,27 @@ def _drive(*, dry=False, active=True, enabled=True, unit_file=True):
         if unit_file:
             (unit_dir / "x.service").write_text("[Service]\nExecStart=/bin/true\n")
             (unit_dir / "x-events.timer").write_text(_TIMER)
+        for t in own_timers:
+            (unit_dir / t).write_text(_TIMER)
+        exc = base / "drift-exceptions.toml"
+        if exceptions is not None:
+            exc.write_text(exceptions)
+        st.enter_context(mock.patch("sigmond.drift.exceptions.DEFAULT_PATH", exc))
+        st.enter_context(mock.patch("sigmond.archive.CONFIG", base / "archive.toml"))
         real_bringup = smd._align_bringup
         _apply_patches(st, rel=REL, live={"sigmond": "daba1f6"})
         st.enter_context(mock.patch.object(smd, "_align_bringup", real_bringup))
         st.enter_context(mock.patch.object(smd, "_align_run", fake_align_run))
         st.enter_context(mock.patch.object(smd, "_align_own_units",
                                            lambda *a, **k: []))
-        st.enter_context(mock.patch.object(smd, "_align_start_timers",
-                                           lambda **k: None))
+        if not own_timers:
+            st.enter_context(mock.patch.object(smd, "_align_start_timers",
+                                               lambda **k: None))
+        if quiet:
+            st.enter_context(mock.patch.object(smd, "_align_aligned_release",
+                                               lambda: smd._align_record_key(REL)))
+            st.enter_context(mock.patch.object(smd, "_align_live_passed",
+                                               lambda live: True))
         st.enter_context(mock.patch.object(smd, "_ALIGN_UNIT_DIR", unit_dir))
         st.enter_context(mock.patch("sigmond.catalog.load_catalog",
                                     return_value={"x": object()}))
@@ -79,7 +111,7 @@ def _drive(*, dry=False, active=True, enabled=True, unit_file=True):
         st.enter_context(mock.patch("sigmond.align_apply.apply_plan",
                                     return_value=[align_apply.Step("sigmond", "current")]))
         with contextlib.redirect_stdout(out):
-            smd.cmd_align(_apply_args(tmp, apply=not dry))
+            smd.cmd_align(_apply_args(tmp, apply=not dry, no_restart=no_restart))
     return calls, out.getvalue()
 
 
@@ -124,9 +156,48 @@ def test_dry_run_lists_enables_only():
     assert "would enable x.service" not in out
 
 
+
+def test_drift_exception_keeps_declared_timer_as_is():
+    # B4 suspends HPPS by hand: hf-timestd's watchdog timers restart the
+    # recorder, so an exception must keep align from re-enabling them.
+    calls, out = _drive(exceptions=_exceptions_text(["x-events.timer"]))
+    assert _mutating(calls) == []
+    assert "drift exception covers unit:x-events.timer" in out
+
+
+def test_unreadable_exceptions_enable_no_declared_unit():
+    calls, out = _drive(exceptions="this is [not toml\n")
+    assert _mutating(calls) == []
+
+
+def test_no_restart_enables_declared_timer_without_starting():
+    calls, out = _drive(no_restart=True)
+    assert ["systemctl", "enable", "x-events.timer"] in calls
+    assert ["systemctl", "start", "x-events.timer"] not in calls
+    assert "not started (--no-restart): x-events.timer" in out
+
+
+def test_quiet_apply_enables_declared_timer():
+    calls, out = _drive(quiet=True)
+    assert "nothing to do" in out
+    assert ["systemctl", "enable", "x-events.timer"] in calls
+
+
+def test_dry_run_lists_own_timers():
+    calls, out = _drive(dry=True, own_timers=("sigmond-storage.timer",))
+    assert _mutating(calls) == []
+    assert "would enable sigmond-storage.timer (sigmond)" in out
+
+
+def test_not_found_declared_unit_adds_no_step():
+    # A declared unit systemd does not know is a drift fault; align says
+    # nothing about it each run.
+    calls, out = _drive(timer_state="not-found")
+    assert "declared units" not in out
+    assert "not-found" not in out
+
 # --- sigmond's own timers (ruling (a), 2026-11-20) ---------------------------
 
-import re  # noqa: E402
 
 _REPO = Path(__file__).resolve().parent.parent
 
@@ -154,7 +225,8 @@ def test_python_list_matches_install_sh():
         set(drift_units.INSTALL_ENABLED_TIMERS))
 
 
-def _timers(*, archive=False, enabled=(), no_restart=False, rc=0, excepted=()):
+def _timers(*, archive=False, enabled=(), no_restart=False, rc=0, excepted=(),
+            masked=(), out=None):
     """Run the real _align_start_timers against a tmp unit dir holding every
     sigmond timer the repo ships; return the systemctl argv it ran."""
     calls = []
@@ -163,7 +235,13 @@ def _timers(*, archive=False, enabled=(), no_restart=False, rc=0, excepted=()):
         argv = list(argv)
         calls.append(argv)
         if argv[:2] == ["systemctl", "is-enabled"]:
-            return subprocess.CompletedProcess(argv, 0 if argv[-1] in enabled else 1, "", "")
+            if argv[-1] in masked:
+                return subprocess.CompletedProcess(argv, 1, "masked\n", "")
+            if argv[-1] in enabled:
+                return subprocess.CompletedProcess(argv, 0, "enabled\n", "")
+            return subprocess.CompletedProcess(argv, 1, "disabled\n", "")
+        if argv[:2] == ["systemctl", "enable"] and argv[-1] in masked:
+            return subprocess.CompletedProcess(argv, 1, "", "Unit is masked.")
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as st:
@@ -177,16 +255,11 @@ def _timers(*, archive=False, enabled=(), no_restart=False, rc=0, excepted=()):
             cfg.write_text("uuid = 'x'\n")
         exc = tmp / "drift-exceptions.toml"
         if excepted:
-            from datetime import datetime, timedelta, timezone
-            today = datetime.now(timezone.utc).date()
-            exc.write_text("".join(
-                f'[[exception]]\nkey = "unit:{u}"\nreason = "A/B"\nby = "mjh"\n'
-                f'kind = "test"\nstart = {today}\n'
-                f'until = {today + timedelta(days=3)}\n' for u in excepted))
+            exc.write_text(_exceptions_text(excepted))
         st.enter_context(mock.patch("sigmond.archive.CONFIG", cfg))
         st.enter_context(mock.patch.object(
             smd, "_align_run", lambda argv, *, run, timeout, action, **kw: run(argv)))
-        with contextlib.redirect_stdout(io.StringIO()):
+        with contextlib.redirect_stdout(out if out is not None else io.StringIO()):
             smd._align_start_timers(rc=rc, no_restart=no_restart, unit_dir=unit_dir,
                                     run=fake_run, exceptions_path=exc)
     return calls
@@ -232,3 +305,10 @@ def test_off_by_design_timers_untouched():
 def test_drift_exception_keeps_timer_as_is():
     calls = _timers(excepted=("sigmond-timing-reconcile.timer",))
     assert "sigmond-timing-reconcile.timer" not in _enabled_by(calls)
+
+
+def test_masked_timer_silent():
+    out = io.StringIO()
+    calls = _timers(masked={"sigmond-storage.timer"}, out=out)
+    assert "sigmond-storage.timer" not in _enabled_by(calls)
+    assert "could not enable" not in out.getvalue()

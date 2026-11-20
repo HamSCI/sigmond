@@ -9305,7 +9305,7 @@ _ALIGN_UNIT_DIR = Path('/etc/systemd/system')
 
 
 def _align_enable_declared_units(apply: bool, *, base='/opt/git/sigmond',
-                                 say=print) -> int:
+                                 say=print, start_timers: bool = True) -> int:
     """Link and enable the `[systemd] units` of every running component.
 
     A unit a component adds after its first install stayed disabled: only
@@ -9324,7 +9324,12 @@ def _align_enable_declared_units(apply: bool, *, base='/opt/git/sigmond',
 
     Per component: deploy.toml links, then `installer.apply_systemd_enables`,
     which enables (never starts) each non-template unit with an [Install]
-    section, and starts only a timer it enabled.  Dry run: one
+    section, and starts only a timer it enabled, and only with
+    ``start_timers`` (False under --no-restart: hf-timestd's watchdog
+    timers restart its recorder).  A unit a live `unit:` drift exception
+    covers stays as it is (B4 suspends HPPS by hand); an exceptions file
+    that cannot be read enables nothing.  A declared unit systemd does not
+    know goes unmentioned: the drift report faults it.  Dry run: one
     `would enable <unit> (<component>)` line each, nothing changed.
     Returns the units enabled, or that --apply would enable."""
     from sigmond.catalog import load_catalog
@@ -9336,10 +9341,15 @@ def _align_enable_declared_units(apply: bool, *, base='/opt/git/sigmond',
         catalog = load_catalog()
         enabled = drift_report.topology_enabled()
         local = _locally_managed()
+        excepted, err = drift_units.excepted_units(None, None)
     except Exception as exc:                                   # noqa: BLE001
         say(f'  declared units: not checked ({exc})')
         return 0
+    if err is not None:
+        say(f'  declared units: {err}; none enabled')
+        return 0
     count = 0
+    held = []
     for name in sorted(enabled):
         if not enabled[name] or name not in catalog or name in local:
             continue
@@ -9353,18 +9363,24 @@ def _align_enable_declared_units(apply: bool, *, base='/opt/git/sigmond',
         svc = drift_units.main_service(units)
         if svc is not None and not os.path.lexists(_ALIGN_UNIT_DIR / svc):
             continue
+        skip = {u for u in units if u in excepted}
+        for u in sorted(skip):
+            say(f'  {name}: left {u} as it is: a drift exception covers unit:{u}')
         try:
             msgs = apply_deploy_toml_links(repo, dry_run=not apply)
             if apply and any(m.strip().startswith('linked ') for m in msgs):
                 subprocess.run(['systemctl', 'daemon-reload'], capture_output=True,
                                text=True, check=False, timeout=60)
-            msgs += apply_systemd_enables(repo, dry_run=not apply)
+            msgs += apply_systemd_enables(repo, dry_run=not apply,
+                                          start_timers=start_timers, skip=skip)
         except Exception as exc:                               # noqa: BLE001
             say(f'  {name}: declared units not enabled: {exc}')
             continue
         for msg in msgs:
             # The installer's lines carry arrows and dashes; smd prints ASCII.
             msg = msg.strip().replace('\u2192', '->').replace('\u2014', '-')
+            if "is-enabled returned 'not-found'" in msg:
+                continue
             m = re.match(r'\(dry-run\) would enable (\S+)', msg)
             if m:
                 say(f'  would enable {m.group(1)} ({name})')
@@ -9375,11 +9391,30 @@ def _align_enable_declared_units(apply: bool, *, base='/opt/git/sigmond',
                 say(f'  {name}: {msg}')
                 if msg.startswith('enabled '):
                     count += 1
+                    unit = msg.split()[1]
+                    if not start_timers and unit.endswith('.timer'):
+                        held.append(unit)
+    if held:
+        say(f'  not started (--no-restart): {", ".join(held)}; they start at the '
+            f'next boot, or with: systemctl start {" ".join(held)}')
     return count
 
 
+def _align_declared_units_steps(base, *, start_timers: bool) -> list:
+    """`_align_enable_declared_units` as one bring-up Step, or none when it
+    had nothing to say.  Never blocking: a unit left disabled stays a
+    drift fault."""
+    from sigmond import align_apply
+    lines = []
+    if _align_enable_declared_units(True, base=base, say=lines.append,
+                                    start_timers=start_timers) or lines:
+        return [align_apply.Step('declared units', 'ran',
+                                 '; '.join(ln.strip() for ln in lines))]
+    return []
+
+
 def _align_bringup(*, run=subprocess.run, say=print, site_timing_refreshed: bool = False,
-                   base='/opt/git/sigmond') -> list:
+                   base='/opt/git/sigmond', start_timers: bool = True) -> list:
     """Re-run bring-up's own steps, in bring-up's own order, stopping at
     the first failure: `sigmond-site-timing`, `config render --if-present`,
     `admin uploader manifest --write` (never `--enable`: whether to
@@ -9472,12 +9507,10 @@ def _align_bringup(*, run=subprocess.run, say=print, site_timing_refreshed: bool
         return steps
     steps.append(align_apply.Step('config render', 'ran', detail))
 
-    # After config render: a unit may need what the render writes.  Never
-    # blocks the run; a unit left disabled stays a drift fault.
-    lines = []
-    if _align_enable_declared_units(True, base=base, say=lines.append) or lines:
-        steps.append(align_apply.Step('declared units', 'ran',
-                                      '; '.join(ln.strip() for ln in lines)))
+    # After config render: a unit may need what the render writes.  Bring-up
+    # runs only after clean moves and image refresh, so the caller's
+    # ``start_timers`` is just "not --no-restart".
+    steps += _align_declared_units_steps(base, start_timers=start_timers)
 
     try:
         before = um.MANIFEST_PATH.read_bytes()
@@ -9815,7 +9848,7 @@ def _align_own_units(sigmond_repo, *, unit_dir=Path('/etc/systemd/system'),
 
 
 def _align_start_timers(*, rc: int, no_restart: bool,
-                        unit_dir=Path('/etc/systemd/system'), run=None,
+                        unit_dir=None, run=None,
                         exceptions_path=None) -> None:
     """After `_align_make_live`: enable and start the daily drift timer (an
     enabled timer that was never started does not fire until a reboot), and
@@ -9833,6 +9866,7 @@ def _align_start_timers(*, rc: int, no_restart: bool,
     It starts only on a clean run without --no-restart, as above: several
     (sdr-recover, storage, timing-reconcile) act on the station."""
     run = run or subprocess.run
+    unit_dir = Path(unit_dir) if unit_dir is not None else _ALIGN_UNIT_DIR
     _align_enable_own_timers(rc=rc, no_restart=no_restart, unit_dir=unit_dir,
                              run=run, exceptions_path=exceptions_path)
     if (Path(unit_dir) / _ALIGN_DRIFT_TIMER).is_file():
@@ -9857,27 +9891,47 @@ def _align_start_timers(*, rc: int, no_restart: bool,
                   f'with: systemctl start {_ALIGN_LOCATION_TIMER}')
 
 
-def _align_enable_own_timers(*, rc: int, no_restart: bool, unit_dir, run,
-                             exceptions_path=None) -> None:
-    """The install.sh timer set for `_align_start_timers` (its docstring)."""
+def _align_unit_needs_enable(unit: str, run) -> bool:
+    """True when systemd reads the unit disabled (or linked): not enabled,
+    static, masked or otherwise settled."""
+    r = _align_run(['systemctl', 'is-enabled', unit], run=run, timeout=15,
+                   action=f'systemctl is-enabled {unit}')
+    lines = (r.stdout or '').strip().splitlines()
+    state = lines[-1].strip() if lines else ''
+    return r.returncode != 0 and not state.startswith('masked')
+
+
+def _align_own_timers_due(unit_dir, run, exceptions_path=None) -> tuple:
+    """(the sigmond timers align would enable, the exceptions-file error or
+    None): each of `drift.units.INSTALL_ENABLED_TIMERS`, plus
+    sigmond-archive-health.timer while /etc/sigmond/archive.toml exists,
+    that is installed, not covered by a live `unit:` drift exception, and
+    not enabled.  An unreadable exceptions file makes the list empty."""
     from sigmond import archive as ar
     from sigmond.drift import units as drift_units
-    wanted = [t for t in drift_units.INSTALL_ENABLED_TIMERS
-              if t not in (_ALIGN_DRIFT_TIMER, _ALIGN_LOCATION_TIMER)]
+    wanted = list(drift_units.INSTALL_ENABLED_TIMERS)
     if ar.CONFIG.exists():
         wanted.append(drift_units.ARCHIVE_HEALTH_TIMER)
     excepted, err = drift_units.excepted_units(exceptions_path, None)
+    if err is not None:
+        return [], err
+    return [t for t in wanted
+            if t not in excepted and (Path(unit_dir) / t).is_file()
+            and _align_unit_needs_enable(t, run)], None
+
+
+def _align_enable_own_timers(*, rc: int, no_restart: bool, unit_dir, run,
+                             exceptions_path=None) -> None:
+    """The install.sh timer set for `_align_start_timers` (its docstring).
+    The drift and location-check timers keep their own handling there."""
+    due, err = _align_own_timers_due(unit_dir, run, exceptions_path)
     if err is not None:
         print(f'  sigmond timers: {err}; none enabled')
         return
     start = rc == 0 and not no_restart
     held = []
-    for timer in wanted:
-        if timer in excepted or not (Path(unit_dir) / timer).is_file():
-            continue
-        r = _align_run(['systemctl', 'is-enabled', '--quiet', timer], run=run,
-                       timeout=15, action=f'systemctl is-enabled {timer}')
-        if r.returncode == 0:
+    for timer in due:
+        if timer in (_ALIGN_DRIFT_TIMER, _ALIGN_LOCATION_TIMER):
             continue
         argv = ['systemctl', 'enable'] + (['--now'] if start else []) + [timer]
         r = _align_run(argv, run=run, timeout=60, action=' '.join(argv))
@@ -10022,6 +10076,11 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
             quiet = False     # unknown staleness is not "nothing to do"
         if quiet:
             print('  aligned — nothing to do')
+            # Still enable what the dry run listed: a unit a component
+            # declared after its install (sigmond's own timers follow in
+            # _align_start_timers, which runs on this path too).
+            _align_print_steps(_align_declared_units_steps(
+                base, start_timers=not getattr(args, 'no_restart', False)))
             # Still route: this retries a routing run that failed on an
             # earlier align or update (uniform routing, ruling R7).
             routing_step = _align_routing()
@@ -10030,7 +10089,7 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
 
     bringup_steps = _align_bringup(site_timing_refreshed=any(
         s.component == _ALIGN_SITE_TIMING and s.outcome == 'refreshed' for s in image_steps),
-        base=base)
+        base=base, start_timers=not getattr(args, 'no_restart', False))
     _align_print_steps(bringup_steps)
     steps = move_steps + image_steps + bringup_steps
     if any(s.outcome in ('failed', 'refused') for s in bringup_steps):
@@ -10585,6 +10644,11 @@ def cmd_align(args) -> int:
         False, base, covered=rebuilds | {it.component for it in plan
                                          if it.status == 'move'})
     _align_enable_declared_units(False, base=base)
+    own_due, own_err = _align_own_timers_due(_ALIGN_UNIT_DIR, subprocess.run)
+    if own_err is not None:
+        print(f'  sigmond timers: {own_err}; --apply would enable none')
+    for timer in own_due:
+        print(f'  would enable {timer} (sigmond)')
     # A candidate has no tag on GitHub yet: read its files at its commit.
     files = align.image_file_drift(rel.appliance_commit if rel.candidate else rel.tag)
     from sigmond import align_apply as _aa
