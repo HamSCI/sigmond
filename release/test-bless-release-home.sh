@@ -232,7 +232,11 @@ mkscene() {
 run_bless() {
     local name="$1" S="$T/$1" apply="$2"; shift 2
     : > "$S/calls"
-    local envs=(SIGMOND_REPO="$S/sig" PROXMOX_REPO="$S/px" RIG_DIR="$S/rig" PUBLISH_LIB="$S/pub/publish-lib.sh"
+    # RUN_HOME set: no PROXMOX_REPO, so the bless finds the image repo under
+    # $RUN_HOME/appliance/repos the way a rig does.
+    local pxenv=(PROXMOX_REPO="$S/px")
+    [ -n "${RUN_HOME:-}" ] && pxenv=(HOME="$RUN_HOME")
+    local envs=(-u PROXMOX_REPO -u APPLIANCE_REPO SIGMOND_REPO="$S/sig" "${pxenv[@]}" RIG_DIR="$S/rig" PUBLISH_LIB="$S/pub/publish-lib.sh"
                 STUB_CALLS="$S/calls" TMPDIR="$S/tmp" PATH="$T/bin:$PATH"
                 STUB_GH_REPOS="${STUB_GH_REPOS:-HamSCI/sigmond HamSCI/sigmond-proxmox}"
                 STUB_GH_RELEASES="${STUB_GH_RELEASES:-}" STUB_GH_CREATE_FAIL="${STUB_GH_CREATE_FAIL:-}")
@@ -254,6 +258,24 @@ sc_reset; mkscene base; run_bless base 0 --mirror
 chk   "the bless exits 0"           "$RC" "0"
 has   "all gates pass"              "$OUT" "ALL GATES PASS"
 lacks "no unbound variable"         "$OUT" "unbound variable"
+
+echo "the image repo found by name: only a sigmond-appliance checkout"
+sc_reset; mkscene oldname
+mkdir -p "$T/oldname/home/appliance/repos"
+mv "$T/oldname/px" "$T/oldname/home/appliance/repos/sigmond-appliance"
+RUN_HOME="$T/oldname/home" run_bless oldname 0 --mirror
+chk   "the bless exits 0"           "$RC" "0"
+has   "all gates pass"              "$OUT" "ALL GATES PASS"
+has   "g2 names the sigmond-appliance checkout" "$(row 2)" "$T/oldname/home/appliance/repos/sigmond-appliance clean"
+mkdir -p "$T/oldname/home/appliance/repos/sigmond-proxmox"
+RUN_HOME="$T/oldname/home" run_bless oldname 0 --mirror
+has   "a sigmond-proxmox dir that is no checkout: still the old name" "$(row 2)" "repos/sigmond-appliance clean"
+mv "$T/oldname/home/appliance/repos/sigmond-appliance" "$T/oldname/home/appliance/repos/sp" \
+    && rmdir "$T/oldname/home/appliance/repos/sigmond-proxmox" \
+    && mv "$T/oldname/home/appliance/repos/sp" "$T/oldname/home/appliance/repos/sigmond-proxmox"
+RUN_HOME="$T/oldname/home" run_bless oldname 0 --mirror
+has   "after the rename: the sigmond-proxmox checkout" "$(row 2)" "repos/sigmond-proxmox clean"
+chk   "after the rename: exits 0"   "$RC" "0"
 
 echo "gate 3: both image stems"
 sc_reset; SC_STEM=old; mkscene g3_old; run_bless g3_old 0 --mirror

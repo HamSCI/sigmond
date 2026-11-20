@@ -163,9 +163,12 @@ def compare_manifest(rl: ReleaseList, manifest_text: str) -> list:
     return out
 
 
+# The image repo row keeps the repo's name before the rename.  GitHub answers
+# that name on both sides of the rename (after it, by redirect), while the new
+# name 404s until the rename happens.
 EXTRA_URLS = {
     "ka9q-python": "https://github.com/HamSCI/ka9q-python",
-    "sigmond-proxmox": "https://github.com/HamSCI/sigmond-proxmox",
+    "sigmond-proxmox": "https://github.com/HamSCI/sigmond-appliance",
 }
 
 

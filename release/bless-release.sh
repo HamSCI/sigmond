@@ -69,7 +69,11 @@
 #
 # Env overrides (the verification suite points them at scratch fixtures):
 #   SIGMOND_REPO    sigmond checkout (default: the checkout holding this script)
-#   PROXMOX_REPO    image repo checkout (default: $HOME/appliance/repos/sigmond-proxmox)
+#   PROXMOX_REPO    image repo checkout (default: APPLIANCE_REPO if set, else
+#                    $HOME/appliance/repos/sigmond-proxmox when that is a git
+#                    checkout, else $HOME/appliance/repos/sigmond-appliance,
+#                    the checkout's name before the rename; the same order
+#                    build-usb-v3.sh follows)
 #   RIG_DIR         build/test staging dir: images, .sha256, .manifest.txt,
 #                    test-v3.log, bare-metal/ (default: $HOME/appliance/v3)
 #   GH_REPO_SLUG    the release repo (default: HamSCI/sigmond)
@@ -88,7 +92,17 @@ say(){ echo "[bless $(date '+%T')] $*"; }
 
 _HERE="$(cd "$(dirname "$0")" && pwd)"
 SIGMOND_REPO="${SIGMOND_REPO:-$(cd "$_HERE/.." && pwd)}"
-PX_REPO="${PROXMOX_REPO:-$HOME/appliance/repos/sigmond-proxmox}"
+# A rig's checkout takes the new name only when someone renames it, so the
+# bless looks for either name, as build-usb-v3.sh does.
+if [ -n "${PROXMOX_REPO:-}" ]; then
+    PX_REPO="$PROXMOX_REPO"
+elif [ -n "${APPLIANCE_REPO:-}" ]; then
+    PX_REPO="$APPLIANCE_REPO"
+elif git -C "$HOME/appliance/repos/sigmond-proxmox" rev-parse --git-dir >/dev/null 2>&1; then
+    PX_REPO="$HOME/appliance/repos/sigmond-proxmox"
+else
+    PX_REPO="$HOME/appliance/repos/sigmond-appliance"
+fi
 RIG_DIR="${RIG_DIR:-$HOME/appliance/v3}"
 GH_REPO="${GH_REPO_SLUG:-HamSCI/sigmond}"
 PUBLISH_LIB="${PUBLISH_LIB:-$PX_REPO/publish-lib.sh}"

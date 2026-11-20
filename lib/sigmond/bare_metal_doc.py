@@ -21,6 +21,10 @@ from sigmond.commands.check import RADIOD_DORMANT
 
 TEST_IDENTITY = {"--callsign": "N0CALL", "--grid": "EM38ww", "--reporter": "N0CALL/BM"}
 RADIOD_CONSUMERS = ('PSK', 'WSPR', 'meteor scatter', 'GRAPE')
+# The install part ends by writing the commit the checkout stands at here; the
+# rig reads it back and refuses to record a test of code that did not run.
+SIGMOND_CHECKOUT = '/opt/git/sigmond/sigmond'
+HEAD_FILE = '/tmp/bm-sigmond-head'
 
 _CHECKOUT = re.compile(r'^git checkout (v\d+\.\d+(\.\d+)?)$')
 _FENCE_OPEN = re.compile(r'^```bash\s*$')
@@ -138,6 +142,7 @@ def test_script(steps: DocSteps, *, sigmond_commit: str):
     head = 'set -euo pipefail\n'
     install = [f'git checkout {sigmond_commit}' if _CHECKOUT.match(c) else c
                for c in steps.install]
+    install.append(f'git -C {SIGMOND_CHECKOUT} rev-parse HEAD > {HEAD_FILE}')
     return (head + '\n'.join(install) + '\n',
             head + _rewrite_bringup(steps.bringup) + '\n')
 

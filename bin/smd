@@ -32960,7 +32960,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_admin = sub.add_parser('admin',
         help='diagnostics & maintenance (diag | validate | verifier | wisdom | '
              'storage | environment | sources | public-ip | log | rac | timing | '
-             'radiod | instance | uninstall | completion)')
+             'radiod | instance | release-list | uninstall | completion)')
     admin_sub = p_admin.add_subparsers(dest='admin_command')
 
     # enable — set [component.<name>].enabled = true in topology.toml
@@ -33143,8 +33143,10 @@ def _build_parser() -> argparse.ArgumentParser:
                             'origin (bring-up passes it; the image ships each '
                             'checkout at its manifest pin)')
         p.add_argument('--release-list', metavar='PATH', dest='release_list',
-                       help='install every component at the commit this release '
-                            'list (release/components.toml) names, and write '
+                       help='install at the commits this release list '
+                            '(release/components.toml) names.  It moves EVERY '
+                            'listed checkout on the host to its listed commit, '
+                            'not only the components named here, and writes '
                             'each checkout\'s .pin; refuses, before any change, '
                             'a checkout with local edits or commits origin lacks')
 
@@ -33173,8 +33175,10 @@ def _build_parser() -> argparse.ArgumentParser:
                            help='with several remote radiods, the one hf-timestd binds '
                                 'to (unnamed, hf-timestd installs but stays idle)')
     p_bringup.add_argument('--release-list', metavar='PATH', dest='release_list',
-                           help='install every component at the commit this release '
-                                'list names (passed on to each `smd install` step)')
+                           help='install at the commits this release list names '
+                                '(passed on to each `smd install` step); it moves '
+                                'EVERY listed checkout on the host to its listed '
+                                'commit, not only this profile\'s components')
     p_bringup.add_argument('--with-optional', action='store_true', dest='with_optional',
                            help='also install the profile optional add-ons (e.g. ka9q-web)')
     p_bringup.add_argument('--non-interactive', action='store_true', dest='non_interactive',

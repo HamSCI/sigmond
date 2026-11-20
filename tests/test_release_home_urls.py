@@ -6,8 +6,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 TREES = ["README.md", "CONTRIBUTING.md", "CLAUDE.md", "docs", "lib", "bin", "scripts"]
 SKIP_DIRS = {"superpowers", "archive", "__pycache__", "sigmond.egg-info"}
-# The legacy slug stays in the fallback lists, and nowhere else.
-LEGACY_OK = {"lib/sigmond/align.py", "scripts/proxmox/pm-align.py"}
+# The legacy slug stays in the fallback lists, and nowhere else.  The release
+# list reads the image repo's head by the old name: GitHub answers it on both
+# sides of the rename, while the new name 404s before it.
+LEGACY_OK = {"lib/sigmond/align.py", "scripts/proxmox/pm-align.py",
+             "lib/sigmond/release_list.py"}
 OLD = re.compile(r"HamSCI/sigmond-appliance")
 PROSE = re.compile(r"sigmond-appliance's copy")
 

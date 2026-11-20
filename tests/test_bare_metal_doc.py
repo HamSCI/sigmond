@@ -106,6 +106,24 @@ def test_script_substitutes_commit_and_identity():
     assert br.rstrip().endswith("--non-interactive")
 
 
+def test_script_install_part_records_the_head_last():
+    inst, _ = bmd.test_script(bmd.extract(DOC), sigmond_commit="a" * 40)
+    lines = inst.rstrip("\n").splitlines()
+    assert lines[-1] == "git -C /opt/git/sigmond/sigmond rev-parse HEAD > /tmp/bm-sigmond-head"
+    assert lines[-2] == "./install.sh"
+
+
+def test_script_head_line_stays_out_of_the_digest():
+    steps = bmd.extract(DOC)
+    assert not any("bm-sigmond-head" in c for c in steps.install)
+
+
+def test_current_doc_installs_git_first():
+    steps = bmd.extract((ROOT / "docs" / "install-bare-metal.md").read_text())
+    assert steps.install[0] == "sudo apt-get install -y git"
+    assert [c for c in steps.install if c.startswith("git clone")]
+
+
 def test_script_needs_a_release_checkout():
     with pytest.raises(bmd.DocError, match="the doc checks out no release"):
         bmd.test_script(bmd.extract(DOC.replace("git checkout v3.94\n", "")),

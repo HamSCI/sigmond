@@ -58,8 +58,21 @@ def compute(**over):
 def test_repo_urls_shape():
     assert set(FAKE_URLS) == set(ROWS) - DERIVED
     assert FAKE_URLS["ka9q-python"] == "https://github.com/HamSCI/ka9q-python"
-    assert FAKE_URLS["sigmond-proxmox"] == "https://github.com/HamSCI/sigmond-proxmox"
+    # The old name answers before the rename and redirects after it; the new
+    # name 404s before it, which would stop --write.
+    assert FAKE_URLS["sigmond-proxmox"] == "https://github.com/HamSCI/sigmond-appliance"
     assert "sigmond" not in FAKE_URLS
+
+
+def test_compute_before_the_rename_reads_the_image_repo_by_its_old_name():
+    """GitHub before the rename: the new name does not exist, so a list that
+    asked for it would die.  The image repo row still gets its head."""
+    def before_rename(url):
+        if url == "https://github.com/HamSCI/sigmond-proxmox":
+            raise ReleaseListError("git ls-remote: repository not found")
+        return HEADS[url]
+    rl = compute(remote_head=before_rename)
+    assert rl.components["sigmond-proxmox"] == HEADS["https://github.com/HamSCI/sigmond-appliance"]
 
 
 def test_compute_takes_heads_and_owners():

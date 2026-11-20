@@ -93,7 +93,11 @@ Run the steps in this order.  Each step on B4 or the rig goes on the claude-bus 
     $HOME/appliance/repos/sigmond/release/bless-release.sh vN --mirror --apply
     ```
 
-    Then watch one station on the previous release find vN with `smd align`.
+    Then watch one station on the previous release find vN with `smd align`.  For the first
+    release after the image repo's rename, make that a v3.93 station whose GitHub API answers
+    (`curl -s https://api.github.com/rate_limit` shows `remaining` above 0): its API path follows
+    GitHub's redirect and finds vN.  A rate-limited v3.93 station refuses until the API resets
+    (next section).
 
 ## The mirror, and when it ends
 
@@ -110,6 +114,14 @@ The image repo's rename (sigmond-appliance to sigmond-proxmox) leaves the mirror
 side.  GitHub redirects the old name to the new, never the new to the old, so the bless looks the
 repo up first: the GitHub repo its checkout's origin names, then HamSCI/sigmond-proxmox, then
 HamSCI/sigmond-appliance.  `GH_MIRROR_SLUG` overrides the search.
+
+One gap stays open after the rename.  A v3.93 smd or pm-align asks the GitHub API for the newest
+Release on HamSCI/sigmond-appliance.  The API follows GitHub's redirect to sigmond-proxmox, so
+the station finds the new Release.  When the API refuses it for its rate limit, the old code falls
+back to the repo's web page.  That page now carries the new repo name, which the old code does
+not expect, so the station refuses to align.  It recovers by itself once the API's hourly limit
+resets; nothing on the station needs fixing.  After the first release past the rename, check one
+v3.93 station on the API path (step 10).
 
 ## What the bless checks
 
