@@ -28,6 +28,10 @@ v0.9 adds §17.7 (storage capacity: floors, classes, final policies and
 three `storage` verbs) and an expiry on the §11 runtime log level.
 Details sit under "Migration and versioning".
 
+v0.10 (draft, under review 2026-11-20) adds §20 (restore surface: each
+client declares its paths by role so `smd config backup` can collect a
+station's configuration, identity and learned state without its data).
+
 v0.8 adds:
 
 - **§18.5 amendment (2026-09-04).**  Defines what "applied" means in
@@ -2631,6 +2635,8 @@ Sigmond:
   (§10).
 - Never requires the client to depend on sigmond code or shell out to
   `smd`.
+- From v0.10 (draft): backs up only the paths a client declares as
+  `config`, `identity` or `state` (§20), and never its `data`.
 
 ## Migration and versioning
 
@@ -2742,6 +2748,13 @@ Sigmond:
   and `storage final`.  The verbs and fields start as SHOULD in v0.9 and
   become MUST one release later.  v0.8 clients pass validation on a v0.9
   sigmond unchanged: sigmond registers their paths as unmanaged.
+
+- **v0.9 → v0.10 (draft)** adds §20 (restore surface).  `deploy.toml`
+  gains `[[restore.path]]` entries with a role each, echoed in
+  `inventory --json` as `restore_paths`; a client with a live database
+  answers `backup --to DIR`; `restore --check` stays optional.  SHOULD in
+  v0.10, MUST one release later.  v0.9 clients pass unchanged: sigmond
+  falls back to its built-in backup list for them.
 
 ---
 
@@ -2867,3 +2880,124 @@ already prefers the per-instance file when present, and the
 systemd template already passes `--instance %i`; once the unit
 is renamed and the per-instance config exists, the daemon picks
 it up on next start.
+
+---
+
+## §20 — Restore surface (v0.10, draft for review)
+
+A station should restore from three things: its release, a small backup
+bundle, and its data volume, which a reinstall leaves alone.  The release
+rebuilds the software.  The data volume keeps the recorded data and the
+learned state (sigmond `docs/superpowers/specs/2026-11-08-data-volume-design.md`).
+The bundle carries what only this station holds: its declared
+configuration, its identity, and a copy of its learned state.  This
+section lets each client say which of its paths belong in that bundle,
+so sigmond no longer keeps a hand-made list.
+
+### §20.1 — Path roles (SHOULD in v0.10, MUST one release later)
+
+A client declares each path it owns, with one role, in `deploy.toml`:
+
+```toml
+[[restore.path]]
+path = "/etc/hf-timestd"
+role = "config"
+
+[[restore.path]]
+path = "/var/lib/timestd/state"
+role = "state"
+
+[[restore.path]]
+path = "/var/lib/timestd/authority_history.db"
+role = "state"
+database = "sqlite"
+
+[[restore.path]]
+path = "/var/lib/timestd/raw_buffer"
+role = "data"
+```
+
+| role       | holds                                                         | in the bundle |
+|------------|---------------------------------------------------------------|---------------|
+| `config`   | the client's declared settings, under `/etc/<client>`         | yes           |
+| `identity` | keys and tokens that outside parties have registered          | yes, as a secret |
+| `state`    | what the client learned and would cost time or accuracy to relearn: calibrations, registration stores, watermarks, sighting records | yes           |
+| `cache`    | what the client rebuilds on demand, such as FFTW wisdom       | no            |
+| `data`     | recordings, products and upload queues (the same paths as its §17 sinks) | no; the data volume keeps them |
+| `runtime`  | sockets and files under `/run`                                 | no            |
+
+Rules:
+
+- A `state` path names state and nothing else.  State and data may share
+  a volume, and often a parent directory, but a `state` entry never names
+  a directory that also holds data, so the bundle stays a few megabytes.
+- `identity` paths keep mode 0600.  sigmond never prints their contents
+  and marks the bundle secret when it holds any.
+- `database = "sqlite"` marks a live SQLite file, which a plain copy can
+  catch mid-write.  §20.3 covers it.
+- A path the client does not declare stays out of the bundle.
+
+### §20.2 — Inventory echo
+
+`inventory --json` repeats the declarations at the top level, so sigmond
+reads them from a running client as well as from its repo:
+
+```json
+"restore_paths": [
+  {"path": "/etc/hf-timestd", "role": "config"},
+  {"path": "/var/lib/timestd/state", "role": "state"},
+  {"path": "/var/lib/timestd/authority_history.db", "role": "state", "database": "sqlite"},
+  {"path": "/var/lib/timestd/raw_buffer", "role": "data"}
+]
+```
+
+### §20.3 — Consistent copies: the `backup` verb
+
+A client that declares a live database SHOULD answer:
+
+```
+<client> backup --to DIR --json
+```
+
+It writes a consistent copy of its `state` paths under `DIR`, keeping
+each path's layout below `/`, and uses SQLite's online-backup API for
+each database.  It prints one JSON object and exits 0:
+
+```json
+{"files": ["/var/lib/timestd/authority_history.db", "/var/lib/timestd/state/broadcast_calibration.json"], "bytes": 7712345}
+```
+
+A client without the verb gets a plain file copy of its `state` paths.
+
+### §20.4 — Checking a restore: the `restore` verb (MAY)
+
+```
+<client> restore --from DIR --check --json
+```
+
+After sigmond puts a bundle back and before it starts the client's
+units, it runs this verb when the client offers it.  The client checks
+the restored state and may migrate it to its current format.  Exit 0
+lets the units start; non-zero keeps them stopped and names the reason
+in the JSON.
+
+### §20.5 — What sigmond does
+
+- `smd config backup` collects every `config`, `identity` and `state`
+  path the enabled clients declare, using each client's `backup` verb
+  where it has one.  It adds sigmond's own: `/etc/sigmond`,
+  `/etc/sigmond-appliance`, the RAC settings and token, `/etc/machine-id`
+  and the SSH host keys.  It never collects `data`, `cache` or `runtime`.
+- `smd config restore` puts the bundle back, runs each client's
+  `restore --check`, renders configuration from the declared inputs, and
+  only then starts the units.
+- On a Proxmox host, `sigmond-proxmox` keeps the host's own share: the
+  VM definition, the host RAC tunnel and its keys.
+
+### §20.6 — Migration
+
+v0.9 clients pass validation unchanged.  For a client that declares no
+`restore.path`, sigmond falls back to its built-in list
+(`_BACKUP_PATHS`) and reports the client as undeclared in
+`smd admin validate`.  The fields and the `backup` verb become MUST one
+release after v0.10.
