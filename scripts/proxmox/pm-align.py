@@ -43,12 +43,36 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
-RELEASES_API = "https://api.github.com/repos/HamSCI/sigmond-appliance/releases"
-# github.com's own release pages, read when the API refuses for its rate limit
-# (60 calls/h per address; a shared site address can spend it -- N8UR, 2026-11-15).
-RELEASES_WEB = "https://github.com/HamSCI/sigmond-appliance/releases"
-_MANIFEST_HREF = re.compile(
-    r'href="(/HamSCI/sigmond-appliance/releases/download/([^"/]+)/[^"/]+\.manifest\.txt)"')
+# Releases live on HamSCI/sigmond from v3.94 on (release-home design,
+# 2026-11-20).  Older ones live only on the image repo, so a release
+# HamSCI/sigmond does not have is looked for there -- on a 404 alone, never
+# on a timeout or a 5xx, which could aim a host at an older latest.
+# (pm-align runs on the Proxmox host and imports nothing from sigmond: these
+# are its own copies of lib/sigmond/align.py's.)
+RELEASE_SLUG = "HamSCI/sigmond"
+# The image repo.  HamSCI/sigmond-appliance is its name before the rename;
+# it goes when the mirror ends.
+PROXMOX_SLUGS = ("HamSCI/sigmond-proxmox", "HamSCI/sigmond-appliance")
+
+
+def releases_api(slug: str) -> str:
+    return f"https://api.github.com/repos/{slug}/releases"
+
+
+def releases_web(slug: str) -> str:
+    # github.com's own release pages, read when the API refuses for its rate
+    # limit (60 calls/h per address; a shared site address can spend it --
+    # N8UR, 2026-11-15).
+    return f"https://github.com/{slug}/releases"
+
+
+def manifest_href_re(slug: str) -> "re.Pattern":
+    return re.compile(r'href="(/' + re.escape(slug)
+                      + r'/releases/download/([^"/]+)/[^"/]+\.manifest\.txt)"')
+
+
+RELEASES_API = releases_api(RELEASE_SLUG)
+RELEASES_WEB = releases_web(RELEASE_SLUG)
 _RELEASE_TAG = re.compile(r"^v\d+\.\d+(\.\d+)?$")
 RAW = "https://raw.githubusercontent.com/HamSCI"
 PROXMOX_FILES = ("pm-heartbeat.py", "pm-heartbeat.service", "pm-heartbeat.timer",
@@ -118,6 +142,11 @@ class PmAlignError(Exception):
     """The target cannot be established or a source fails verification."""
 
 
+class ReleaseNotFound(PmAlignError):
+    """The repo holds no such release (a 404 on a /releases/ URL, or the
+    release pages show none).  The one failure fetch_release falls back on."""
+
+
 @dataclass
 class Release:
     tag: str
@@ -132,6 +161,8 @@ class Release:
     # A release candidate (--manifest PATH --release-tag vX.Y): read from the
     # rig's local manifest before any GitHub Release exists.  Canary only.
     candidate: bool = False
+    # The repo whose Release this is: RELEASE_SLUG or one of PROXMOX_SLUGS.
+    source: str = "HamSCI/sigmond-proxmox"
 
 
 def label(rel: Release) -> str:
@@ -190,6 +221,10 @@ def _final_url(url: str, urlopen: Callable) -> str:
             return r.geturl()
     except PmAlignError:
         raise
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise ReleaseNotFound(f"HTTP 404 from {url}") from exc
+        raise PmAlignError(f"GET {url}: {exc}") from exc
     except Exception as exc:
         raise PmAlignError(f"GET {url}: {exc}") from exc
 
@@ -206,19 +241,25 @@ def _preamble(text: str) -> dict:
 def fetch_release(tag: Optional[str] = None, *, urlopen: Callable = urllib.request.urlopen) -> Release:
     """The blessed release ``tag`` (default: the latest) and its manifest preamble.
 
-    Asks the GitHub API first; when the API refuses for its rate limit,
-    reads the same release from github.com's pages instead."""
-    try:
-        tag_name, manifest_url = _release_from_api(tag, urlopen)
-    except PmAlignError as exc:
-        if not getattr(exc, "rate_limited", False):
-            raise
-        tag_name, manifest_url = _release_from_web(tag, urlopen, str(exc))
+    Reads HamSCI/sigmond first.  Only when it answers "no such release"
+    (ReleaseNotFound) does it try each of PROXMOX_SLUGS in turn; any other
+    failure raises at once.  Within each repo it asks the GitHub API first;
+    when the API refuses for its rate limit, reads the same release from
+    github.com's pages instead."""
+    for slug in (RELEASE_SLUG, *PROXMOX_SLUGS):
+        try:
+            tag_name, manifest_url = _release_in(slug, tag, urlopen)
+            break
+        except ReleaseNotFound:
+            continue
+    else:
+        raise ReleaseNotFound(f"no such release: {tag or 'latest'} -- none on "
+                              f"{', '.join((RELEASE_SLUG, *PROXMOX_SLUGS))}")
     text = _get(manifest_url, urlopen).decode("utf-8", "replace")
     pre = _preamble(text)
-    if pre.get("image_version") != tag_name:
+    if pre.get("image_version", pre.get("appliance_tag")) != tag_name:
         raise PmAlignError(f"release {tag_name}: manifest says image_version "
-                           f"{pre.get('image_version')!r}")
+                           f"{pre.get('image_version', pre.get('appliance_tag'))!r}")
     for key in ("appliance_commit", "wizard_commit"):
         if not _FULL_SHA.match(pre.get(key, "")):
             raise PmAlignError(f"release {tag_name}: {key} {pre.get(key)!r} is not a full commit")
@@ -230,7 +271,18 @@ def fetch_release(tag: Optional[str] = None, *, urlopen: Callable = urllib.reque
             raise PmAlignError(f"release {tag_name}: {key} {val!r} is malformed")
     return Release(tag_name, pre["appliance_commit"], pre["wizard_commit"],
                    pre["firstboot_sha256"], text, pre.get("vm6proxy_sha256"),
-                   pre.get("vm4relay_sha256"))
+                   pre.get("vm4relay_sha256"), source=slug)
+
+
+def _release_in(slug: str, tag: Optional[str], urlopen: Callable) -> tuple:
+    """(tag, manifest URL) of ``tag`` (or the latest) on ``slug``; raises
+    ReleaseNotFound when that repo has none."""
+    try:
+        return _release_from_api(slug, tag, urlopen)
+    except PmAlignError as exc:
+        if not getattr(exc, "rate_limited", False):
+            raise
+        return _release_from_web(slug, tag, urlopen, str(exc))
 
 
 def load_candidate(path: str, tag: str) -> Release:
@@ -268,10 +320,18 @@ def load_candidate(path: str, tag: str) -> Release:
                    pre.get("vm4relay_sha256"), candidate=True)
 
 
-def _release_from_api(tag: Optional[str], urlopen: Callable) -> tuple:
-    """(tag, manifest URL) from the GitHub API's release record."""
-    url = f"{RELEASES_API}/tags/{tag}" if tag else f"{RELEASES_API}/latest"
-    meta = json.loads(_get(url, urlopen))
+def _release_from_api(slug: str, tag: Optional[str], urlopen: Callable) -> tuple:
+    """(tag, manifest URL) from the GitHub API's release record on ``slug``.
+    The API answers 404 for a missing tag, for /latest on a repo with no
+    release, and for a repo that does not exist: all ReleaseNotFound."""
+    api = releases_api(slug)
+    url = f"{api}/tags/{tag}" if tag else f"{api}/latest"
+    try:
+        meta = json.loads(_get(url, urlopen))
+    except PmAlignError as exc:
+        if getattr(exc, "status", None) == 404:
+            raise ReleaseNotFound(f"HTTP 404 from {url}") from exc
+        raise
     if meta.get("draft") or meta.get("prerelease"):
         raise PmAlignError(f"release {meta.get('tag_name')} is a draft or prerelease")
     tag_name = meta.get("tag_name") or ""
@@ -282,23 +342,37 @@ def _release_from_api(tag: Optional[str], urlopen: Callable) -> tuple:
     return tag_name, asset["browser_download_url"]
 
 
-def _release_from_web(tag: Optional[str], urlopen: Callable, why: str) -> tuple:
-    """(tag, manifest URL) from github.com's pages, for when the API is rate-limited.
+def _release_from_web(slug: str, tag: Optional[str], urlopen: Callable, why: str) -> tuple:
+    """(tag, manifest URL) from ``slug``'s github.com pages, for when the API
+    is rate-limited.
 
     /releases/latest redirects to the newest release that is neither draft
-    nor prerelease, so it proves the latest blessed.  Nothing on these pages
-    proves a named older tag is no prerelease, so a named tag must be the
-    latest; any other waits for the API."""
-    landed = _final_url(f"{RELEASES_WEB}/latest", urlopen)
-    prefix = f"{RELEASES_WEB}/tag/"
+    nor prerelease, so it proves the latest blessed.  On a repo with no
+    release it lands on /releases itself: ReleaseNotFound, as is a 404.
+    Any other landing refuses.  Nothing on these pages proves a named older
+    tag is no prerelease, so a named tag must be the latest, unless its
+    asset page answers 404, which proves the repo has no such release."""
+    web = releases_web(slug)
+    landed = _final_url(f"{web}/latest", urlopen)
+    if landed.rstrip("/") == web:
+        raise ReleaseNotFound(f"{why}; {slug} has no release ({web}/latest led to {landed!r})")
+    prefix = f"{web}/tag/"
     latest = landed[len(prefix):] if landed.startswith(prefix) else ""
     if not _RELEASE_TAG.match(latest):
-        raise PmAlignError(f"{why}; {RELEASES_WEB}/latest led to {landed!r}, not a release")
+        raise PmAlignError(f"{why}; {web}/latest led to {landed!r}, not a release")
     if tag is not None and tag != latest:
+        try:
+            _get(f"{web}/expanded_assets/{tag}", urlopen)
+        except PmAlignError as exc:
+            if getattr(exc, "status", None) == 404:
+                raise ReleaseNotFound(f"{why}; {slug} has no release {tag}") from exc
+            # absence unproven: refuse as below, never fall back
         raise PmAlignError(f"{why}; without the API only the latest release ({latest}) can "
                            f"be read, not {tag} -- try again after the reset")
-    page = _get(f"{RELEASES_WEB}/expanded_assets/{latest}", urlopen).decode("utf-8", "replace")
-    links = sorted({href for href, t in _MANIFEST_HREF.findall(page) if t == latest})
+    # /latest just named this release; a 404 on its asset page cannot prove
+    # it absent, so that stays a plain PmAlignError.
+    page = _get(f"{web}/expanded_assets/{latest}", urlopen).decode("utf-8", "replace")
+    links = sorted({href for href, t in manifest_href_re(slug).findall(page) if t == latest})
     if len(links) != 1:
         raise PmAlignError(f"{why}; release {latest}'s asset list names "
                            f"{len(links)} manifests, not one")
@@ -319,8 +393,7 @@ def fetch_sources(rel: Release, *, vmid: int, urlopen: Callable = urllib.request
     predates it and it is simply absent; any other failure, on pm-align.py or any other name,
     raises.  sigmond-vm6proxy comes from appliance_commit the same way: a 404
     leaves it absent, and a manifest that names vm6proxy_sha256 must match."""
-    raw_fb = _get(f"{RAW}/sigmond-appliance/{rel.appliance_commit}/firstboot-v3.sh",
-                  urlopen).decode("utf-8")
+    raw_fb = _get_image_file(rel, "firstboot-v3.sh", urlopen).decode("utf-8")
     firstboot = raw_fb.replace("@@VERSION@@", rel.tag)
     got = hashlib.sha256(firstboot.encode("utf-8")).hexdigest()
     if got != rel.firstboot_sha256:
@@ -349,6 +422,21 @@ def fetch_sources(rel: Release, *, vmid: int, urlopen: Callable = urllib.request
                    link)
 
 
+def _get_image_file(rel: Release, name: str, urlopen: Callable) -> bytes:
+    """``name`` in the image repo at appliance_commit: HamSCI/sigmond-proxmox,
+    then HamSCI/sigmond-appliance (its name before the rename), moving on
+    only on a 404.  Any other failure raises at once."""
+    last = None
+    for slug in PROXMOX_SLUGS:
+        try:
+            return _get(f"{RAW}/{slug.split('/', 1)[1]}/{rel.appliance_commit}/{name}", urlopen)
+        except PmAlignError as exc:
+            if getattr(exc, "status", None) != 404:
+                raise
+            last = exc
+    raise last
+
+
 def _fetch_vm6proxy(rel: Release, urlopen: Callable) -> Optional[bytes]:
     return _fetch_appliance_file(rel, "sigmond-vm6proxy", rel.vm6proxy_sha256, urlopen)
 
@@ -358,9 +446,8 @@ def _fetch_appliance_file(rel: Release, name: str, sha: Optional[str],
     """``name`` at appliance_commit.  A 404 leaves it absent unless the
     manifest names its hash; a named hash must match."""
     key = name.replace("sigmond-", "") + "_sha256"
-    url = f"{RAW}/sigmond-appliance/{rel.appliance_commit}/{name}"
     try:
-        body = _get(url, urlopen)
+        body = _get_image_file(rel, name, urlopen)
     except PmAlignError as exc:
         if getattr(exc, "status", None) == 404 and sha is None:
             return None

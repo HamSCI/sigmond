@@ -87,7 +87,7 @@ def test_fetch_release_refuses_a_short_commit():
         pm_align.fetch_release(urlopen=_urlopen(routes))
 
 
-WEB = "https://github.com/HamSCI/sigmond-appliance/releases"
+WEB = "https://github.com/HamSCI/sigmond/releases"
 
 
 class _Landed(_Resp):
@@ -105,8 +105,8 @@ def _web_urlopen(latest="v3.53", assets=None, api=None, manifest=None):
     release's files."""
     import email.message
     if assets is None:
-        assets = (f'<a href="/HamSCI/sigmond-appliance/releases/download/{latest}/'
-                  f'sigmond-appliance-{latest}-20260924-release.manifest.txt">')
+        assets = (f'<a href="/HamSCI/sigmond/releases/download/{latest}/'
+                  f'sigmond-{latest}-20260924-release.manifest.txt">')
     hdrs = email.message.Message()
     hdrs["X-RateLimit-Remaining"] = "0"
     seen = []
@@ -154,9 +154,9 @@ def test_fallback_refuses_a_redirect_to_no_release():
 
 
 def test_fallback_needs_exactly_one_manifest_of_that_release():
-    two = ('<a href="/HamSCI/sigmond-appliance/releases/download/v3.53/a.manifest.txt">'
-           '<a href="/HamSCI/sigmond-appliance/releases/download/v3.53/b.manifest.txt">')
-    other = '<a href="/HamSCI/sigmond-appliance/releases/download/v3.52/x.manifest.txt">'
+    two = ('<a href="/HamSCI/sigmond/releases/download/v3.53/a.manifest.txt">'
+           '<a href="/HamSCI/sigmond/releases/download/v3.53/b.manifest.txt">')
+    other = '<a href="/HamSCI/sigmond/releases/download/v3.52/x.manifest.txt">'
     for assets in ("", two, other):
         with pytest.raises(pm_align.PmAlignError, match="manifests, not one"):
             pm_align.fetch_release(urlopen=_web_urlopen(assets=assets))
@@ -170,6 +170,9 @@ def test_fallback_keeps_the_manifest_checks():
 
 def _source_routes(fb=FB, wizard='VMID="${SIGMOND_VMID:-120}"\n'):
     r = _release_routes()
+    for f in ("firstboot-v3.sh", "sigmond-vm6proxy", "sigmond-vm4relay"):
+        k = "sigmond-proxmox/" + "a" * 40 + "/" + f   # absent until the rename
+        r[k] = urllib.error.HTTPError(k, 404, "Not Found", None, None)
     r["sigmond-appliance/" + "a" * 40 + "/firstboot-v3.sh"] = fb
     r["sigmond/" + "d" * 40 + "/scripts/proxmox/sigmond-wizard.sh"] = wizard
     for n in pm_align.PROXMOX_FILES:
@@ -3483,3 +3486,165 @@ def test_main_candidate_apply_marks_the_record_and_a_blessed_run_clears_it(tmp_p
     assert pm_align.main(["--apply"], root=tmp_path, run=_fake_run([])) == 0
     doc = json.loads(record.read_text())
     assert doc["release"] == "v3.92" and "candidate" not in doc
+
+
+# --- release home: HamSCI/sigmond first, the image repo on a 404 alone -------
+
+S_API = "https://api.github.com/repos/HamSCI/sigmond/releases"
+P_API = "https://api.github.com/repos/HamSCI/sigmond-proxmox/releases"
+L_API = "https://api.github.com/repos/HamSCI/sigmond-appliance/releases"
+P_WEB = "https://github.com/HamSCI/sigmond-proxmox/releases"
+
+
+class Router:
+    """urlopen by exact URL.  A value is bytes (the body), (bytes, final URL)
+    for a redirect, an int (an HTTPError with that code) or an exception."""
+    def __init__(self, routes):
+        self.routes, self.seen = routes, []
+
+    def __call__(self, req, timeout=None):
+        url = req if isinstance(req, str) else req.full_url
+        self.seen.append(url)
+        if url not in self.routes:
+            raise urllib.error.URLError(f"no route for {url}")
+        v = self.routes[url]
+        if isinstance(v, int):
+            import email.message
+            hdrs = email.message.Message()
+            if v in (403, 429):
+                hdrs["X-RateLimit-Remaining"] = "0"
+            raise urllib.error.HTTPError(url, v, "err", hdrs, io.BytesIO(b"rate limit"))
+        if isinstance(v, BaseException):
+            raise v
+        if isinstance(v, tuple):
+            return _Landed(v[0], v[1])
+        return _Landed(v.encode() if isinstance(v, str) else v, url)
+
+
+def _rel_json(tag, url, name=None):
+    name = name or f"sigmond-{tag}-20261121-release.manifest.txt"
+    return json.dumps({"tag_name": tag, "assets": [
+        {"name": name, "browser_download_url": url}]}).encode()
+
+
+def _m(tag):
+    return _manifest().replace("v3.53", tag)
+
+
+def test_pm_latest_from_sigmond():
+    r = Router({S_API + "/latest": _rel_json("v3.94", "https://dl/s"),
+                "https://dl/s": _m("v3.94")})
+    rel = pm_align.fetch_release(urlopen=r)
+    assert (rel.tag, rel.source) == ("v3.94", "HamSCI/sigmond")
+    assert not [u for u in r.seen if "proxmox" in u or "appliance" in u]
+
+
+def test_pm_no_release_on_sigmond_falls_back():
+    # sigmond 404, proxmox 404 (before the rename), the legacy name answers.
+    r = Router({S_API + "/latest": 404, P_API + "/latest": 404,
+                L_API + "/latest": _rel_json("v3.93", "https://dl/l"),
+                "https://dl/l": _m("v3.93")})
+    rel = pm_align.fetch_release(urlopen=r)
+    assert (rel.tag, rel.source) == ("v3.93", "HamSCI/sigmond-appliance")
+    assert r.seen[:3] == [S_API + "/latest", P_API + "/latest", L_API + "/latest"]
+    r = Router({S_API + "/tags/v3.93": 404,
+                P_API + "/tags/v3.93": _rel_json("v3.93", "https://dl/p"),
+                "https://dl/p": _m("v3.93")})
+    assert pm_align.fetch_release("v3.93", urlopen=r).source == "HamSCI/sigmond-proxmox"
+
+
+def test_pm_network_error_does_not_fall_back():
+    for exc in (urllib.error.URLError("timed out"), TimeoutError("t"),
+                http.client.RemoteDisconnected("gone"), 500, 502, 503):
+        r = Router({S_API + "/latest": exc,
+                    P_API + "/latest": _rel_json("v3.93", "https://dl/p"),
+                    "https://dl/p": _m("v3.93")})
+        with pytest.raises(pm_align.PmAlignError) as cm:
+            pm_align.fetch_release(urlopen=r)
+        assert not isinstance(cm.value, pm_align.ReleaseNotFound)
+        assert r.seen == [S_API + "/latest"]
+    # the release exists, its manifest asset 404s: broken, not absent
+    r = Router({S_API + "/latest": _rel_json("v3.94", "https://dl/s"), "https://dl/s": 404,
+                P_API + "/latest": _rel_json("v3.93", "https://dl/p")})
+    with pytest.raises(pm_align.PmAlignError) as cm:
+        pm_align.fetch_release(urlopen=r)
+    assert not isinstance(cm.value, pm_align.ReleaseNotFound)
+    assert not [u for u in r.seen if "proxmox" in u]
+
+
+def test_pm_web_no_release_falls_back():
+    name = "sigmond-appliance-v3.93-20261101-release.manifest.txt"
+    dl = f"/HamSCI/sigmond-proxmox/releases/download/v3.93/{name}"
+    page = f'<a href="{dl}">'.encode()
+    r = Router({S_API + "/latest": 403, WEB + "/latest": (b"<html>", WEB),
+                P_API + "/latest": 403, P_WEB + "/latest": (b"<html>", P_WEB + "/tag/v3.93"),
+                P_WEB + "/expanded_assets/v3.93": page,
+                "https://github.com" + dl: _m("v3.93")})
+    rel = pm_align.fetch_release(urlopen=r)
+    assert (rel.tag, rel.source) == ("v3.93", "HamSCI/sigmond-proxmox")
+    # a named tag whose asset page 404s on sigmond is absent there, too
+    r = Router({S_API + "/tags/v3.93": 403,
+                WEB + "/latest": (b"<html>", WEB + "/tag/v3.94"),
+                WEB + "/expanded_assets/v3.93": 404,
+                P_API + "/tags/v3.93": 403,
+                P_WEB + "/latest": (b"<html>", P_WEB + "/tag/v3.93"),
+                P_WEB + "/expanded_assets/v3.93": page,
+                "https://github.com" + dl: _m("v3.93")})
+    assert pm_align.fetch_release("v3.93", urlopen=r).source == "HamSCI/sigmond-proxmox"
+    # present on sigmond but not the latest: unproven without the API, refuse
+    r = Router({S_API + "/tags/v3.94": 403,
+                WEB + "/latest": (b"<html>", WEB + "/tag/v3.95"),
+                WEB + "/expanded_assets/v3.94": b"<html>"})
+    with pytest.raises(pm_align.PmAlignError) as cm:
+        pm_align.fetch_release("v3.94", urlopen=r)
+    assert not isinstance(cm.value, pm_align.ReleaseNotFound)
+    assert not [u for u in r.seen if "proxmox" in u]
+    # a 5xx on the landing page refuses
+    r = Router({S_API + "/latest": 403, WEB + "/latest": 503})
+    with pytest.raises(pm_align.PmAlignError) as cm:
+        pm_align.fetch_release(urlopen=r)
+    assert not isinstance(cm.value, pm_align.ReleaseNotFound)
+
+
+def test_pm_new_stem_asset_found():
+    name = "sigmond-v3.94-20261121-release.manifest.txt"
+    r = Router({S_API + "/latest": _rel_json("v3.94", "https://dl/s", name=name),
+                "https://dl/s": _m("v3.94")})
+    assert pm_align.fetch_release(urlopen=r).tag == "v3.94"
+    dl = f"/HamSCI/sigmond/releases/download/v3.94/{name}"
+    r = Router({S_API + "/latest": 403, WEB + "/latest": (b"<html>", WEB + "/tag/v3.94"),
+                WEB + "/expanded_assets/v3.94": f'<a href="{dl}">'.encode(),
+                "https://github.com" + dl: _m("v3.94")})
+    rel = pm_align.fetch_release(urlopen=r)
+    assert (rel.tag, rel.source) == ("v3.94", "HamSCI/sigmond")
+
+
+def test_pm_raw_falls_back_on_404():
+    c = "a" * 40
+    rel = pm_align.Release("v3.94", c, "d" * 40, hashlib.sha256(FB.replace("@@VERSION@@", "v3.94").encode()).hexdigest(),
+                           _m("v3.94"))
+    routes = _source_routes()
+    for k in [k for k in routes if k.startswith("sigmond-proxmox/")]:
+        del routes[k]
+    base = "https://raw.githubusercontent.com/HamSCI/"
+    seen = []
+    inner = _urlopen(routes)
+
+    def op(req, timeout=None):
+        url = req if isinstance(req, str) else req.full_url
+        seen.append(url)
+        if "/sigmond-proxmox/" in url:
+            raise urllib.error.HTTPError(url, 404, "Not Found", None, None)
+        return inner(req, timeout)
+    src = pm_align.fetch_sources(rel, vmid=100, urlopen=op)
+    assert "echo v3.94" in src.firstboot and src.vm6proxy == VM6_BODY.encode()
+    assert seen.index(f"{base}sigmond-proxmox/{c}/firstboot-v3.sh") < \
+        seen.index(f"{base}sigmond-appliance/{c}/firstboot-v3.sh")
+    # a 5xx (or timeout) on sigmond-proxmox never moves on
+    def bad(req, timeout=None):
+        url = req if isinstance(req, str) else req.full_url
+        if "/sigmond-proxmox/" in url:
+            raise urllib.error.HTTPError(url, 503, "down", None, None)
+        return inner(req, timeout)
+    with pytest.raises(pm_align.PmAlignError):
+        pm_align.fetch_sources(rel, vmid=100, urlopen=bad)
