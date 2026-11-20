@@ -613,19 +613,30 @@ git -C "$PX_REPO" show "origin/main:INSTALL.md" > "$INSTR_MD" 2>/dev/null && _ha
 git -C "$PX_REPO" show "origin/main:docs/install-page.html" > "$INSTR_HTML" 2>/dev/null && _have_page=1
 # The flasher (Michael, 2026-11-03).  sigmond-flash-latest.sh sits in each download
 # folder under ONE fixed name, so the link test sites hold never changes, and the
-# bless re-uploads it every time so that copy never goes stale.  Same origin/main
-# read as the instructions.  Not a gate: a release ships without it, with a NOTE.
+# bless re-uploads it every time so that copy never goes stale.  Not a gate: a
+# release ships without it, with a NOTE.
 FLASHER=""
 FLASHER_NOTE=""
-if git -C "$PX_REPO" show "origin/main:sigmond-flash-latest.sh" > "$INSTR_DIR/sigmond-flash-latest.sh" 2>/dev/null; then
+#
+# The flasher runs as root on the machines of the people who download it, so it
+# comes from the image commit this release blesses (appliance_commit), not from
+# whatever origin/main holds at bless time: a commit pushed to main after the
+# tests would otherwise reach every test site unreviewed.  The dry run and the
+# confirmation print its sha256 and that commit.
+FLASHER_SHA=""
+FLASHER_AT="${PX_COMMIT:0:12}"
+if [ -z "$PX_COMMIT" ]; then
+    FLASHER_NOTE="NOTE: no appliance_commit resolved (see gate 1) -- the flasher in the download folders was not refreshed"
+elif git -C "$PX_REPO" show "$PX_COMMIT:sigmond-flash-latest.sh" > "$INSTR_DIR/sigmond-flash-latest.sh" 2>/dev/null; then
     if bash -n "$INSTR_DIR/sigmond-flash-latest.sh" 2>/dev/null; then
         FLASHER="$INSTR_DIR/sigmond-flash-latest.sh"
+        FLASHER_SHA="$(sha256sum "$FLASHER" | cut -d' ' -f1)"
         _fv="$(sed -n 's/^FLASH_VERSION=\([0-9.]*\).*/\1/p' "$FLASHER" | head -1)"
     else
-        FLASHER_NOTE="WARNING: sigmond-flash-latest.sh on origin/main fails bash -n -- not publishing it; each folder keeps its previous copy"
+        FLASHER_NOTE="WARNING: sigmond-flash-latest.sh at image commit $FLASHER_AT fails bash -n -- not publishing it; each folder keeps its previous copy"
     fi
 else
-    FLASHER_NOTE="NOTE: no sigmond-flash-latest.sh on origin/main -- the flasher in the download folders was not refreshed"
+    FLASHER_NOTE="NOTE: no sigmond-flash-latest.sh at image commit $FLASHER_AT -- the flasher in the download folders was not refreshed"
 fi
 # flasher_vs_published <dest> — why the flasher must NOT go to <dest>, or
 # nothing when it may.  Copies people already hold replace themselves only
@@ -646,7 +657,7 @@ flasher_vs_published() {
        && [ "$(printf '%s\n%s\n' "$old_v" "$new_v" | sort -V | tail -1)" = "$new_v" ]; then
         return 0
     fi
-    echo "sigmond-flash-latest.sh on origin/main differs from the copy already published but its FLASH_VERSION (${new_v:-none}) is not above that copy's (${old_v:-none}) -- not publishing it here, since copies people hold would never update to it; bump FLASH_VERSION on main and re-run the bless"
+    echo "sigmond-flash-latest.sh at image commit $FLASHER_AT differs from the copy already published but its FLASH_VERSION (${new_v:-none}) is not above that copy's (${old_v:-none}) -- not publishing it here, since copies people hold would never update to it; bump FLASH_VERSION, build a new candidate, and bless that"
 }
 
 if [ $_have_inst -eq 0 ]; then
@@ -997,7 +1008,7 @@ if [ $APPLY -eq 0 ]; then
     say "  $(basename "$SHAFILE")"
     say "DRY RUN -- would also publish $(basename "$INSTR_MD"), $(basename "$INSTR_HTML") and $(basename "$CL_PUB") beside the image at every publish target (from origin/main)"
     say "DRY RUN -- the release notes would open with CHANGELOG.md's $VERSION section, under \"What's new\""
-    if [ -n "$FLASHER" ]; then say "DRY RUN -- and sigmond-flash-latest.sh (from origin/main), under its fixed name"; else say "DRY RUN -- ${FLASHER_NOTE:-no flasher}"; fi
+    if [ -n "$FLASHER" ]; then say "DRY RUN -- and sigmond-flash-latest.sh from image commit $FLASHER_AT (sha256 $FLASHER_SHA), under its fixed name"; else say "DRY RUN -- ${FLASHER_NOTE:-no flasher}"; fi
     say "Re-run with --apply to publish. Creating a public Release is outward-facing and requires explicit human authorization."
     exit 0
 fi
@@ -1379,6 +1390,11 @@ rm -f "$CHANGELOG_FILE"
 say "----- RELEASE NOTES ($VERSION) -- read before confirming -----"
 cat "$NOTES"
 say "----- END RELEASE NOTES -----"
+if [ -n "$FLASHER" ]; then
+    say "the download folders also get sigmond-flash-latest.sh from image commit $FLASHER_AT, sha256 $FLASHER_SHA"
+else
+    say "${FLASHER_NOTE:-no flasher}"
+fi
 if [ "$NFLAGGED" -eq 0 ]; then
     PROMPT="Type exactly 'publish $VERSION' to confirm tagging and publication to $GH_REPO${MIRROR_SLUG:+ and $MIRROR_SLUG} (anything else aborts): "
     REQUIRED="publish $VERSION"
@@ -1445,8 +1461,23 @@ gh release create "$VERSION" --repo "$GH_REPO" \
     --target "$SIG_COMMIT" --verify-tag \
     "$MANIFEST" "$SHAFILE"
 RC=$?
+# A Release that failed leaves work for the operator, and the EXIT trap removes
+# the temp directory, notes included.  _keep_notes copies the notes beside the
+# manifest on the rig and prints that path, for the by-hand command.
+KEPT_NOTES="${MANIFEST%.manifest.txt}.release-notes.md"
+_keep_notes(){
+    if cp "$NOTES" "$KEPT_NOTES" 2>/dev/null; then echo "$KEPT_NOTES"
+    else echo "<the notes printed above; could not keep a copy at $KEPT_NOTES>"; fi
+}
+if [ $RC -ne 0 ]; then
+    _kn="$(_keep_notes)"
+    say "FATAL: gh release create on $GH_REPO failed (exit $RC).  Tags $VERSION stand on origin in both repos; no Release exists on $GH_REPO and nothing was published."
+    say "  Re-run the bless (gate 1 accepts tags already at their commits), or by hand:"
+    say "  gh release create $VERSION --repo $GH_REPO --title 'sigmond $VERSION' --notes-file $_kn --target $SIG_COMMIT --verify-tag $MANIFEST $SHAFILE"
+    exit 1
+fi
 MIRROR_RC=0
-if [ $RC -eq 0 ] && [ -n "$MIRROR_SLUG" ]; then
+if [ -n "$MIRROR_SLUG" ]; then
     # The same Release on the image repo, for v3.93 and older smd and
     # pm-align.  Its tag names the image repo's commit.  A failure here leaves
     # the authoritative Release standing: say so, give the command, go on to
@@ -1458,8 +1489,9 @@ if [ $RC -eq 0 ] && [ -n "$MIRROR_SLUG" ]; then
         "$MANIFEST" "$SHAFILE"
     MIRROR_RC=$?
     if [ $MIRROR_RC -ne 0 ]; then
+        _kn="$(_keep_notes)"
         say "WARNING: the mirror Release on $MIRROR_SLUG failed -- pre-v3.94 stations cannot see $VERSION until it exists.  By hand:"
-        say "  gh release create $VERSION --repo $MIRROR_SLUG --title 'sigmond $VERSION' --notes-file <the notes above> --target $PX_COMMIT --verify-tag $(basename "$MANIFEST") $(basename "$SHAFILE")"
+        say "  gh release create $VERSION --repo $MIRROR_SLUG --title 'sigmond $VERSION' --notes-file $_kn --target $PX_COMMIT --verify-tag $MANIFEST $SHAFILE"
     fi
 fi
 
@@ -1569,7 +1601,7 @@ if [ $RC -eq 0 ]; then
                     else
                         _allok=0
                         say "  [$_lab] WARNING: could not publish sigmond-flash-latest.sh to $_d"
-                        say "  [$_lab]   by hand: git show origin/main:sigmond-flash-latest.sh > sigmond-flash-latest.sh; rclone copyto sigmond-flash-latest.sh '$_d/sigmond-flash-latest.sh'"
+                        say "  [$_lab]   by hand, in an image-repo checkout: git show $PX_COMMIT:sigmond-flash-latest.sh > sigmond-flash-latest.sh (sha256 $FLASHER_SHA); rclone copyto sigmond-flash-latest.sh '$_d/sigmond-flash-latest.sh'"
                     fi
                 fi
                 # Prune what this bless supersedes, only AFTER the promote

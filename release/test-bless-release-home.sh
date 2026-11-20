@@ -50,7 +50,9 @@ case "${1:-} ${2:-}" in
     "release view")
         case " ${STUB_GH_RELEASES:-} " in *" $repo:$3 "*) echo "title: $3"; exit 0 ;; esac
         echo "release not found" >&2; exit 1 ;;
-    "release create") exit "${STUB_GH_CREATE_RC:-0}" ;;
+    "release create")
+        case " ${STUB_GH_CREATE_FAIL:-} " in *" $repo "*) echo "HTTP 502: Bad Gateway" >&2; exit 1 ;; esac
+        exit 0 ;;
 esac
 exit 0
 EOF
@@ -233,7 +235,7 @@ run_bless() {
     local envs=(SIGMOND_REPO="$S/sig" PROXMOX_REPO="$S/px" RIG_DIR="$S/rig" PUBLISH_LIB="$S/pub/publish-lib.sh"
                 STUB_CALLS="$S/calls" TMPDIR="$S/tmp" PATH="$T/bin:$PATH"
                 STUB_GH_REPOS="${STUB_GH_REPOS:-HamSCI/sigmond HamSCI/sigmond-proxmox}"
-                STUB_GH_RELEASES="${STUB_GH_RELEASES:-}")
+                STUB_GH_RELEASES="${STUB_GH_RELEASES:-}" STUB_GH_CREATE_FAIL="${STUB_GH_CREATE_FAIL:-}")
     if [ "$apply" = 1 ]; then
         OUT="$(cd "$S" && printf 'publish %s\n' "$SC_VERSION" | env "${envs[@]}" \
             script -qefc "bash '$BLESS' $SC_VERSION $* --apply" /dev/null 2>&1)"
@@ -374,6 +376,34 @@ echo "--apply with the tags already at the commits: no new tag, Releases created
 sc_reset; SC_SIG_TAG=here; SC_PX_TAG=here; mkscene apply_re; run_bless apply_re 1 --mirror
 chk   "the bless exits 0"           "$RC" "0"
 chk   "two release creates"         "$(grep -c 'release create' "$T/apply_re/calls")" "2"
+
+echo "--apply: the Release on HamSCI/sigmond fails after the tags went out"
+sc_reset; mkscene apply_relfail
+STUB_GH_CREATE_FAIL="HamSCI/sigmond" run_bless apply_relfail 1 --mirror
+KEPT="$T/apply_relfail/rig/$STEM.release-notes.md"
+chk   "the bless exits 1"           "$RC" "1"
+has   "it says the tags stand"      "$OUT" "Tags v3.70 stand on origin in both repos; no Release exists on HamSCI/sigmond"
+has   "it says to re-run"           "$OUT" "Re-run the bless (gate 1 accepts tags already at their commits)"
+has   "the by-hand command names the kept notes" "$OUT" "--notes-file $KEPT"
+chk   "the kept notes exist after exit" "$([ -s "$KEPT" ] && echo yes || echo no)" "yes"
+has   "they hold the notes"         "$(cat "$KEPT" 2>/dev/null)" "## sigmond v3.70"
+chk   "the tags stand on both origins" \
+      "$(git -C "$T/apply_relfail/sig.git" tag) $(git -C "$T/apply_relfail/px.git" tag)" "v3.70 v3.70"
+chk   "no mirror Release attempted" "$(grep -c 'release create.*sigmond-proxmox' "$T/apply_relfail/calls")" "0"
+lacks "nothing published"           "$OUT" "promoting"
+run_bless apply_relfail 1 --mirror
+chk   "a re-run with GitHub back: exits 0" "$RC" "0"
+chk   "  and creates both Releases" "$(grep -c 'release create' "$T/apply_relfail/calls")" "2"
+
+echo "--apply: the mirror Release fails"
+sc_reset; mkscene apply_mirfail
+STUB_GH_CREATE_FAIL="HamSCI/sigmond-proxmox" run_bless apply_mirfail 1 --mirror
+KEPT="$T/apply_mirfail/rig/$STEM.release-notes.md"
+chk   "the bless exits 1"           "$RC" "1"
+has   "it warns"                    "$OUT" "WARNING: the mirror Release on HamSCI/sigmond-proxmox failed"
+has   "the by-hand command names the kept notes" "$OUT" "--notes-file $KEPT --target"
+chk   "the kept notes exist after exit" "$([ -s "$KEPT" ] && echo yes || echo no)" "yes"
+lacks "no placeholder in the command" "$OUT" "<the notes above>"
 
 echo "--apply blocked by a gate: no tag, no Release"
 sc_reset; SC_RECORDS=""; mkscene apply_blocked; run_bless apply_blocked 1 --mirror

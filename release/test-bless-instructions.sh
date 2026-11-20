@@ -194,7 +194,8 @@ sc_reset() {
     SC_INSTALL=""; SC_PAGE=""            # image repo commit 2, pushed to origin/main ("" = no change; DELETE = remove)
     SC_LOCAL_INSTALL=""; SC_LOCAL_PAGE=""  # an UNPUSHED commit in the image repo checkout
     SC_NOIMAGE=0; SC_NOPENDING=""
-    SC_FLASHER=""                         # sigmond-flash-latest.sh pushed to the image repo's origin/main ("" = none)
+    SC_FLASHER=""                         # sigmond-flash-latest.sh in the image commit the build used ("" = none)
+    SC_MAIN_FLASHER=""                    # a different flasher pushed to origin/main after the build ("" = none)
     SC_CL=DEFAULT                         # sigmond CHANGELOG.md pushed to origin/main (DEFAULT = a good section for SC_VERSION; DELETE = remove; KEEP = the build commit's v3.69-only file)
     SC_LOCAL_CL=""                        # sigmond CHANGELOG.md in an UNPUSHED commit
     SC_BM=DEFAULT                         # sigmond docs/install-bare-metal.md pushed to origin/main (DEFAULT = verified against and checking out SC_VERSION; DELETE = remove; else the text)
@@ -219,10 +220,11 @@ mkscene() {
         mkdir -p docs
         printf '%s\n' "$OLD_INST" > INSTALL.md
         printf '%s\n' "$OLD_PAGE" > docs/install-page.html
+        [ -n "$SC_FLASHER" ] && printf '%s\n' "$SC_FLASHER" > sigmond-flash-latest.sh
         git add -A && git commit -q -m "initial: firstboot and the v3.69 instructions"
         git push -q origin main 2>/dev/null
     )
-    local px; px="$(git -C "$S/px-seed" rev-parse HEAD)"
+    local px; px="$(git -C "$S/px-seed" rev-parse HEAD)"; echo "$px" > "$S/px.commit"
     # The bless's checkout, cloned at the build.  The instructions commit lands
     # on origin/main AFTER this clone, as it does on the rig: gate 1's fetch has
     # to bring it in before gate 7 reads it.
@@ -242,9 +244,9 @@ mkscene() {
             git add -A && git commit -q -m "docs: instructions for the new image"
             git push -q origin main 2>/dev/null
         fi
-        if [ -n "$SC_FLASHER" ]; then
-            printf '%s\n' "$SC_FLASHER" > sigmond-flash-latest.sh
-            git add -A && git commit -q -m "sigmond-flash-latest.sh"
+        if [ -n "$SC_MAIN_FLASHER" ]; then
+            printf '%s\n' "$SC_MAIN_FLASHER" > sigmond-flash-latest.sh
+            git add -A && git commit -q -m "sigmond-flash-latest.sh, after the build"
             git push -q origin main 2>/dev/null
         fi
     )
@@ -698,14 +700,14 @@ has   "[rob] still got its instructions"         "$OUT" "[rob] instructions:"
 # name updates the Drive file in place, which keeps its id and so its link.
 GOOD_FLASHER='#!/bin/bash
 echo "flash the newest image"'
-echo "--apply: the flasher reaches every target, from origin/main, under its fixed name"
+echo "--apply: the flasher reaches every target, from the image commit, under its fixed name"
 sc_reset; SC_INSTALL="$GOOD_INST"; SC_PAGE="$GOOD_PAGE"; SC_FLASHER="$GOOD_FLASHER"; mkscene flash; run_bless flash 1
 R="$T/flash/remote"
 chk   "the bless exits 0" "$RC" "0"
 for pair in "rob:$R/gdrive/sigmond-images" "mjh:$R/gdrive,root_folder_id=ABC123" "wd30:$R/home-wd30" "bl:$R/gdrive/blessed-only"; do
     lab="${pair%%:*}"; dir="${pair#*:}"
-    chk "[$lab] sigmond-flash-latest.sh arrived, byte for byte from origin/main" \
-        "$(git -C "$T/flash/px.git" show main:sigmond-flash-latest.sh | cmp -s - "$dir/sigmond-flash-latest.sh" && echo same || echo differ)" "same"
+    chk "[$lab] sigmond-flash-latest.sh arrived, byte for byte from the image commit" \
+        "$(git -C "$T/flash/px.git" show "$(cat "$T/flash/px.commit")":sigmond-flash-latest.sh | cmp -s - "$dir/sigmond-flash-latest.sh" && echo same || echo differ)" "same"
     chk "[$lab] no versioned copy of the flasher" "$(ls "$dir" | grep -c 'flash-latest' )" "1"
     has "[$lab] the log names the flasher" "$OUT" "[$lab] flasher: sigmond-flash-latest.sh"
 done
@@ -714,17 +716,40 @@ n_fl="$(grep -n "copyto -q .*sigmond-flash-latest.sh gdrive:sigmond-images/sigmo
 chk "[rob] the image lands before the flasher" "$([ -n "$n_mv" ] && [ -n "$n_fl" ] && [ "$n_mv" -lt "$n_fl" ] && echo before || echo "mv=$n_mv fl=$n_fl")" "before"
 chk "no temp files left" "$(leftover flash)" "0"
 
-echo "--apply: no flasher on origin/main is a NOTE, not a failure"
+echo "--apply: a flasher pushed to origin/main after the build is not what ships"
+MAIN_FLASHER='#!/bin/bash
+echo "pushed after the tests: never reviewed"'
+sc_reset; SC_INSTALL="$GOOD_INST"; SC_PAGE="$GOOD_PAGE"; SC_FLASHER="$GOOD_FLASHER"; SC_MAIN_FLASHER="$MAIN_FLASHER"; mkscene flashmain; run_bless flashmain 1
+R="$T/flashmain/remote"; PXC="$(cat "$T/flashmain/px.commit")"
+FSHA="$(git -C "$T/flashmain/px.git" show "$PXC:sigmond-flash-latest.sh" | sha256sum | cut -d' ' -f1)"
+chk   "the bless exits 0" "$RC" "0"
+chk   "origin/main really holds another flasher" \
+      "$(git -C "$T/flashmain/px.git" show main:sigmond-flash-latest.sh | cmp -s - <(git -C "$T/flashmain/px.git" show "$PXC:sigmond-flash-latest.sh") && echo same || echo differ)" "differ"
+for pair in "rob:$R/gdrive/sigmond-images" "bl:$R/gdrive/blessed-only"; do
+    lab="${pair%%:*}"; dir="${pair#*:}"
+    chk "[$lab] the published flasher is the image commit's" "$(cat "$dir/sigmond-flash-latest.sh")" "$GOOD_FLASHER"
+done
+has   "before the prompt, the sha256 and the commit are named" "$(sed -n '1,/Type exactly/p' <<<"$OUT")" "sigmond-flash-latest.sh from image commit ${PXC:0:12}, sha256 $FSHA"
+sc_reset; SC_INSTALL="$GOOD_INST"; SC_PAGE="$GOOD_PAGE"; SC_FLASHER="$GOOD_FLASHER"; SC_MAIN_FLASHER="$MAIN_FLASHER"; mkscene flashdry; run_bless flashdry 0
+PXD="$(cat "$T/flashdry/px.commit")"
+has   "the dry run names the commit and sha256" "$OUT" "DRY RUN -- and sigmond-flash-latest.sh from image commit ${PXD:0:12} (sha256 $FSHA)"
+sc_reset; SC_INSTALL="$GOOD_INST"; SC_PAGE="$GOOD_PAGE"; SC_FLASHER="$GOOD_FLASHER"; SC_MAIN_FLASHER="$MAIN_FLASHER"; mkscene flashput
+STUB_FAIL_PUT='gdrive:sigmond-images/sigmond-flash-latest.sh'; export STUB_FAIL_PUT
+run_bless flashput 1
+unset STUB_FAIL_PUT
+has   "a failed flasher upload: the by-hand line names the image commit" "$(grep -F '[rob]   by hand' <<<"$OUT")" "git show $(cat "$T/flashput/px.commit"):sigmond-flash-latest.sh"
+
+echo "--apply: no flasher at the image commit is a NOTE, not a failure"
 sc_reset; SC_INSTALL="$GOOD_INST"; SC_PAGE="$GOOD_PAGE"; mkscene noflash; run_bless noflash 1
 chk   "the bless exits 0" "$RC" "0"
-has   "the log says the flasher was not refreshed" "$OUT" "no sigmond-flash-latest.sh on origin/main"
+has   "the log says the flasher was not refreshed" "$OUT" "no sigmond-flash-latest.sh at image commit"
 chk   "nothing named flash-latest was uploaded" "$(grep -c 'flash-latest' "$T/noflash/calls")" "0"
 
 echo "--apply: a flasher that fails bash -n is not published"
 sc_reset; SC_INSTALL="$GOOD_INST"; SC_PAGE="$GOOD_PAGE"; SC_FLASHER='#!/bin/bash
 if then fi ('; mkscene badflash; run_bless badflash 1
 chk   "the bless exits 0" "$RC" "0"
-has   "the log warns" "$OUT" "sigmond-flash-latest.sh on origin/main fails bash -n"
+has   "the log warns" "$OUT" "fails bash -n -- not publishing it"
 chk   "nothing named flash-latest was uploaded" "$(grep -c 'flash-latest' "$T/badflash/calls")" "0"
 
 # A changed flasher must carry a higher FLASH_VERSION than the copy already in
@@ -747,7 +772,7 @@ seed_flasher() { # seed_flasher <scene> <content> — a copy already published i
 echo "--apply: a changed flasher without a FLASH_VERSION bump is not published"
 sc_reset; SC_INSTALL="$GOOD_INST"; SC_PAGE="$GOOD_PAGE"; SC_FLASHER="$V1B"; mkscene nobump; seed_flasher nobump "$V1"; run_bless nobump 1
 chk   "the bless exits 0" "$RC" "0"
-has   "the log warns about the bump" "$OUT" "[rob] WARNING: sigmond-flash-latest.sh on origin/main differs from the copy already published but its FLASH_VERSION (2026.11.11.3) is not above"
+has   "the log warns about the bump" "$OUT" "differs from the copy already published but its FLASH_VERSION (2026.11.11.3) is not above"
 chk   "nothing named flash-latest was uploaded" "$(grep -c 'copyto.*flash-latest' "$T/nobump/calls")" "0"
 chk   "[rob] the published copy is untouched" "$(cat "$T/nobump/remote/gdrive/sigmond-images/sigmond-flash-latest.sh")" "$V1"
 
