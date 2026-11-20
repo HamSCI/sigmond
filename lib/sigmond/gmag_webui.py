@@ -96,6 +96,8 @@ Description=HamSCI magnetometer real-time dashboard (gmag_webui, port {port})
 Documentation=https://github.com/HamSCI/gmag_webui
 After=network-online.target mag-recorder.service
 Wants=network-online.target
+# No magnetometer adapter, no start: the dashboard shows mag-recorder's feed.
+ConditionPathExists=/dev/ttyMAG0
 
 [Service]
 Type=simple

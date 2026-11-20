@@ -25,6 +25,7 @@ from typing import Any, Callable, Optional
 
 from sigmond.drift import exceptions as drift_exceptions
 from sigmond.drift.builds import build_items
+from sigmond.drift.devices import device_items
 from sigmond.drift.model import KINDS, Item, Report, run_collectors
 from sigmond.drift.overrides import override_items
 from sigmond.drift.source import host_items, source_items
@@ -114,6 +115,10 @@ class Readers:
     catalog_names: Any = field(default_factory=set)
     unit_refs: Any = ()
     unit_env: Callable = systemd_unit_env
+    # device-reading clients (v3.94 Task 8): gated is {name: label}
+    gated: Any = field(default_factory=dict)
+    device_ready: Callable = lambda name: None
+    device_seen: Callable = lambda name: True
     # exceptions (Task 7)
     exceptions_path: Optional[Path] = None  # default: the module's path
     now: Optional[datetime] = None
@@ -137,6 +142,10 @@ def build(station: str, *, readers: Readers) -> Report:
                                     is_enabled=r.is_enabled,
                                     service_active=r.service_active,
                                     template_instances=r.template_instances)),
+        ("unit", lambda: device_items(_v(r.enabled) or {},
+                                      gated=_v(r.gated) or {},
+                                      ready=r.device_ready,
+                                      seen=r.device_seen)),
         ("override", lambda: override_items(
             client_configs=_v(r.client_configs) or {},
             catalog_override=r.catalog_override, pins_file=r.pins_file,
@@ -223,6 +232,22 @@ def _unit_refs(enabled: Callable[[], dict]) -> list:
     return resolve_units(names, names)
 
 
+def _gated() -> dict:
+    from sigmond.catalog import load_catalog
+    from sigmond.drift.devices import gated_components
+    return gated_components(load_catalog())
+
+
+def _device_ready(name: str):
+    from sigmond import hardware
+    return hardware.hardware_ready(name)
+
+
+def _device_seen(name: str) -> bool:
+    from sigmond.drift import devices
+    return devices.seen_before(name)
+
+
 def station_readers(*, plan, release: Optional[str], baseline: str,
                     host_record, file_drift, manifest,
                     base: Path = Path("/opt/git/sigmond"),
@@ -245,7 +270,9 @@ def station_readers(*, plan, release: Optional[str], baseline: str,
         enabled=enabled,
         client_configs=lambda: _client_configs(enabled),
         catalog_names=_catalog_names,
-        unit_refs=lambda: _unit_refs(enabled))
+        unit_refs=lambda: _unit_refs(enabled),
+        gated=_gated, device_ready=_device_ready,
+        device_seen=_device_seen)
 
 
 # ---------------------------------------------------------------------------

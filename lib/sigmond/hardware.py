@@ -125,7 +125,16 @@ def hardware_ready(client: str) -> Optional[bool]:
     if val is not None:
         return val
     probe = _LEGACY_PROBES.get(client)
-    return probe() if probe else None
+    if probe:
+        return probe()
+    # A client with no inventory CLI that reads another client's device
+    # answers as that client does.
+    other = _READINESS_OF.get(client)
+    return hardware_ready(other) if other else None
+
+
+# gmag-webui has no inventory CLI; it reads mag-recorder's magnetometer.
+_READINESS_OF: dict[str, str] = {"gmag-webui": "mag-recorder"}
 
 
 # ---------------------------------------------------------------------------

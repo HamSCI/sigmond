@@ -7002,7 +7002,16 @@ _PRELOAD_MODULES = {
               # _align_own_units installs sigmond's units after the move
               'sigmond.drift', 'sigmond.drift.units', 'sigmond.drift.model',
               # heartbeat._read_manifest reads drift.json's source items
-              'sigmond.drift.source'),
+              'sigmond.drift.source',
+              # _align_own_timers_due reads archive.CONFIG
+              'sigmond.archive',
+              # _align_follow_devices: readiness and the seen-before
+              # evidence, and hardware's own lazy imports
+              'sigmond.drift.devices', 'sigmond.hardware',
+              'sigmond.archive_health', 'sigmond.commands.check',
+              'sigmond.radiod_publish', 'sigmond.radiod_rename',
+              'sigmond.sdr_map', 'sigmond.station_role',
+              'sigmond.topology_drift'),
 }
 
 
@@ -9304,6 +9313,144 @@ _ALIGN_SITE_TIMING_JOURNAL_LINES = 20
 _ALIGN_UNIT_DIR = Path('/etc/systemd/system')
 
 
+def _align_unit_enabled_state(unit: str, run) -> str:
+    """The last line `systemctl is-enabled <unit>` prints ('' on none)."""
+    r = _align_run(['systemctl', 'is-enabled', unit], run=run, timeout=15,
+                   action=f'systemctl is-enabled {unit}')
+    lines = (r.stdout or '').strip().splitlines()
+    return lines[-1].strip() if lines else ''
+
+
+def _align_follow_devices(apply: bool, *, say=print, start: bool = True,
+                          run=None) -> int:
+    """Device-reading clients follow the device on this machine.
+
+    AC1SN (installed 2026-10-15) kept gmag-webui enabled with no
+    magnetometer: `harmonize.dormant_reason` gates only the `smd start`
+    verb, and nothing re-sensed an existing station.  For each
+    topology-enabled catalog `hardware_gated` client (mag-recorder,
+    gmag-webui, gpsdo-monitor; never hf-timestd, whose GPSDO or TS-1 may
+    sit on another machine), by `hardware.hardware_ready`:
+
+    * False, never seen (`drift.devices.seen_before`): switch it off, by
+      `_dormant_disable_units` (stop and disable its enabled units), then
+      stop any unit still running.
+      Topology stays enabled, so the client returns with the device.
+    * False, seen before: no change; the drift report faults it, and so
+      `smd check`.  One line here.
+    * True, a unit disabled: enable and start the disabled units (an
+      explicit operator verb: hardware appearing alone starts nothing).
+    * None: no change; one info line.
+
+    A component any of whose units a live `unit:` drift exception covers
+    stays as it is; an exceptions file that cannot be read switches
+    nothing.  Without ``start`` (--no-restart) nothing is stopped or
+    started; a line names what was held.  Dry run (``apply`` False): one
+    `would ...` line each.  Runs before `_align_enable_declared_units`,
+    which then finds a switched-off client's main service stopped and
+    leaves it.  Returns the clients switched, or that --apply would
+    switch."""
+    from sigmond import hardware
+    from sigmond.catalog import load_catalog
+    from sigmond.drift import build_report as drift_report
+    from sigmond.drift import devices
+    from sigmond.drift import units as drift_units
+    from sigmond.lifecycle import resolve_units
+    run = run or subprocess.run
+    try:
+        gated = devices.gated_components(load_catalog())
+        enabled = drift_report.topology_enabled()
+        names = [n for n in sorted(gated) if enabled.get(n)]
+        excepted, err = (drift_units.excepted_units(None, None) if names
+                         else (set(), None))
+    except Exception as exc:                                   # noqa: BLE001
+        say(f'  device clients: not checked ({exc})')
+        return 0
+    if err is not None:
+        say(f'  device clients: {err}; none switched')
+        return 0
+    count = 0
+    for name in names:
+        label = gated[name]
+        ready = hardware.hardware_ready(name)
+        if ready is None:
+            say(f'  {name}: {label} presence unknown; left as it is')
+            continue
+        if ready is False and devices.seen_before(name):
+            say(f'  {name}: {devices.missing_detail(name, label)}; left as it '
+                f'is (a fault in smd check)')
+            continue
+        try:
+            units = [u.unit for u in resolve_units([name], [name])
+                     if not getattr(u, 'orphaned', False) and '@' not in u.unit]
+        except Exception as exc:                               # noqa: BLE001
+            say(f'  {name}: units not resolved ({exc}); left as it is')
+            continue
+        held = sorted(u for u in units if u in excepted)
+        if held:
+            say(f'  {name}: left as it is: a drift exception covers unit:{held[0]}')
+            continue
+        if ready is False:
+            live = [u for u in units if _align_run(
+                ['systemctl', 'is-active', '--quiet', u], run=run, timeout=15,
+                action=f'systemctl is-active {u}').returncode == 0]
+            if not live and not any(_align_unit_enabled_state(u, run) == 'enabled'
+                                    for u in units):
+                continue
+            if not apply:
+                say(f'  would switch off {name}: no {label} on this machine')
+            elif not start:
+                say(f'  {name}: not switched off (--no-restart): no {label} '
+                    f'on this machine')
+                continue
+            else:
+                _dormant_disable_units(name)
+                # It disables (and stops) only enabled units; a unit running
+                # without being enabled is stopped here.
+                for u in live:
+                    if _align_run(['systemctl', 'is-active', '--quiet', u], run=run,
+                                  timeout=15, action=f'systemctl is-active {u}'
+                                  ).returncode == 0:
+                        _align_run(['systemctl', 'stop', u], run=run, timeout=90,
+                                   action=f'systemctl stop {u}')
+                say(f'  switched off {name}: no {label} on this machine '
+                    f'(topology still enables it)')
+            count += 1
+            continue
+        off = [u for u in units if _align_unit_enabled_state(u, run)
+               in ('disabled', 'linked', 'linked-runtime')]
+        if not off:
+            continue
+        if not apply:
+            say(f'  would enable and start {name}: {label} present '
+                f'({", ".join(off)})')
+        elif not start:
+            say(f'  {name}: not switched on (--no-restart): {label} present; '
+                f'systemctl enable --now {" ".join(off)}')
+            continue
+        else:
+            for u in off:
+                r = _align_run(['systemctl', 'enable', '--now', u], run=run,
+                               timeout=60, action=f'systemctl enable --now {u}')
+                if r.returncode != 0:
+                    why = ((r.stderr or r.stdout or '').strip().splitlines() or ['?'])[-1]
+                    say(f'  {name}: could not enable {u}: {why}')
+            say(f'  switched on {name}: {label} present')
+        count += 1
+    return count
+
+
+def _align_device_steps(*, start: bool) -> list:
+    """`_align_follow_devices` as one bring-up Step, or none when it had
+    nothing to say.  Never blocking."""
+    from sigmond import align_apply
+    lines = []
+    if _align_follow_devices(True, say=lines.append, start=start) or lines:
+        return [align_apply.Step('device clients', 'ran',
+                                 '; '.join(ln.strip() for ln in lines))]
+    return []
+
+
 def _align_enable_declared_units(apply: bool, *, base='/opt/git/sigmond',
                                  say=print, start_timers: bool = True) -> int:
     """Link and enable the `[systemd] units` of every running component.
@@ -9509,7 +9656,10 @@ def _align_bringup(*, run=subprocess.run, say=print, site_timing_refreshed: bool
 
     # After config render: a unit may need what the render writes.  Bring-up
     # runs only after clean moves and image refresh, so the caller's
-    # ``start_timers`` is just "not --no-restart".
+    # ``start_timers`` is just "not --no-restart".  Device clients first: a
+    # client switched off for a device never seen then reads stopped, and
+    # the declared-units step leaves it.
+    steps += _align_device_steps(start=start_timers)
     steps += _align_declared_units_steps(base, start_timers=start_timers)
 
     try:
@@ -10078,9 +10228,12 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
             print('  aligned — nothing to do')
             # Still enable what the dry run listed: a unit a component
             # declared after its install (sigmond's own timers follow in
-            # _align_start_timers, which runs on this path too).
+            # _align_start_timers, which runs on this path too).  Device
+            # clients first, as in _align_bringup.
+            _start = not getattr(args, 'no_restart', False)
+            _align_print_steps(_align_device_steps(start=_start))
             _align_print_steps(_align_declared_units_steps(
-                base, start_timers=not getattr(args, 'no_restart', False)))
+                base, start_timers=_start))
             # Still route: this retries a routing run that failed on an
             # earlier align or update (uniform routing, ruling R7).
             routing_step = _align_routing()
@@ -10643,6 +10796,7 @@ def cmd_align(args) -> int:
     native_due = _align_native_decoders(
         False, base, covered=rebuilds | {it.component for it in plan
                                          if it.status == 'move'})
+    _align_follow_devices(False)
     _align_enable_declared_units(False, base=base)
     own_due, own_err = _align_own_timers_due(_ALIGN_UNIT_DIR, subprocess.run)
     if own_err is not None:
