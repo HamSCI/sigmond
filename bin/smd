@@ -10073,6 +10073,7 @@ def _align_apply(args) -> int:
 
 _ALIGN_DRIFT_TIMER = 'sigmond-drift.timer'
 _ALIGN_LOCATION_TIMER = 'sigmond-location-check.timer'
+_ALIGN_SDR_RECOVER_TIMER = 'sigmond-sdr-recover.timer'
 
 
 def _align_own_units(sigmond_repo, *, unit_dir=Path('/etc/systemd/system'),
@@ -10188,12 +10189,18 @@ def _align_own_timers_due(unit_dir, run, exceptions_path=None) -> tuple:
     None): each of `drift.units.INSTALL_ENABLED_TIMERS`, plus
     sigmond-archive-health.timer while /etc/sigmond/archive.toml exists,
     that is installed, not covered by a live `unit:` drift exception, and
-    not enabled.  An unreadable exceptions file makes the list empty."""
+    not enabled.  An unreadable exceptions file makes the list empty.
+
+    sigmond-sdr-recover.timer stays out where the site manages ka9q-radio
+    by hand (Phil's hosts): it restarts radiod, which sigmond never does
+    there (final review I4)."""
     from sigmond import archive as ar
     from sigmond.drift import units as drift_units
     wanted = list(drift_units.INSTALL_ENABLED_TIMERS)
     if ar.CONFIG.exists():
         wanted.append(drift_units.ARCHIVE_HEALTH_TIMER)
+    if 'ka9q-radio' in _locally_managed():
+        wanted.remove(_ALIGN_SDR_RECOVER_TIMER)
     excepted, err = drift_units.excepted_units(exceptions_path, None)
     if err is not None:
         return [], err

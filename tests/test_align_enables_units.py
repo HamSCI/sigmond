@@ -481,3 +481,29 @@ def test_profile_reader_parses_hf_timestd_json():
         assert off is None and err
         # Another component has no profile: nothing left off.
         assert drift_units.profile_left_off(Path(tmp), "x", run=bad) == (frozenset(), None)
+
+
+# --- final review I4: Phil's hosts keep their own radiod recovery ------------
+
+def _phil():
+    from sigmond.site_profile import LocallyManaged
+    return mock.patch.object(smd, "_locally_managed",
+                             lambda: LocallyManaged(frozenset({"ka9q-radio"}), "Phil"))
+
+
+def test_locally_managed_radiod_gets_no_sdr_recover_timer():
+    with _phil():
+        calls = _timers()
+    assert "sigmond-sdr-recover.timer" not in _enabled_by(calls)
+    assert "sigmond-storage.timer" in _enabled_by(calls)
+
+
+def test_locally_managed_radiod_dry_run_names_no_sdr_recover_timer():
+    with tempfile.TemporaryDirectory() as tmp, _phil():
+        unit_dir = Path(tmp)
+        (unit_dir / "sigmond-sdr-recover.timer").write_text(_TIMER)
+        due, err = smd._align_own_timers_due(
+            unit_dir, lambda argv, **kw: subprocess.CompletedProcess(argv, 1, "disabled\n", ""),
+            exceptions_path=unit_dir / "none.toml")
+    assert err is None
+    assert due == []
