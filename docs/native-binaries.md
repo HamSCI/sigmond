@@ -208,33 +208,50 @@ A build running as root now clones as `sigmond`. Before it fetches, it gives
 a root-owned or split-owned tree back to `sigmond:sigmond`, the owner
 `install.sh` gives `/opt/git/sigmond`.
 
-## The station pin set and `smd update --latest`
+## Every pin comes from the release, and `smd update --latest`
 
-Since 2026-11-11 an image is built from the newest commit of every repo's
-default branch, tested as a set, and stations are pinned to that set (rob).
+Michael, 2026-11-20: "Any pinning or version specifications should reside
+in the base repo and not vary per station."  The image, a bare-metal
+install and `smd align` carry a station to one sigmond version, and all
+three land the pins sigmond's own code names.  No station keeps a pin of
+its own.
 
-- **`/etc/sigmond/component-pins.toml`** — `[pins] "<component>" = "<sha>"`.
-  For onion and ubersdr_wsprd (pinned in code in `bin/smd`) an entry here
-  **wins** over the constant (`_ONION_COMMIT` …); every lookup goes through
-  `_native_pin()`, so builds, `smd update` and `smd doctor` agree.  No file
-  or no entry: the constants apply, as before.  Other components keep their
-  `.pin` holds; their entries are the record of the set.
-- **ka9q-radio has one owner: ka9q-python.**  Its pin is ka9q-python's
-  compat commit (`sync_types.py --apply`), never the pin file and never
-  track-main.  ka9q-python follows main like any component, so an image gets
-  the newest ka9q-radio ka9q-python was validated against.
+- **onion, wsjtx and ubersdr_wsprd** build from the constants in `bin/smd`
+  (`_ONION_COMMIT`, `_WSJTX_COMMIT`, `_UBERSDR_COMMIT`).  Every lookup goes
+  through `_native_pin()`, so builds, `smd update`, `smd doctor` and the
+  drift report agree on one commit.
+- **ka9q-radio has one owner: ka9q-python.**  Its pin comes from
+  ka9q-python's compat commit (`sync_types.py --apply`), never from
+  track-main.  ka9q-python follows main like any component, so an image
+  gets the newest ka9q-radio that ka9q-python was validated against.
 - **Pinned on purpose:** wsjtx and ft8_lib (fallback decoders,
-  `provenance.PINNED_ON_PURPOSE`).  Nothing moves them but a hand-bumped pin;
+  `provenance.PINNED_ON_PURPOSE`).  Only a hand-bumped pin moves them;
   `smd version` shows them as `pinned`.
-- **`SIGMOND_TRACK_MAIN=1`** — onion and ubersdr_wsprd resolve to `git
-  ls-remote <repo> HEAD` instead of their pin, and each successful build
-  records the commit it built in the pin file.  The image build sets it;
-  nothing else should.
-- **`smd update --latest [--apply]`** — the test-station verb: every
-  checkout to its default branch tip (`.pin` released), ka9q-radio rebuilt at
-  ka9q-python's new compat commit, onion/ubersdr rebuilt at their tips,
-  `smd restart` (radiod first), then the commits written to the pin file.
-  Plain `smd update` is unchanged.
+- **`/etc/sigmond/component-pins.toml`** retired in v3.94.  Image builds
+  from 2026-11-11 wrote it under `SIGMOND_TRACK_MAIN=1`, and until v3.94 an
+  entry in it won over the constant: SIGMA, KFS-MAIN and AC1SN held
+  ubersdr_wsprd at 8719788 that way.  smd no longer reads or writes it.
+  The drift report names a station that still has one, and
+  `smd align --apply` renames it to `component-pins.toml.retired-<UTC
+  date>`, after which align's native rebuilds bring the binaries to the
+  release's pins.
+- **`/etc/sigmond/catalog.toml`** may hold only fields that differ from
+  `etc/catalog.toml`.  The drift report lists every field there; `smd align
+  --apply` runs `smd config catalog-prune`, which drops the copies (a
+  `.bak` first).  A field that differs, such as a staging-fork `repo`,
+  stays a drift item until the operator removes it.
+- **`SIGMOND_TRACK_MAIN=1`** resolves onion and ubersdr_wsprd to `git
+  ls-remote <repo> HEAD` instead of their pin.  The rig sets it to build an
+  image candidate at newest main.  The bless gate (sigmond-appliance
+  `bless-release.sh`, gate 9) refuses that image until sigmond's constants
+  name the commits it built, so a candidate becomes a release only once its
+  pins live in the base repo.
+- **`smd update --latest [--apply]`**, the test-station verb, moves every
+  checkout to its default branch tip (`.pin` released), rebuilds ka9q-radio
+  at ka9q-python's new compat commit and onion/ubersdr at their tips, and
+  restarts services, radiod first.  It records no pins: the next
+  `smd align --apply` returns the station to the release.  Plain
+  `smd update` stays as it was.
 
 ## The `.provenance` sidecar
 

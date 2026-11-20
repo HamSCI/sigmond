@@ -1,7 +1,7 @@
-"""The station pin set (/etc/sigmond/component-pins.toml), track-main mode
-(SIGMOND_TRACK_MAIN=1) and `smd update --latest` (rob, 2026-11-11: build
-each image from the newest commit of every repo's main, test that set, and
-pin stations to it)."""
+"""Track-main mode (SIGMOND_TRACK_MAIN=1) and `smd update --latest` (rob,
+2026-11-11: build each image from the newest commit of every repo's main and
+test that set).  Since v3.94 no station keeps a pin file: every pin comes
+from the release (tests/test_release_pins_only.py)."""
 from __future__ import annotations
 
 import importlib.machinery
@@ -57,30 +57,6 @@ class PinFilePrecedence(_PinFile):
                           "wsjtx": smd._WSJTX_COMMIT,
                           "ubersdr_wsprd": smd._UBERSDR_COMMIT})
 
-    def test_an_entry_wins_over_the_constant_everywhere(self):
-        self.write(onion=A, wsjtx=B, ubersdr_wsprd=C)
-        self.assertEqual(smd._native_build_pins(),
-                         {"onion": A, "wsjtx": B, "ubersdr_wsprd": C})
-        self.assertEqual(smd._expected_build_pins(),
-                         {"ka9q-web": {"onion": A},
-                          "wsjtx-decoders": {"wsjtx": B},
-                          "ubersdr-decoders": {"ubersdr_wsprd": C}})
-
-    def test_a_partial_file_keeps_the_other_constants(self):
-        self.write(onion=A)
-        pins = smd._native_build_pins()
-        self.assertEqual(pins["onion"], A)
-        self.assertEqual(pins["wsjtx"], smd._WSJTX_COMMIT)
-
-    def test_a_malformed_sha_is_ignored(self):
-        self.write(onion="deadbeef", wsjtx="not a sha")
-        self.assertEqual(smd._native_pin("onion"), smd._ONION_COMMIT)
-        self.assertEqual(smd._native_pin("wsjtx"), smd._WSJTX_COMMIT)
-
-    def test_an_unparsable_file_is_ignored(self):
-        self.pins.write_text("[pins\n")
-        self.assertEqual(smd._read_component_pins(), {})
-
     def test_ka9q_radio_pin_belongs_to_ka9q_python_alone(self):
         # A ka9q-radio entry in the pin file, and track-main, are both
         # ignored: ka9q-python's compat commit is the one owner (mjh, 11-11).
@@ -131,10 +107,10 @@ class TrackMain(_PinFile):
 
     def test_unreachable_remote_falls_back_to_the_pin(self):
         os.environ["SIGMOND_TRACK_MAIN"] = "1"
-        self.write(wsjtx=B)
+        self.write(wsjtx=B)    # a station file never counts
         _, p = self._ls_remote({})
         with p, mock.patch.object(smd, "_warn") as warn:
-            self.assertEqual(smd._native_pin("wsjtx"), B)
+            self.assertEqual(smd._native_pin("wsjtx"), smd._WSJTX_COMMIT)
             self.assertEqual(smd._native_pin("onion"), smd._ONION_COMMIT)
             self.assertEqual(smd._native_pin("ubersdr_wsprd"), smd._UBERSDR_COMMIT)
         self.assertTrue(warn.called)
@@ -144,21 +120,6 @@ class TrackMain(_PinFile):
         with p as run:
             smd._native_build_pins()
         run.assert_not_called()
-
-    def test_a_tracked_build_records_its_commit_as_root(self):
-        os.environ["SIGMOND_TRACK_MAIN"] = "1"
-        self.write(onion=A)
-        with mock.patch.object(smd.os, "geteuid", return_value=0):
-            smd._pin_if_tracking("wsjtx", C)
-        pins = smd._read_component_pins()
-        self.assertEqual(pins, {"onion": A, "wsjtx": C})
-        self.assertEqual(oct(self.pins.stat().st_mode & 0o777), "0o644")
-
-    def test_an_untracked_build_leaves_the_file_alone(self):
-        with mock.patch.object(smd, "_record_component_pins") as rec:
-            smd._pin_if_tracking("wsjtx", C)
-        rec.assert_not_called()
-
 
 def _row(name, head, tip, kind="component", **kw):
     r = {"name": name, "head": head, "tip": tip, "behind": 3, "kind": kind,
@@ -193,7 +154,6 @@ class PlanLatest(unittest.TestCase):
             ("native-build", "ka9q-web"),
             ("native-build", "ubersdr-decoders"),
             ("restart", "services"),
-            ("pins", str(smd._COMPONENT_PINS_FILE)),
         ])
 
     def test_a_held_pin_is_moved_but_local_edits_are_not(self):

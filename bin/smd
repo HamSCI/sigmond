@@ -1273,7 +1273,6 @@ def _build_ka9q_radio(src_dir: Path, force: bool = False) -> bool:
          'url': _git_remote_url(src_dir) or 'https://github.com/ka9q/ka9q-radio',
          'sha': _git_head(src_dir)},
     ], builder='_build_ka9q_radio')
-    _pin_if_tracking('ka9q-radio', _git_head(src_dir))
     return True
 
 
@@ -1477,23 +1476,25 @@ def _git_head(repo: Path) -> str:
     return r.stdout.strip() if r.returncode == 0 else ''
 
 
-# ── the station's pin set: /etc/sigmond/component-pins.toml ─────────────
+# ── every pin comes from the release, never from the station ────────────
 #
-# rob, 2026-11-11: "each image file [has] a pinned set of commits off the
-# main trunk of the associated git repo."  An image build takes the newest
-# commit of every repo's default branch (SIGMOND_TRACK_MAIN=1), the ladder
-# tests that set, and the set is written here so every station installed
-# from the image holds exactly it.  `smd update --latest --apply` rewrites
-# it on a station.
+# Michael, 2026-11-20: "Any pinning or version specifications should reside
+# in the base repo and not vary per station."  The image, bare metal and
+# `smd align` are three pathways to one sigmond version, and each lands the
+# pins sigmond's own code names: the constants below for onion, wsjtx and
+# ubersdr_wsprd, ka9q-python's compat commit for ka9q-radio
+# (_ka9q_radio_pin), and the release manifest for every checkout.
 #
-# For onion and ubersdr_wsprd (pinned in code below) an entry here WINS over
-# the constant: every lookup goes through _native_pin(), so a build, `smd
-# update` and `smd doctor` agree on one commit and nothing rebuilds a source
-# back to the constant.  With no file, or no entry, the constants apply as
-# before.  NOT ka9q-radio: its one owner is ka9q-python's compat commit
-# (_ka9q_radio_pin).  NOT wsjtx/ft8_lib: pinned on purpose
-# (provenance.PINNED_ON_PURPOSE).  Other components' holds stay their `.pin`
-# files; their entries here are the record of the set.
+# Until v3.94 an image build under SIGMOND_TRACK_MAIN=1 wrote the commits it
+# built into /etc/sigmond/component-pins.toml, and _native_pin let that file
+# win over the constant.  SIGMA, KFS-MAIN and AC1SN carried it with
+# ubersdr_wsprd = 8719788, so a pin moved in sigmond never reached them.
+# Nothing reads or writes the file now; `smd align --apply` retires one it
+# finds (_align_station_pins), and drift reports it until then.
+# SIGMOND_TRACK_MAIN=1 still builds a candidate at newest main on the rig;
+# the bless gate refuses that image until its commits are written into
+# sigmond's constants.  NOT wsjtx/ft8_lib under track-main: pinned on
+# purpose (provenance.PINNED_ON_PURPOSE).
 _COMPONENT_PINS_FILE = Path('/etc/sigmond/component-pins.toml')
 _SHA_RE = re.compile(r'^[0-9a-f]{40}$')
 _REMOTE_HEADS: dict = {}          # url -> sha, one ls-remote per url per run
@@ -1501,58 +1502,9 @@ _REMOTE_HEADS: dict = {}          # url -> sha, one ls-remote per url per run
 
 def _track_main() -> bool:
     """SIGMOND_TRACK_MAIN=1: resolve the code-pinned sources to their
-    remote default branch's newest commit instead of their pin (the image
-    build, and `smd update --latest`)."""
+    remote default branch's newest commit instead of their pin (an image
+    candidate built on the rig, and `smd update --latest`)."""
     return os.environ.get('SIGMOND_TRACK_MAIN', '') == '1'
-
-
-def _read_component_pins() -> dict:
-    """{component: full sha} from the pin file; {} when absent/unreadable.
-    An entry that is not a full 40-hex sha is ignored, not trusted."""
-    try:
-        import tomllib
-        data = tomllib.loads(_COMPONENT_PINS_FILE.read_text())
-    except (OSError, ValueError):
-        return {}
-    pins = data.get('pins') if isinstance(data, dict) else None
-    if not isinstance(pins, dict):
-        return {}
-    return {str(k): v.strip().lower() for k, v in pins.items()
-            if isinstance(v, str) and _SHA_RE.match(v.strip().lower())}
-
-
-def _render_component_pins(pins: dict) -> str:
-    from datetime import datetime, timezone
-    at = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-    lines = ['# Written by smd; the commit every component is pinned to.',
-             '# See _COMPONENT_PINS_FILE in bin/smd.',
-             f'# updated {at}', '', '[pins]']
-    for k in sorted(pins):
-        lines.append(f'"{k}" = "{pins[k]}"')
-    return '\n'.join(lines) + '\n'
-
-
-def _record_component_pins(updates: dict) -> bool:
-    """Merge {component: sha} into the pin file (root-owned, 0644)."""
-    good = {k: v for k, v in updates.items() if v and _SHA_RE.match(v)}
-    if not good:
-        return False
-    pins = _read_component_pins()
-    pins.update(good)
-    text = _render_component_pins(pins)
-    try:
-        if os.geteuid() == 0:
-            _COMPONENT_PINS_FILE.parent.mkdir(parents=True, exist_ok=True)
-            tmp = _COMPONENT_PINS_FILE.with_suffix('.toml.tmp')
-            tmp.write_text(text)
-            os.chmod(tmp, 0o644)
-            os.replace(tmp, _COMPONENT_PINS_FILE)
-        else:
-            _install_root_text(text, _COMPONENT_PINS_FILE)
-    except OSError as exc:
-        _warn(f'component pins: could not write {_COMPONENT_PINS_FILE}: {exc}')
-        return False
-    return True
 
 
 def _remote_head(url: str) -> str:
@@ -1585,8 +1537,8 @@ def _native_constants() -> dict:
 
 def _native_pin(name: str) -> str:
     """The commit a native source (onion, wsjtx, ubersdr_wsprd) is built
-    from.  SIGMOND_TRACK_MAIN=1: its remote default branch's newest commit.
-    Else the station pin file's entry.  Else sigmond's constant.  Reads the
+    from: sigmond's constant, or under SIGMOND_TRACK_MAIN=1 its remote
+    default branch's newest commit.  Never a station file.  Reads the
     constants at call time, so patching one still moves the answer."""
     const = _native_constants()[name]
     from sigmond.provenance import PINNED_ON_PURPOSE
@@ -1595,19 +1547,8 @@ def _native_pin(name: str) -> str:
         if head:
             return head
         _warn(f'{name}: SIGMOND_TRACK_MAIN=1 but its remote is unreachable '
-              f'— using the pin {const[:12]}')
-    return _read_component_pins().get(name) or const
-
-
-def _pin_if_tracking(name: str, sha: str) -> None:
-    """After a successful build under SIGMOND_TRACK_MAIN=1, record the
-    commit it was built from in the station pin file, so the next build,
-    `smd update` and `smd doctor` hold it there rather than returning it to
-    sigmond's constant.  Outside track-main the file is left alone: a
-    sigmond that moves a constant still moves the station."""
-    if _track_main() and sha:
-        if _record_component_pins({name: sha}):
-            _info(f'{name}: pinned at {sha[:12]} in {_COMPONENT_PINS_FILE}')
+              f'- using the pin {const[:12]}')
+    return const
 
 
 def _wsjtx_ref_label(pin: str) -> str:
@@ -2543,7 +2484,6 @@ def _build_ka9q_web_with_onion(src_dir: Path, *, force: bool = False) -> bool:
             {'name': 'onion', 'url': _ONION_REPO, 'ref': 'master',
              'pin': _native_pin('onion'), 'sha': _git_head(onion_src)},
         ], builder='_build_ka9q_web_with_onion')
-        _pin_if_tracking('onion', _git_head(onion_src))
     return True
 
 
@@ -2688,7 +2628,6 @@ def _build_wsjtx_decoders() -> bool:
         {'name': 'wsjtx', 'url': _WSJTX_REPO, 'ref': _wsjtx_ref_label(pin),
          'pin': pin, 'sha': _git_head(src)},
     ], builder='_build_wsjtx_decoders')
-    _pin_if_tracking('wsjtx', _git_head(src))
     _ok(f'wsjtx-decoders: built and installed (jt9, wsprd → {dest})')
     # jt9_decode wrapper (psk-recorder's resident FT8/FT4 driver): a cheap C++
     # add-on to the toolchain we just built.  Best-effort — a wrapper failure
@@ -2878,7 +2817,6 @@ def _build_ubersdr_decoders(*, check: bool = True) -> bool:
         {'name': 'ubersdr_wsprd', 'url': _UBERSDR_REPO, 'ref': 'main',
          'pin': pin, 'sha': _git_head(src)},
     ], builder='_build_ubersdr_decoders')
-    _pin_if_tracking('ubersdr_wsprd', _git_head(src))
     _ok(f'ubersdr-decoders: built and installed → {dest}')
     return True
 
@@ -5557,9 +5495,9 @@ def _say_locally_managed(checkouts, local, say=None) -> list:
 # `--latest` is the test-station verb that ignores all of them: each
 # checkout goes to the tip of its remote's default branch, the natively
 # built sources (ka9q-radio, onion, wsjtx, ubersdr_wsprd) rebuild there
-# under SIGMOND_TRACK_MAIN=1, services restart radiod-first, and the
-# resulting commits are written to the station pin file so the station
-# then HOLDS that set.  Dry run unless --apply.
+# under SIGMOND_TRACK_MAIN=1, and services restart radiod-first.  Dry run
+# unless --apply.  It keeps no per-station pin state (v3.94): the next
+# `smd align --apply` returns the station to the release's pins.
 
 def _plan_latest(rows: list) -> list:
     """Pure planner for `smd update --latest`.
@@ -5570,7 +5508,7 @@ def _plan_latest(rows: list) -> list:
 
     Returns [(kind, target, detail)] in run order: every `move` (with its
     `install`/`build` right after it), then `radiod`, then each
-    `native-build` once per builder, then `restart` and `pins`.  `held`
+    `native-build` once per builder, then `restart`.  `held`
     and `unknown` rows explain what is left alone."""
     moves, radiod, natives, notes = [], [], [], []
     seen_builders = set()
@@ -5612,9 +5550,6 @@ def _plan_latest(rows: list) -> list:
     if moves or radiod or natives:
         plan.append(('restart', 'services',
                      'radiod first, then the recorders (smd restart)'))
-    if moves or radiod or natives or any(n[0] == 'unknown' for n in notes):
-        plan.append(('pins', str(_COMPONENT_PINS_FILE),
-                     'record the commit every component now sits at'))
     return plan
 
 
@@ -5686,13 +5621,11 @@ def _cmd_update_latest(args, base: Path, checkouts) -> int:
     by_name = {r['name']: r for r in rows}
     plan = _plan_latest(rows)
     apply_ = getattr(args, 'apply', False)
-    if not [s for s in plan if s[0] not in ('held', 'unknown', 'pins')]:
+    if not [s for s in plan if s[0] not in ('held', 'unknown')]:
         for kind, target, detail in plan:
             if kind in ('held', 'unknown'):
                 _warn(f'{target}: {detail}')
         _ok('every component is at the tip of its default branch')
-        if apply_:
-            _latest_record_pins(rows, failed=set())
         return 0
     print('(--latest: every component to its default branch tip, holds '
           'ignored)')
@@ -5755,11 +5688,11 @@ def _cmd_update_latest(args, base: Path, checkouts) -> int:
             (_ok if rc == 0 else _err)(f'restart: exit {rc}')
             if rc:
                 failed_n += 1
-        elif kind == 'pins':
-            _latest_record_pins(rows, failed)
     if apply_:
         from sigmond.provenance import HISTORY_FILE
         _info(f'recorded in {HISTORY_FILE} (see: smd version)')
+        _info('no pins kept on this station: smd align --apply returns it '
+              "to the release's pins")
         if 'ka9q-radio' not in failed and any(s[0] == 'radiod' for s in plan):
             _info('smd doctor will flag ka9q-radio as off ka9q-python\'s '
                   'compat commit until ka9q-python is synced to it')
@@ -5800,26 +5733,6 @@ def _latest_move(row: dict) -> bool:
         except OSError as exc:
             _warn(f'{row["name"]}: could not remove .pin: {exc}')
     return True
-
-
-def _latest_record_pins(rows: list, failed: set) -> None:
-    """Write every component's HEAD to the pin file, except one whose move
-    or build failed: a native source whose build failed would otherwise be
-    pinned at a commit no binary was built from."""
-    pins = {}
-    for r in rows:
-        # ka9q-radio's pin belongs to ka9q-python alone (_ka9q_radio_pin).
-        if r['name'] in failed or r['name'] == 'ka9q-radio':
-            continue
-        head = _git_head(r['dir'])
-        if head:
-            pins[r['name']] = head
-    if _record_component_pins(pins):
-        _ok(f'{len(pins)} component pin(s) written to {_COMPONENT_PINS_FILE}')
-    skipped = sorted(n for n in failed if n in {r['name'] for r in rows})
-    if skipped:
-        _warn('not pinned (failed above): ' + ', '.join(skipped))
-
 
 
 def cmd_update(args) -> int:
@@ -6983,6 +6896,8 @@ _PRELOAD_MODULES = {
               'sigmond.heartbeat', 'sigmond.doctor', 'sigmond.lifecycle',
               # the native-rebuild failure markers (_align_native_decoders)
               'sigmond.safe_write',
+              # the operator-catalog prune (_align_catalog_prune)
+              'sigmond.catalog_prune',
               'sigmond.topology', 'sigmond.instance',
               'sigmond.uploader_manifest', 'sigmond.environment',
               'sigmond.environment_kinds', 'sigmond.discovery',
@@ -9829,6 +9744,64 @@ def _align_bringup(*, run=subprocess.run, say=print, site_timing_refreshed: bool
     return steps
 
 
+def _align_station_pins(apply: bool, *, say=print) -> int:
+    """Retire /etc/sigmond/component-pins.toml (v3.94 Task 9): every pin
+    comes from the release, and smd no longer reads the file.  --apply
+    renames it to ``component-pins.toml.retired-<UTC date>`` through
+    safe_write (a symlink is renamed, never followed), one line; the dry
+    run names it.  With no file, silent.  Returns 1 when the dry run finds
+    one or the rename fails, else 0."""
+    from datetime import datetime, timezone
+    path = _COMPONENT_PINS_FILE
+    if not os.path.lexists(path):
+        return 0
+    if not apply:
+        say(f'  would retire {path}: pins come from the release')
+        return 1
+    from sigmond.safe_write import retire_nofollow
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%d')
+    try:
+        dest = retire_nofollow(path, f'{path.name}.retired-{stamp}')
+    except (OSError, ValueError) as exc:
+        say(f'  could not retire {path}: {exc}')
+        return 1
+    if dest:
+        say(f'  retired {path} as {dest}: pins come from the release')
+    return 0
+
+
+def _align_catalog_prune(apply: bool, *, say=print) -> int:
+    """Drop the fields of /etc/sigmond/catalog.toml that copy the repo
+    catalog, through `smd config catalog-prune`'s own code (v3.94 Task 9).
+    A field that differs stays, and drift reports it until the operator
+    removes it.  The dry run names the count.  Returns 1 when the dry run
+    finds copies or the prune fails, else 0."""
+    from sigmond import catalog_prune as cp
+    op, repo = cp.OPERATOR_CATALOG, cp.REPO_CATALOG
+    if not os.path.lexists(op) or not Path(repo).exists():
+        return 0
+    try:
+        _minimal, report = cp.compute_minimal_operator(op, repo)
+    except (OSError, ValueError) as exc:
+        say(f'  could not read {op}: {exc}')
+        return 1
+    n = len(report.pruned_keys)
+    if not n:
+        return 0
+    if not apply:
+        say(f'  would prune {n} field(s) that copy the repo catalog from '
+            f'{op} (smd config catalog-prune)')
+        return 1
+    try:
+        done = cp.prune_operator_catalog(op, repo)
+    except (OSError, ValueError) as exc:
+        say(f'  could not prune {op}: {exc}')
+        return 1
+    say(f'  pruned {n} field(s) that copy the repo catalog from {op} '
+        f'(backup {done.backup_path})')
+    return 0
+
+
 def _align_apply(args) -> int:
     """The `--apply` path for `smd align` (Plan 2a): verify the release,
     classify every component, bring sigmond forward first if it needs it
@@ -10045,6 +10018,10 @@ def _align_apply(args) -> int:
                             for s in steps)
         if own_units:
             steps = steps + _align_own_units(Path(base) / 'sigmond')
+        # Every pin comes from the release (v3.94 Task 9): the station pin
+        # file goes, and the operator catalog keeps only what differs.
+        pins_failed = (_align_station_pins(True)
+                       | _align_catalog_prune(True))
         if old_code:
             # This process holds the OLD pin constants: building now would
             # check out and build the old pin.
@@ -10057,7 +10034,7 @@ def _align_apply(args) -> int:
                 True, base, covered={s.component for s in steps
                                      if getattr(s, 'built', False)})
         rc = _align_make_live(args, rel, steps, base=base, catalog=catalog, now=_now)
-        rc = rc or (1 if native_failed else 0)
+        rc = rc or (1 if native_failed or pins_failed else 0)
         # Final review I1: the timers start only once the bring-up and its
         # restarts are done.  The location-check service re-renders and can
         # restart recorders; started before _align_make_live, its first
@@ -10566,7 +10543,7 @@ def _align_drift_report(rel, plan, files, base):
     """Build the drift report for the dry run.  Collectors that read live
     state run here only, never during --apply's own steps; each runs
     through run_collectors, so one that fails is one fault item."""
-    from sigmond import align_apply
+    from sigmond import align_apply, catalog_prune
     from sigmond.drift import build_report as br
     from sigmond.drift.source import baseline_of
     release, baseline = baseline_of(_align_json_file(align_apply.ALIGNED_RECORD))
@@ -10578,7 +10555,10 @@ def _align_drift_report(rel, plan, files, base):
         base=Path(base),
         # The decoder check compares against the commit sigmond builds from,
         # never the checkout HEAD (W7WKR 2026-11-19: checkout ahead of pin).
-        native_pins=lambda: {'ubersdr_wsprd': _native_pin('ubersdr_wsprd')})
+        native_pins=lambda: {'ubersdr_wsprd': _native_pin('ubersdr_wsprd')},
+        pins_file=_COMPONENT_PINS_FILE,
+        catalog_override=catalog_prune.OPERATOR_CATALOG,
+        repo_catalog=catalog_prune.REPO_CATALOG)
     return br.build(br.station_name(), readers=readers)
 
 
@@ -10906,6 +10886,7 @@ def cmd_align(args) -> int:
         print(f'  sigmond timers: {own_err}; --apply would enable none')
     for timer in own_due:
         print(f'  would enable {timer} (sigmond)')
+    pins_due = (_align_station_pins(False) | _align_catalog_prune(False))
     # A candidate has no tag on GitHub yet: read its files at its commit.
     files = align.image_file_drift(rel.appliance_commit if rel.candidate else rel.tag)
     from sigmond import align_apply as _aa
@@ -10958,7 +10939,7 @@ def cmd_align(args) -> int:
     else:
         _align_print_drift(report)
     pending = (counts['move'] or rebuilds or native_due or counts['refuse'] or counts['missing'] or stale
-               or unverified or stale_now)
+               or unverified or stale_now or pins_due)
     return 1 if pending else 0
 
 
@@ -30731,8 +30712,14 @@ def cmd_config_catalog_prune(args) -> int:
     if not REPO_CATALOG.exists():
         _err(f'repo catalog not found: {REPO_CATALOG}')
         return 1
-    report = prune_operator_catalog(OPERATOR_CATALOG, REPO_CATALOG,
-                                     dry_run=dry_run)
+    try:
+        report = prune_operator_catalog(OPERATOR_CATALOG, REPO_CATALOG,
+                                         dry_run=dry_run)
+    except (OSError, ValueError) as exc:
+        # A symlink at the operator path, among others: the prune reads and
+        # writes through sigmond.safe_write, which refuses to follow one.
+        _err(f'config catalog-prune: {exc}')
+        return 1
     print(format_report(report))
     if dry_run and (report.pruned_keys or report.dropped_blocks):
         _info('(dry-run — re-run without --dry-run to apply)')
@@ -32261,9 +32248,9 @@ def _build_parser() -> argparse.ArgumentParser:
                         'sigmond\'s native-build pins, ka9q-radio\'s '
                         'ka9q-python commit), to the tip of its default '
                         'branch; rebuild ka9q-radio, onion, wsjtx and '
-                        'ubersdr_wsprd there; restart radiod first; and pin '
-                        'the station to the result in '
-                        '/etc/sigmond/component-pins.toml. For test '
+                        'ubersdr_wsprd there; and restart radiod first. '
+                        'Keeps no pins on the station: the next smd align '
+                        '--apply returns it to the release. For test '
                         'stations. Dry run unless --apply')
 
     p = sub.add_parser('align',

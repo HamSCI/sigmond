@@ -10,9 +10,16 @@ Site configuration (callsign, grid, receivers, channels) never counts.
   (``<base>/<component>/config/*.toml.template``): the same dotted key
   when the template has it, else any template value under the same key
   name.  Without a readable template, ``RELEASE_DEFAULTS`` stands in.
-* /etc/sigmond/catalog.toml: an entry setting repo or branch.
-* /etc/sigmond/component-pins.toml: a pin that differs from the manifest
-  commit, or names a component the manifest lacks.
+* /etc/sigmond/catalog.toml: each field of a [client.*] or [deprecated.*]
+  entry, one item per field (v3.94 Task 9).  A field that copies the repo
+  catalog (``<sigmond>/etc/catalog.toml``) is fixed by
+  ``smd config catalog-prune``, which ``smd align --apply`` runs.  A field
+  that differs (a staging-fork repo, say) stays an item until the operator
+  removes it: the prune keeps it, and nothing deletes it silently.  Other
+  tables are not catalog entries and never count.
+* /etc/sigmond/component-pins.toml: any such file, one item.  Every pin
+  comes from the release (v3.94 Task 9); smd no longer reads the file, and
+  ``smd align --apply`` retires it.
 * coordination.toml [decoders] operator_override = true.
 
 A file that cannot be read or parsed yields one fault; a missing file
@@ -21,7 +28,6 @@ yields nothing.
 
 from __future__ import annotations
 
-import re
 import tomllib
 from pathlib import Path
 from typing import Mapping
@@ -29,7 +35,6 @@ from typing import Mapping
 from sigmond import decoder_choice
 from sigmond.drift.model import Item
 
-_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SUFFIXES = ("_jt9", "_wsprd", "_binary")
 _NAMES = ("decoder_jt9", "decoder_path")
 
@@ -130,56 +135,63 @@ def _client_items(client_configs, out: list, base=None) -> None:
                     "release's own software", f"remove {dotted} from {name}"))
 
 
-def _catalog_items(path: Path, out: list) -> None:
+_CATALOG_SECTIONS = ("client", "deprecated")
+
+
+def _catalog_items(path: Path, repo_catalog: Path, out: list) -> None:
     data = _load(path, out)
     if data is None:
         return
-    for table in data.values():
+    try:
+        with open(repo_catalog, "rb") as f:
+            repo = tomllib.load(f)
+    except FileNotFoundError:
+        repo = {}
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+        out.append(Item("override", "fault", str(repo_catalog),
+                        f"could not read {repo_catalog}: {exc}",
+                        f"repair {repo_catalog} (smd align --apply)"))
+        return
+    for section in _CATALOG_SECTIONS:
+        table = data.get(section)
         if not isinstance(table, dict):
             continue
-        for name, entry in table.items():
+        repo_table = repo.get(section)
+        repo_table = repo_table if isinstance(repo_table, dict) else {}
+        for name in sorted(table):
+            entry = table[name]
             if not isinstance(entry, dict):
                 continue
-            keys = [k for k in ("repo", "branch") if k in entry]
-            if keys:
-                out.append(Item(
-                    "override", "drift", f"catalog:{name}",
-                    f"{path} sets {', '.join(keys)} for {name}",
-                    f"remove the repo/branch override for {name} from "
-                    f"{path} (smd config catalog-prune)"))
+            want = repo_table.get(name)
+            want = want if isinstance(want, dict) else {}
+            for key in sorted(entry):
+                subject = f"catalog:{name}.{key}"
+                if key in want and want[key] == entry[key]:
+                    out.append(Item(
+                        "override", "drift", subject,
+                        f"{path} sets {key} for {name}, which copies the "
+                        "repo catalog and would hide a later change to it",
+                        "smd config catalog-prune"))
+                else:
+                    out.append(Item(
+                        "override", "drift", subject,
+                        f"{path} sets {key} = {entry[key]!r} for {name}, "
+                        "replacing the release's catalog",
+                        f"remove {key} for {name} from {path} (smd config "
+                        "catalog-prune keeps a field that differs)"))
 
 
-def _pin_items(path: Path, manifest: Mapping[str, str], out: list) -> None:
+def _pin_items(path: Path, out: list) -> None:
     data = _load(path, out)
     if data is None:
         return
-    pins = data.get("pins")
-    if not isinstance(pins, dict):
-        return
-    for comp in sorted(pins):
-        pin = pins[comp]
-        if not isinstance(pin, str):
-            continue
-        pin = pin.strip().lower()
-        if not _SHA_RE.match(pin):
-            continue  # smd ignores it too
-        want = manifest.get(comp)
-        if want is None:
-            out.append(Item(
-                "override", "drift", f"pin:{comp}",
-                f"{comp} is pinned to {pin[:12]}; the release manifest "
-                "does not list it",
-                f"remove the {comp} pin from {path}"))
-            continue
-        want = str(want).strip().lower()
-        if not want:
-            continue  # manifest commit unknown
-        if not (pin.startswith(want) or want.startswith(pin)):
-            out.append(Item(
-                "override", "drift", f"pin:{comp}",
-                f"{comp} is pinned to {pin[:12]}; the release has "
-                f"{want[:12]}",
-                f"remove the {comp} pin from {path}"))
+    pins = data.get("pins") if isinstance(data, dict) else None
+    n = len(pins) if isinstance(pins, dict) else 0
+    out.append(Item(
+        "override", "drift", "pins:station-file",
+        f"{path} holds {n} station pin(s); every pin comes from the "
+        "release, and smd no longer reads it",
+        f"smd align --apply (retires {path})"))
 
 
 def _decoder_items(path: Path, out: list) -> None:
@@ -202,17 +214,20 @@ def _decoder_items(path: Path, out: list) -> None:
 
 def override_items(*, client_configs: Mapping[str, list],
                    catalog_override: Path = Path("/etc/sigmond/catalog.toml"),
+                   repo_catalog: Path = Path(
+                       "/opt/git/sigmond/sigmond/etc/catalog.toml"),
                    pins_file: Path = Path(
                        "/etc/sigmond/component-pins.toml"),
                    coordination: Path = Path(
                        "/etc/sigmond/coordination.toml"),
-                   manifest: Mapping[str, str],
                    base=None) -> list:
     """``base`` holds the component checkouts whose shipped templates
-    give the release's own values (None: RELEASE_DEFAULTS only)."""
+    give the release's own values (None: RELEASE_DEFAULTS only).
+    ``repo_catalog`` is sigmond's own etc/catalog.toml, which the
+    operator catalog's fields are compared with."""
     out: list = []
     _client_items(client_configs, out, base)
-    _catalog_items(Path(catalog_override), out)
-    _pin_items(Path(pins_file), manifest, out)
+    _catalog_items(Path(catalog_override), Path(repo_catalog), out)
+    _pin_items(Path(pins_file), out)
     _decoder_items(Path(coordination), out)
     return out

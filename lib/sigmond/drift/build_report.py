@@ -108,6 +108,7 @@ class Readers:
     # override (Task 5)
     client_configs: Any = field(default_factory=dict)
     catalog_override: Path = Path("/etc/sigmond/catalog.toml")
+    repo_catalog: Optional[Path] = None  # default: sigmond_repo/etc/catalog.toml
     pins_file: Path = Path("/etc/sigmond/component-pins.toml")
     coordination: Path = Path("/etc/sigmond/coordination.toml")
     manifest: Any = field(default_factory=dict)  # component -> commit
@@ -165,8 +166,10 @@ def build(station: str, *, readers: Readers) -> Report:
                                       seen=r.device_seen)),
         ("override", lambda: override_items(
             client_configs=_v(r.client_configs) or {},
-            catalog_override=r.catalog_override, pins_file=r.pins_file,
-            coordination=r.coordination, manifest=_v(r.manifest) or {},
+            catalog_override=r.catalog_override,
+            repo_catalog=(Path(r.repo_catalog) if r.repo_catalog
+                          else sigmond_repo / "etc" / "catalog.toml"),
+            pins_file=r.pins_file, coordination=r.coordination,
             base=base)),
         ("stray", lambda: stray_items(
             decoder_dir=Path(r.decoder_dir), base=base,
@@ -268,7 +271,10 @@ def _device_seen(name: str) -> bool:
 def station_readers(*, plan, release: Optional[str], baseline: str,
                     host_record, file_drift, manifest,
                     base: Path = Path("/opt/git/sigmond"),
-                    native_pins: Any = None) -> Readers:
+                    native_pins: Any = None,
+                    pins_file: Optional[Path] = None,
+                    catalog_override: Optional[Path] = None,
+                    repo_catalog: Optional[Path] = None) -> Readers:
     """Readers for this station.  Everything not passed in is read lazily,
     inside the collector that needs it."""
     base = Path(base)
@@ -279,7 +285,12 @@ def station_readers(*, plan, release: Optional[str], baseline: str,
             cache["enabled"] = topology_enabled()
         return cache["enabled"]
 
+    paths = {k: Path(v) for k, v in (("pins_file", pins_file),
+                                     ("catalog_override", catalog_override),
+                                     ("repo_catalog", repo_catalog))
+             if v is not None}
     return Readers(
+        **paths,
         plan=plan, release=release, baseline=baseline,
         host_record=host_record, file_drift=file_drift, manifest=manifest,
         base=base, components=lambda: _checkout_names(base),

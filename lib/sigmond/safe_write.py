@@ -275,6 +275,40 @@ def read_nofollow_stat(path: Union[str, Path]):
         os.close(dfd)
 
 
+def retire_nofollow(path: Union[str, Path], new_name: str) -> Optional[str]:
+    """Rename `path` to `new_name` in the same directory, never following a
+    link: the directory is opened with O_DIRECTORY|O_NOFOLLOW and the
+    rename runs relative to it, so a symlink at `path` is renamed itself and
+    its target stays untouched.  A name already taken gets ``.1``, ``.2``,
+    ... appended, so nothing retired earlier is overwritten.  Returns the
+    name used, or None when nothing stands at `path`."""
+    path = Path(path)
+    name = _name_of(path)
+    _name_of(Path(new_name))
+    dfd = _open_parent(path.parent)
+    try:
+        try:
+            os.stat(name, dir_fd=dfd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        dest, n = new_name, 0
+        while True:
+            try:
+                os.stat(dest, dir_fd=dfd, follow_symlinks=False)
+            except FileNotFoundError:
+                break
+            n += 1
+            if n > _TMP_TRIES:
+                raise OSError(errno.EEXIST, f"{path}: no free name to "
+                              f"retire it as {new_name}")
+            dest = f"{new_name}.{n}"
+        os.rename(name, dest, src_dir_fd=dfd, dst_dir_fd=dfd)
+        os.fsync(dfd)
+        return dest
+    finally:
+        os.close(dfd)
+
+
 # ---- the boolean TOML setter (mag-recorder's lever) -----------------------
 
 _BARE = re.compile(r"^[A-Za-z0-9_-]+$")

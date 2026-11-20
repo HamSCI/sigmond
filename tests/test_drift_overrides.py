@@ -9,7 +9,7 @@ def _run(tmp_path, cfgs, **kw):
     kw.setdefault("catalog_override", tmp_path / "c.toml")
     kw.setdefault("pins_file", tmp_path / "p.toml")
     kw.setdefault("coordination", tmp_path / "co.toml")
-    kw.setdefault("manifest", {})
+    kw.setdefault("repo_catalog", tmp_path / "repo-catalog.toml")
     return overrides.override_items(client_configs=cfgs, **kw)
 
 
@@ -36,27 +36,23 @@ def test_site_keys_never_count(tmp_path):
 
 
 def test_catalog_repo_override_is_drift(tmp_path):
+    # Every field of a catalog entry counts (v3.94 Task 9); a table that
+    # is no catalog section never does.
     (tmp_path / "c.toml").write_text(
         '[client.x]\nrepo = "https://e/x.git"\n[server.y]\nbranch = "d"\n'
         '[client.z]\nenabled = true\n')
     got = _run(tmp_path, {})
     assert [(i.severity, i.subject) for i in got] == [
-        ("drift", "catalog:x"), ("drift", "catalog:y")]
+        ("drift", "catalog:x.repo"), ("drift", "catalog:z.enabled")]
     assert "catalog-prune" in got[0].fix
 
 
-def test_pin_differing_from_manifest_is_drift(tmp_path):
+def test_any_station_pin_file_is_one_drift_item(tmp_path):
     (tmp_path / "p.toml").write_text(
-        '[pins]\na = "' + "a" * 40 + '"\nb = "' + "b" * 40 + '"\n'
-        'c = "' + "c" * 40 + '"\n')
-    got = _run(tmp_path, {}, manifest={"a": "aaaaaaa", "b": "1234567"})
-    assert [i.subject for i in got] == ["pin:b", "pin:c"]
-
-
-def test_junk_pin_and_empty_manifest_sha_ignored(tmp_path):
-    (tmp_path / "p.toml").write_text(
-        '[pins]\na = "abc"\nb = "' + "b" * 40 + '"\n')
-    assert _run(tmp_path, {}, manifest={"a": "zzz", "b": ""}) == []
+        '[pins]\na = "' + "a" * 40 + '"\nb = "abc"\n')
+    got = _run(tmp_path, {})
+    assert [i.subject for i in got] == ["pins:station-file"]
+    assert "2 station pin(s)" in got[0].detail
 
 
 def test_override_inside_array_of_tables(tmp_path):
@@ -80,7 +76,7 @@ def test_unreadable_config_is_one_fault(tmp_path):
     (tmp_path / "c.toml").write_text('[client.x]\nrepo = "u"\n')
     got = _run(tmp_path, cfgs)
     assert [(i.severity, i.subject) for i in got] == [
-        ("fault", str(cfgs["meteor-scatter"][0])), ("drift", "catalog:x")]
+        ("fault", str(cfgs["meteor-scatter"][0])), ("drift", "catalog:x.repo")]
     assert got[0].detail.startswith("could not read ")
 
 

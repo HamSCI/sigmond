@@ -99,8 +99,7 @@ class Ka9qWebBuildRecordTests(unittest.TestCase):
              mock.patch.object(smd, "_build_onion", return_value=True), \
              mock.patch.object(smd, "_ensure_native_build_deps", return_value=True), \
              mock.patch.object(smd, "_install_radiod_deps", return_value=True), \
-             mock.patch.object(smd, "_native_pin", return_value=""), \
-             mock.patch.object(smd, "_pin_if_tracking", return_value=None):
+             mock.patch.object(smd, "_native_pin", return_value=""):
             return smd._build_ka9q_web_with_onion(self.src)
 
     def _make_argvs(self):

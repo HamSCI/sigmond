@@ -25,15 +25,21 @@ int, and list-of-string values — that's the entire catalog schema.
 
 Backup: a ``.bak`` snapshot is written before the operator file is
 rewritten or removed, in case the prune is wrong about a value.
+
+Root runs this (install.sh, ``smd align --apply``), so the operator file
+is read, and the file and its ``.bak`` written, through
+``sigmond.safe_write``: a symlink at the operator path is refused, and one
+planted at either written name is replaced, never written through.
 """
 
 from __future__ import annotations
 
-import shutil
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+from sigmond.safe_write import read_nofollow, write_owned
 
 
 REPO_CATALOG = (Path(__file__).resolve().parent.parent.parent
@@ -52,14 +58,23 @@ class PruneReport:
     no_op: bool = False     # nothing to do
 
 
-def _load_sections(path: Path) -> dict[str, dict[str, dict]]:
+def _load_sections(path: Path, *, nofollow: bool = False
+                   ) -> dict[str, dict[str, dict]]:
     """Return ``{section: {name: raw_block_dict}}`` for the catalog
     sections we care about (``client``, ``deprecated``).  Missing
-    file → empty mapping (treat as "no operator overrides at all")."""
-    if not path.exists():
-        return {'client': {}, 'deprecated': {}}
-    with open(path, 'rb') as f:
-        data = tomllib.load(f)
+    file → empty mapping (treat as "no operator overrides at all").
+    ``nofollow`` (the operator file) reads through
+    ``safe_write.read_nofollow``, which refuses a symlink."""
+    if nofollow:
+        text = read_nofollow(path)
+        if text is None:
+            return {'client': {}, 'deprecated': {}}
+        data = tomllib.loads(text)
+    else:
+        if not path.exists():
+            return {'client': {}, 'deprecated': {}}
+        with open(path, 'rb') as f:
+            data = tomllib.load(f)
     return {
         'client': dict((data.get('client') or {}).items()),
         'deprecated': dict((data.get('deprecated') or {}).items()),
@@ -88,7 +103,7 @@ def compute_minimal_operator(operator_path: Path = OPERATOR_CATALOG,
     has the same ``{section: {name: block}}`` shape as
     ``_load_sections``."""
     report = PruneReport(operator_path=operator_path)
-    op = _load_sections(operator_path)
+    op = _load_sections(operator_path, nofollow=True)
     repo = _load_sections(repo_path)
 
     minimal: dict[str, dict[str, dict]] = {'client': {}, 'deprecated': {}}
@@ -187,17 +202,23 @@ def prune_operator_catalog(operator_path: Path = OPERATOR_CATALOG,
     if dry_run:
         return report
 
-    # Backup before any destructive write.
+    # Backup before any destructive write.  Both reads and writes refuse
+    # to follow a link (module docstring).
+    original = read_nofollow(operator_path)
+    if original is None:
+        return report
     report.backup_path = operator_path.with_suffix(
         operator_path.suffix + '.bak')
-    shutil.copy2(operator_path, report.backup_path)
+    write_owned(report.backup_path, original, mode=0o644,
+                owner_from_dir=False)
 
     if not has_content:
-        operator_path.unlink()
+        operator_path.unlink()          # unlink never follows a link
         report.removed_file = True
         return report
 
-    operator_path.write_text(_render_minimal(minimal))
+    write_owned(operator_path, _render_minimal(minimal), mode=0o644,
+                owner_from_dir=False)
     return report
 
 
