@@ -71,7 +71,7 @@ def _drive(*, dry=False, active=True, enabled=True, unit_file=True):
         st.enter_context(mock.patch.object(smd, "_ALIGN_UNIT_DIR", unit_dir))
         st.enter_context(mock.patch("sigmond.catalog.load_catalog",
                                     return_value={"x": object()}))
-        st.enter_context(mock.patch("sigmond.drift.build_report._topology_enabled",
+        st.enter_context(mock.patch("sigmond.drift.build_report.topology_enabled",
                                     return_value={"x": enabled}))
         st.enter_context(mock.patch("sigmond.uploader_manifest.MANIFEST_PATH",
                                     base / "pipelines.toml"))
@@ -122,3 +122,113 @@ def test_dry_run_lists_enables_only():
     assert _mutating(calls) == []
     assert "would enable x-events.timer (x)" in out
     assert "would enable x.service" not in out
+
+
+# --- sigmond's own timers (ruling (a), 2026-11-20) ---------------------------
+
+import re  # noqa: E402
+
+_REPO = Path(__file__).resolve().parent.parent
+
+
+def _install_sh_enabled_timers() -> set:
+    """Every sigmond-*.timer install.sh enables: literal `systemctl enable`
+    lines, and the names of a `for _t in ...` loop whose body enables "$_t"."""
+    text = (_REPO / "install.sh").read_text()
+    out = set()
+    lines = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
+    for i, ln in enumerate(lines):
+        if "systemctl enable" in ln:
+            out.update(re.findall(r"\bsigmond-[\w.@-]+\.timer\b", ln))
+        m = re.match(r"\s*for (\w+) in (.*); do\s*$", ln)
+        if m and i + 1 < len(lines) and re.search(
+                rf'systemctl enable\b.*"\${m.group(1)}"', lines[i + 1]):
+            out.update(t for t in m.group(2).split() if t.endswith(".timer"))
+    return out
+
+
+def test_python_list_matches_install_sh():
+    from sigmond.drift import units as drift_units
+    assert set(drift_units.INSTALL_ENABLED_TIMERS) == _install_sh_enabled_timers()
+    assert len(drift_units.INSTALL_ENABLED_TIMERS) == len(
+        set(drift_units.INSTALL_ENABLED_TIMERS))
+
+
+def _timers(*, archive=False, enabled=(), no_restart=False, rc=0, excepted=()):
+    """Run the real _align_start_timers against a tmp unit dir holding every
+    sigmond timer the repo ships; return the systemctl argv it ran."""
+    calls = []
+
+    def fake_run(argv, **kw):
+        argv = list(argv)
+        calls.append(argv)
+        if argv[:2] == ["systemctl", "is-enabled"]:
+            return subprocess.CompletedProcess(argv, 0 if argv[-1] in enabled else 1, "", "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as st:
+        tmp = Path(tmp)
+        unit_dir = tmp / "units"
+        unit_dir.mkdir()
+        for src in (_REPO / "systemd").glob("sigmond-*.timer"):
+            (unit_dir / src.name).write_text(src.read_text())
+        cfg = tmp / "archive.toml"
+        if archive:
+            cfg.write_text("uuid = 'x'\n")
+        exc = tmp / "drift-exceptions.toml"
+        if excepted:
+            from datetime import datetime, timedelta, timezone
+            today = datetime.now(timezone.utc).date()
+            exc.write_text("".join(
+                f'[[exception]]\nkey = "unit:{u}"\nreason = "A/B"\nby = "mjh"\n'
+                f'kind = "test"\nstart = {today}\n'
+                f'until = {today + timedelta(days=3)}\n' for u in excepted))
+        st.enter_context(mock.patch("sigmond.archive.CONFIG", cfg))
+        st.enter_context(mock.patch.object(
+            smd, "_align_run", lambda argv, *, run, timeout, action, **kw: run(argv)))
+        with contextlib.redirect_stdout(io.StringIO()):
+            smd._align_start_timers(rc=rc, no_restart=no_restart, unit_dir=unit_dir,
+                                    run=fake_run, exceptions_path=exc)
+    return calls
+
+
+def _enabled_by(calls):
+    return {c[-1] for c in calls if c[:2] == ["systemctl", "enable"]}
+
+
+def test_own_timers_install_set_enabled():
+    from sigmond.drift import units as drift_units
+    calls = _timers()
+    assert _enabled_by(calls) == set(drift_units.INSTALL_ENABLED_TIMERS)
+    # A clean run starts what it enables, as install.sh's `enable --now`.
+    assert ["systemctl", "enable", "--now", "sigmond-storage.timer"] in calls
+
+
+def test_already_enabled_timer_untouched():
+    calls = _timers(enabled={"sigmond-storage.timer"})
+    assert "sigmond-storage.timer" not in _enabled_by(calls)
+
+
+def test_no_restart_enables_without_starting():
+    calls = _timers(no_restart=True)
+    assert ["systemctl", "enable", "sigmond-storage.timer"] in calls
+    assert not any("--now" in c and c[-1] == "sigmond-storage.timer" for c in calls)
+
+
+def test_archive_health_only_with_archive_toml():
+    assert "sigmond-archive-health.timer" not in _enabled_by(_timers())
+    assert "sigmond-archive-health.timer" in _enabled_by(_timers(archive=True))
+
+
+def test_off_by_design_timers_untouched():
+    touched = {c[-1] for c in _timers(archive=True) if c[:2] == ["systemctl", "enable"]}
+    for t in ("sigmond-heartbeat.timer", "sigmond-timing-watchdog.timer",
+              "sigmond-radiod-watchdog.timer", "sigmond-netguard.timer",
+              "sigmond-decode-health-collect.timer",
+              "sigmond-storage-trim-wspr.timer"):
+        assert t not in touched
+
+
+def test_drift_exception_keeps_timer_as_is():
+    calls = _timers(excepted=("sigmond-timing-reconcile.timer",))
+    assert "sigmond-timing-reconcile.timer" not in _enabled_by(calls)

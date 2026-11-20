@@ -50,7 +50,7 @@ def _systemctl_enabled(unit: str) -> bool:
     return r.returncode == 0
 
 
-def _systemctl_active(unit: str) -> bool:
+def systemctl_active(unit: str) -> bool:
     try:
         r = subprocess.run(["systemctl", "is-active", "--quiet", unit],
                            capture_output=True, text=True, timeout=10)
@@ -101,7 +101,7 @@ class Readers:
     sigmond_repo: Optional[Path] = None  # default: base / "sigmond"
     unit_dir: Path = Path("/etc/systemd/system")
     is_enabled: Callable[[str], bool] = _systemctl_enabled
-    service_active: Callable[[str], bool] = _systemctl_active
+    service_active: Callable[[str], bool] = systemctl_active
     template_instances: Callable[[str], int] = _systemctl_template_instances
     native_pins: Any = field(default_factory=dict)  # source -> full sha
     # override (Task 5)
@@ -182,7 +182,7 @@ def station_name() -> str:
     return socket.gethostname()
 
 
-def _topology_enabled() -> dict:
+def topology_enabled() -> dict:
     from sigmond.topology import load_topology
     topo = load_topology()
     return {name: bool(c.enabled) for name, c in topo.components.items()}
@@ -234,7 +234,7 @@ def station_readers(*, plan, release: Optional[str], baseline: str,
 
     def enabled() -> dict:
         if "enabled" not in cache:
-            cache["enabled"] = _topology_enabled()
+            cache["enabled"] = topology_enabled()
         return cache["enabled"]
 
     return Readers(

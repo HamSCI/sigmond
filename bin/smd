@@ -9334,7 +9334,7 @@ def _align_enable_declared_units(apply: bool, *, base='/opt/git/sigmond',
     base = Path(base)
     try:
         catalog = load_catalog()
-        enabled = drift_report._topology_enabled()
+        enabled = drift_report.topology_enabled()
         local = _locally_managed()
     except Exception as exc:                                   # noqa: BLE001
         say(f'  declared units: not checked ({exc})')
@@ -9348,7 +9348,7 @@ def _align_enable_declared_units(apply: bool, *, base='/opt/git/sigmond',
             continue
         units = drift_units.declared_units(base, name)
         if not drift_units.component_running(units, True,
-                                             drift_report._systemctl_active):
+                                             drift_report.systemctl_active):
             continue
         svc = drift_units.main_service(units)
         if svc is not None and not os.path.lexists(_ALIGN_UNIT_DIR / svc):
@@ -9815,15 +9815,26 @@ def _align_own_units(sigmond_repo, *, unit_dir=Path('/etc/systemd/system'),
 
 
 def _align_start_timers(*, rc: int, no_restart: bool,
-                        unit_dir=Path('/etc/systemd/system'), run=None) -> None:
+                        unit_dir=Path('/etc/systemd/system'), run=None,
+                        exceptions_path=None) -> None:
     """After `_align_make_live`: enable and start the daily drift timer (an
     enabled timer that was never started does not fire until a reboot), and
     the location-check timer.  The location-check service can restart
     recorders, so under --no-restart, or after an align that did not finish
     cleanly, its timer is enabled but not started, and a line says so.  The
     service stays inert without /run/gpsdo, and skips a tick while smd's
-    lifecycle lock is held."""
+    lifecycle lock is held.
+
+    Then every other timer install.sh enables
+    (`drift.units.INSTALL_ENABLED_TIMERS`), and sigmond-archive-health.timer
+    while /etc/sigmond/archive.toml exists: a station installed before a
+    timer arrived never ran that enable.  A timer already enabled, not
+    installed, or covered by a live `unit:` drift exception stays as it is.
+    It starts only on a clean run without --no-restart, as above: several
+    (sdr-recover, storage, timing-reconcile) act on the station."""
     run = run or subprocess.run
+    _align_enable_own_timers(rc=rc, no_restart=no_restart, unit_dir=unit_dir,
+                             run=run, exceptions_path=exceptions_path)
     if (Path(unit_dir) / _ALIGN_DRIFT_TIMER).is_file():
         r = _align_run(['systemctl', 'enable', '--now', _ALIGN_DRIFT_TIMER],
                        run=run, timeout=60,
@@ -9844,6 +9855,42 @@ def _align_start_timers(*, rc: int, no_restart: bool,
             print(f'  {_ALIGN_LOCATION_TIMER} enabled but not started ({why}): '
                   f'it can restart recorders; it starts at the next boot, or '
                   f'with: systemctl start {_ALIGN_LOCATION_TIMER}')
+
+
+def _align_enable_own_timers(*, rc: int, no_restart: bool, unit_dir, run,
+                             exceptions_path=None) -> None:
+    """The install.sh timer set for `_align_start_timers` (its docstring)."""
+    from sigmond import archive as ar
+    from sigmond.drift import units as drift_units
+    wanted = [t for t in drift_units.INSTALL_ENABLED_TIMERS
+              if t not in (_ALIGN_DRIFT_TIMER, _ALIGN_LOCATION_TIMER)]
+    if ar.CONFIG.exists():
+        wanted.append(drift_units.ARCHIVE_HEALTH_TIMER)
+    excepted, err = drift_units.excepted_units(exceptions_path, None)
+    if err is not None:
+        print(f'  sigmond timers: {err}; none enabled')
+        return
+    start = rc == 0 and not no_restart
+    held = []
+    for timer in wanted:
+        if timer in excepted or not (Path(unit_dir) / timer).is_file():
+            continue
+        r = _align_run(['systemctl', 'is-enabled', '--quiet', timer], run=run,
+                       timeout=15, action=f'systemctl is-enabled {timer}')
+        if r.returncode == 0:
+            continue
+        argv = ['systemctl', 'enable'] + (['--now'] if start else []) + [timer]
+        r = _align_run(argv, run=run, timeout=60, action=' '.join(argv))
+        if r.returncode != 0:
+            print(f'  could not enable {timer}: {(r.stderr or "").strip()}')
+            continue
+        print(f'  enabled {timer}' + (' and started it' if start else ''))
+        if not start:
+            held.append(timer)
+    if held:
+        why = '--no-restart' if no_restart else 'align did not finish cleanly'
+        print(f'  not started ({why}): {", ".join(held)}; they start at the next '
+              f'boot, or with: systemctl start {" ".join(held)}')
 
 
 _ALIGN_BLOCKING = ('failed', 'refused', 'skipped')

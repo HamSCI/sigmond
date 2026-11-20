@@ -34,6 +34,34 @@ from sigmond.drift.model import Item
 _APPLY = "smd align --apply"
 _OWN_GLOBS = ("sigmond-*.service", "sigmond-*.timer", "sigmond-*.path")
 
+# The sigmond timers install.sh enables, and so `smd align --apply` enables
+# where a station lacks one (a timer that arrived after its install).
+# tests/test_align_enables_units.py parses install.sh and holds the two
+# equal.  The rest stay off by design: heartbeat (fails until [heartbeat]
+# is set), decode-health-collect (the operator's call), the per-client
+# trims (trim-all covers them), the timing/radiod watchdogs and netguard.
+INSTALL_ENABLED_TIMERS = (
+    "sigmond-t6-stuck-watchdog.timer",
+    "sigmond-mdns.timer",
+    "sigmond-time-sync.timer",
+    "sigmond-link.timer",
+    "sigmond-service-events.timer",
+    "sigmond-ts1-advertise.timer",
+    "sigmond-link-rac.timer",
+    "sigmond-sdr-recover.timer",
+    "sigmond-storage-trim-all.timer",
+    "sigmond-gap-hourly.timer",
+    "sigmond-drift.timer",
+    "sigmond-location-check.timer",
+    "sigmond-timing-reconcile.timer",
+    "sigmond-snapshot.timer",
+    "sigmond-component-fetch.timer",
+    "sigmond-storage.timer",
+)
+# `smd archive add` enables it, `smd archive remove --forget` disables it:
+# align enables it only while /etc/sigmond/archive.toml names a drive.
+ARCHIVE_HEALTH_TIMER = "sigmond-archive-health.timer"
+
 
 def _declared(base: Path, name: str) -> list:
     """Unit names from deploy.toml [systemd] (units, then templated_units)."""
@@ -153,7 +181,7 @@ def unit_items(base: Path, enabled: Mapping[str, bool], *,
     return out
 
 
-def _excepted_units(exceptions_path, now) -> tuple:
+def excepted_units(exceptions_path, now) -> tuple:
     """(unit names a live drift exception covers, the read error or None).
     A live exception has not passed its ``until``; an expired test is the
     restore the fault asks for, so it covers nothing."""
@@ -184,7 +212,7 @@ def install_own_units(sigmond_repo: Path, unit_dir: Path, *,
     kept for callers that inject a runner; the copy itself needs none.
     """
     unit_dir = Path(unit_dir)
-    excepted, err = _excepted_units(exceptions_path, now)
+    excepted, err = excepted_units(exceptions_path, now)
     stamp = (now or datetime.now(timezone.utc)).astimezone(
         timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     if err is not None:
