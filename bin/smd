@@ -6425,6 +6425,89 @@ def _write_docs_cache(path: Path, cache: dict) -> None:
         raise
 
 
+def _release_raw_file(repo_url: str, sha: str, path: str) -> str:
+    """One file of `repo_url` at commit `sha`, from raw.githubusercontent."""
+    from sigmond import align
+    slug = align.github_slug(repo_url)
+    if not slug:
+        raise ValueError(f'not a GitHub URL: {repo_url}')
+    url = f'https://raw.githubusercontent.com/{slug}/{sha}/{path}'
+    try:
+        return align._get(url, align._default_urlopen, 30.0).decode('utf-8')
+    except (align.LookupError_, UnicodeDecodeError) as exc:
+        raise ValueError(f'cannot read {path} of {slug} at {sha[:12]}: {exc}')
+
+
+def cmd_admin_release_list(args) -> int:
+    """`smd admin release-list --write --version vN | --check`: the operator
+    verb over `sigmond.release_list`.
+
+    --write reads the head of every component, copies each native pin from
+    its owner, and writes the list file (default release/components.toml in
+    the checkout this smd sits in).  It prints the rows and never commits.
+    --check compares the list with a manifest file (--manifest) or with the
+    checkouts under --base.  Exit: 0 match, 1 mismatch, 2 list unreadable
+    or a source unreachable.  Needs no root."""
+    if not _HAS_SIGMOND_LIB:
+        print('admin release-list: sigmond library not importable',
+              file=sys.stderr)
+        return 2
+    from sigmond import release_list as rlm
+    here = Path(__file__).resolve().parent.parent
+    list_path = Path(getattr(args, 'list', None) or here / 'release' / 'components.toml')
+
+    def fail(msg: str) -> int:
+        print(f'admin release-list: {msg}'.encode('ascii', 'replace').decode(),
+              file=sys.stderr)
+        return 2
+
+    if getattr(args, 'write', False):
+        if not getattr(args, 'version', None):
+            return fail('--write needs --version vN')
+        try:
+            smd_text = Path(__file__).read_text(encoding='utf-8')
+            rl = rlm.compute_list(
+                args.version, urls=rlm.repo_urls(load_catalog()),
+                smd_text=smd_text, remote_head=_remote_head,
+                fetch_file=_release_raw_file)
+            text = rlm.format_list(rl)
+            rlm.parse_list(text)        # what we write must read back
+            list_path.parent.mkdir(parents=True, exist_ok=True)
+            list_path.write_text(text, encoding='utf-8')
+        except (rlm.ReleaseListError, ValueError, OSError) as exc:
+            return fail(str(exc))
+        print(f'release list {rl.version} written to {list_path}')
+        for name in sorted(rl.components):
+            print(f'  {name:<18} {rl.components[name]}')
+        print('not committed: review, then commit it yourself')
+        return 0
+
+    try:
+        rl = rlm.load_list(list_path)
+        if getattr(args, 'manifest', None):
+            try:
+                mtext = Path(args.manifest).read_text(encoding='utf-8')
+            except (OSError, UnicodeDecodeError) as exc:
+                raise rlm.ReleaseListError(f'cannot read manifest {args.manifest}: {exc}')
+            bad = rlm.compare_manifest(rl, mtext)
+            other = 'manifest'
+        else:
+            from sigmond.doctor import component_checkouts
+            from sigmond.provenance import component_versions
+            base = Path(getattr(args, 'base', None) or '/opt/git/sigmond')
+            live = component_versions(component_checkouts(base))
+            bad = rlm.compare_live(rl, live,
+                                   require_all=getattr(args, 'require_all', False))
+            other = 'live'
+    except rlm.ReleaseListError as exc:
+        return fail(str(exc))
+    for m in bad:
+        print(f"{m.component}: list={m.want or '-'} {other}={m.have or '-'} ({m.note})")
+    if not bad:
+        print(f'release list {rl.version}: matches ({other})')
+    return 1 if bad else 0
+
+
 def cmd_admin_docs_index(args) -> int:
     """`smd admin docs index [--json] [--base DIR]` -- the docs index that
     station-web's browser reads as the `docs` snapshot.  Every catalog
@@ -33489,6 +33572,28 @@ def _build_parser() -> argparse.ArgumentParser:
     p_hb_show.add_argument('--json', dest='json', action='store_true',
         help='print the raw envelope instead of the verdict table')
 
+    p_rl = admin_sub.add_parser(
+        'release-list',
+        help="write or check release/components.toml, the commit of every "
+             "component a sigmond release ships")
+    p_rl_mode = p_rl.add_mutually_exclusive_group(required=True)
+    p_rl_mode.add_argument('--write', action='store_true',
+        help='read each component head and native pin, write the list '
+             '(never commits)')
+    p_rl_mode.add_argument('--check', action='store_true',
+        help='compare the list with a manifest or the live checkouts; '
+             'exit 0 match, 1 mismatch, 2 error')
+    p_rl.add_argument('--version', metavar='vN',
+        help='release tag to write (with --write)')
+    p_rl.add_argument('--list', metavar='PATH',
+        help='list file (default release/components.toml in this checkout)')
+    p_rl.add_argument('--manifest', metavar='FILE',
+        help='with --check: compare with this manifest, not the checkouts')
+    p_rl.add_argument('--base', default=None,
+        help='with --check: checkout root (default /opt/git/sigmond)')
+    p_rl.add_argument('--require-all', action='store_true',
+        help='with --check: a listed row with no checkout is a mismatch')
+
     p_docs = admin_sub.add_parser(
         'docs',
         help="index each component's docs/ folder for station-web's browser")
@@ -34781,6 +34886,9 @@ def main() -> int:
 
     if args.command == 'viewers':
         return cmd_admin_viewers(args)
+
+    if args.command == 'release-list':
+        return cmd_admin_release_list(args)
 
     if args.command == 'docs':
         if getattr(args, 'docs_command', None) != 'index':

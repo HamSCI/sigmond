@@ -12,7 +12,7 @@ import re
 import sys
 import tomllib
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 from sigmond.align import COMPONENT_NAME_RE, RELEASE_TAG_RE, _preamble
 from sigmond.doctor import _parse_manifest_components, _sha_equal
@@ -161,6 +161,53 @@ def compare_manifest(rl: ReleaseList, manifest_text: str) -> list:
         if name not in rl.components:
             out.append(Mismatch(name, None, rows[name], "in the manifest but not on the list"))
     return out
+
+
+EXTRA_URLS = {
+    "ka9q-python": "https://github.com/HamSCI/ka9q-python",
+    "sigmond-proxmox": "https://github.com/HamSCI/sigmond-proxmox",
+}
+
+
+def repo_urls(catalog: dict) -> dict:
+    """Clone URL of every row that has a head of its own.  The owner-derived
+    rows (NATIVE_CONSTANTS, ka9q-radio, ft8_lib) have no entry."""
+    out = {}
+    derived = set(NATIVE_CONSTANTS) | {"ka9q-radio", "ft8_lib"}
+    for name in ROWS:
+        if name in derived:
+            continue
+        if name in EXTRA_URLS:
+            out[name] = EXTRA_URLS[name]
+        elif name in catalog and getattr(catalog[name], "repo", None):
+            out[name] = catalog[name].repo
+    return out
+
+
+def compute_list(version: str, *, urls: dict, smd_text: str,
+                 remote_head: Callable[[str], str],
+                 fetch_file: Callable[[str, str, str], str]) -> ReleaseList:
+    """Build the list: heads from the remote, native pins from their owners."""
+    if not RELEASE_TAG_RE.match(version or ""):
+        raise ReleaseListError(f"version {version!r} is not a release tag like v3.94")
+    comps = {}
+    for name, url in urls.items():
+        sha = remote_head(url)
+        if not sha:
+            raise ReleaseListError(f"{name}: no head from {url}")
+        comps[name] = sha
+    comps.update(native_constants(smd_text))
+    for name in ("ka9q-python", "psk-recorder"):
+        if name not in comps:
+            raise ReleaseListError(f"{name}: no head, so its native pin cannot be read")
+    comps["ka9q-radio"] = ka9q_radio_from_compat(
+        fetch_file(urls["ka9q-python"], comps["ka9q-python"], "ka9q_radio_compat"))
+    comps["ft8_lib"] = ft8lib_from_install_sh(
+        fetch_file(urls["psk-recorder"], comps["psk-recorder"], "scripts/install.sh"))
+    missing = sorted(set(ROWS) - set(comps))
+    if missing:
+        raise ReleaseListError("no source for row(s): " + ", ".join(missing))
+    return ReleaseList(version=version, components={n: comps[n] for n in ROWS})
 
 
 def _read_list(arg: str) -> ReleaseList:
