@@ -163,3 +163,10 @@ Image file names change from `sigmond-appliance-<v>-<stamp>` to `sigmond-<v>-<st
 - The exact component set in `components.toml` (mirror today's manifest rows).
 - How `smd install` takes the list (a `--release-list PATH` or reading the tag's file).
 - The bare-metal test's VM template on the rig and its record format.
+
+## The bare-metal pass rule (Michael, 2026-11-20: "Waiting is a pass")
+
+With no RX888 the radiod sits dormant, and its consumers cannot run.  The test passes when every component
+installs at the list's commits, and each radiod consumer reads "waits on dormant radiod" in `smd check`, with
+no other fault.  `smd check` gains that reading: a component whose only missing input is a dormant radiod is
+waiting, not failing.  The test proves the install path; B4 and SIGMA prove reception.
