@@ -8,11 +8,17 @@ only the builder's compile step and the root-only marker files stay stubbed.
 """
 from __future__ import annotations
 
+import argparse
+import contextlib
+import io
 import re
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from sigmond import align_apply
+from tests.test_align_cli import (APPLY_REL, _no_real_record_live,
+                                   _quiet_live_stages)
 from tests.test_align_native_rebuild import _Rig, _git, smd
 
 REPO = Path(__file__).resolve().parent.parent
@@ -108,6 +114,103 @@ class AlignNativeDecodersTests(_DecoderRig):
         self.assertEqual(order, ["build", "live"])
 
 
+class OnionDoubleBuildTests(_DecoderRig):
+    """Onion maps to the ka9q-web builder.  When ka9q-web is already rebuilt
+    in this align (Task 2), the decoder stage neither builds nor counts it
+    a second time."""
+
+    def setUp(self):
+        super().setUp()
+        (self.decoders / "ubersdr" / ".provenance").write_text(
+            f"ubersdr-decoders {self.dec_new} version=x parity=verified\n")
+        onion = self.base / "onion"
+        onion.mkdir()
+        _git("init", "-q", "-b", "main", cwd=onion)
+        (onion / "a").write_text("a\n")
+        _git("add", "-A", cwd=onion)
+        _git("commit", "-qm", "one", cwd=onion)
+        self.onion_old = _git("rev-parse", "HEAD", cwd=onion).stdout.strip()
+        (onion / "b").write_text("b\n")
+        _git("add", "-A", cwd=onion)
+        _git("commit", "-qm", "two", cwd=onion)
+        self.onion_new = _git("rev-parse", "HEAD", cwd=onion).stdout.strip()
+        _git("checkout", "-q", self.onion_old, cwd=onion)
+        p = mock.patch.object(smd, "_ONION_COMMIT", self.onion_new)
+        p.start()
+        self.addCleanup(p.stop)
+        # ka9q-web trails its record, so Task 2 rebuilds it.
+        self._record("ka9q-web", self.old["ka9q-web"])
+
+    def test_apply_does_not_build_ka9q_web_twice(self):
+        rc, out, _ = self._apply()
+        self.assertEqual(len([c for c in self.calls if c[0] == "ka9q-web"]), 1, out)
+        self.assertNotIn("ka9q-web", self.builds, out)
+
+    def test_dry_run_counts_ka9q_web_once(self):
+        rc, out = self._dry_run()
+        self.assertIn("1 to rebuild", out)
+        self.assertNotIn("native rebuild due: ka9q-web", out)
+
+    def test_onion_alone_still_builds_ka9q_web(self):
+        self._record("ka9q-web", self.new["ka9q-web"])
+        rc, out, _ = self._apply()
+        self.assertEqual(self.builds, ["ka9q-web"], out)
+
+
+class OldTargetTests(unittest.TestCase):
+    """Sigmond moved to a target whose smd align predates this one: this
+    process still holds the OLD pin constants, so it must not build decoders."""
+
+    def _run(self, has_align):
+        due = [("ubersdr_wsprd", "ubersdr-decoders", "a" * 40, "b" * 40)]
+        builds = []
+        boot = align_apply.Step("sigmond", "moved", "459bee6 -> daba1f6", 100)
+        rest = [align_apply.Step("hf-timestd", "current"),
+                align_apply.Step("ka9q-radio", "current")]
+        out = io.StringIO()
+        with contextlib.ExitStack() as st:
+            st.enter_context(_quiet_live_stages())
+            st.enter_context(_no_real_record_live())
+            for p in [
+                mock.patch("sigmond.align_apply.apply_plan",
+                           mock.Mock(side_effect=[[boot], rest])),
+                mock.patch.object(smd, "_need_root", return_value=False),
+                mock.patch.object(smd, "lifecycle_lock",
+                                  lambda reason=None: contextlib.nullcontext()),
+                mock.patch.object(smd, "_align_live_state",
+                                  return_value=({"sigmond": "459bee6", "hf-timestd": "5c8196d",
+                                                 "ka9q-radio": "401992c"}, {}, {}, {})),
+                mock.patch("sigmond.align.fetch_release", return_value=APPLY_REL),
+                mock.patch("sigmond.align_apply.verify_release", return_value=None),
+                mock.patch.object(smd, "_align_ancestry",
+                                  return_value=lambda c, a, b: True),
+                mock.patch.object(smd, "_align_target_has_align", return_value=has_align),
+                mock.patch.object(smd, "_align_target_skips_missing", return_value=has_align),
+                mock.patch.object(smd, "_align_target_supports", return_value=True),
+                mock.patch("sigmond.align_apply.record"),
+                mock.patch("sigmond.align_apply.record_history"),
+                mock.patch("sigmond.catalog.load_catalog", return_value={}),
+                mock.patch("os.execv"),
+                mock.patch.object(smd, "_native_rebuilds_due", lambda base: due),
+                mock.patch.object(smd, "_run_native_builder",
+                                  lambda n, b: builds.append(n) or True),
+                mock.patch.object(smd, "_record_native_build"),
+                mock.patch.object(smd, "_clear_native_build_failed"),
+            ]:
+                st.enter_context(p)
+            args = argparse.Namespace(release=None, base="/opt/git/sigmond", no_cost=True,
+                                      apply=True, allow_rollback=False, max_bytes=None)
+            with contextlib.redirect_stdout(out):
+                smd.cmd_align(args)
+        return builds, out.getvalue()
+
+    def test_old_smd_continuing_skips_native_decoders(self):
+        builds, out = self._run(has_align=False)
+        self.assertEqual(builds, [], out)
+        self.assertIn("predates this one", out)
+        self.assertIn("smd admin native-build --apply", out)
+
+
 class NoRecorderFlagsTests(unittest.TestCase):
 
     FLAG = re.compile(r"(?:^|[\s\"'\[,])(--nn|--fine-freq|-F)(?=[\s\"'\],=]|$)")
@@ -124,4 +227,23 @@ class NoRecorderFlagsTests(unittest.TestCase):
             for n, line in enumerate(text.splitlines(), 1):
                 if self.FLAG.search(line):
                     hits.append(f"{p.relative_to(REPO)}:{n}: {line.strip()}")
+        self.assertEqual(hits, [])
+
+    RENDERERS = ("instance", "coordination", "bringup", "harmonize",
+                 "decoder_choice", "uniform_routing")
+
+    def test_no_recorder_renderer_passes_nn_or_F(self):
+        """The code that renders recorder env and args: its source, and the
+        per-instance env stub it writes for each recorder."""
+        hits = []
+        for name in self.RENDERERS:
+            p = REPO / "lib" / "sigmond" / f"{name}.py"
+            for n, line in enumerate(p.read_text().splitlines(), 1):
+                if self.FLAG.search(line):
+                    hits.append(f"{p.relative_to(REPO)}:{n}: {line.strip()}")
+        from sigmond import instance
+        for client in ("wspr-recorder", "psk-recorder"):
+            for n, line in enumerate(instance._env_stub(client, "AC0G").splitlines(), 1):
+                if self.FLAG.search(line):
+                    hits.append(f"_env_stub({client}):{n}: {line.strip()}")
         self.assertEqual(hits, [])

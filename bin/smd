@@ -9129,7 +9129,7 @@ def _align_native_build(name: str, repo: Path) -> int:
     return 0 if _build_ka9q_web_with_onion(repo, force=True) else 1
 
 
-def _align_native_decoders(apply: bool, base) -> int:
+def _align_native_decoders(apply: bool, base, covered=()) -> int:
     """The native rebuilds `_native_rebuilds_due` names (UberSDR decoders,
     wsjtx decoders, onion): a checkout off sigmond's pin, or at it beside a
     build from another commit.  v3.93 moved the ubersdr_wsprd checkout and
@@ -9139,12 +9139,17 @@ def _align_native_decoders(apply: bool, base) -> int:
     --apply: run each builder as `smd admin native-build` does.  A failure
     is reported and counted, and leaves the old binaries and a failure
     marker for `smd doctor`.  Returns the number of failed builds (dry run:
-    the number due)."""
+    the number due).
+
+    `covered` names builders this run already rebuilds by another route
+    (onion rides the ka9q-web builder, which align builds itself when
+    ka9q-web moves or trails its build): skipped, so nothing builds or
+    counts twice."""
     base = Path(base)
     failed = 0
     seen = set()
     for _src, builder, head, pin in _native_rebuilds_due(base):
-        if builder in seen:
+        if builder in seen or builder in covered:
             continue
         seen.add(builder)
         if not apply:
@@ -9568,6 +9573,7 @@ def _align_apply(args) -> int:
         if max_bytes is not None:
             passthrough += ['--max-bytes', str(max_bytes)]
 
+        old_code = False
         sigmond_item = next((it for it in items if it.component == 'sigmond'), None)
         if sigmond_item is not None and sigmond_item.status == 'forward':
             other_items = [it for it in items if it.component != 'sigmond']
@@ -9624,6 +9630,7 @@ def _align_apply(args) -> int:
             if boot.outcome == 'moved':
                 print(f'sigmond moved to {sigmond_item.target}, whose smd align '
                       f'predates this one — continuing with the code already loaded')
+                old_code = True
                 # Fix round 1 / I1: apply_plan's own total_bytes tracker
                 # starts at 0 on EVERY call — without carrying the boot
                 # move's own cost forward, this second call would get a
@@ -9668,7 +9675,17 @@ def _align_apply(args) -> int:
                             for s in steps)
         if own_units:
             steps = steps + _align_own_units(Path(base) / 'sigmond')
-        native_failed = _align_native_decoders(True, base)
+        if old_code:
+            # This process holds the OLD pin constants: building now would
+            # check out and build the old pin.
+            print('  native rebuilds skipped: this smd still holds the pins of '
+                  'the sigmond it replaced - run smd align --apply again '
+                  '(or smd admin native-build --apply)')
+            native_failed = 0
+        else:
+            native_failed = _align_native_decoders(
+                True, base, covered={s.component for s in steps
+                                     if getattr(s, 'built', False)})
         rc = _align_make_live(args, rel, steps, base=base, catalog=catalog, now=_now)
         rc = rc or (1 if native_failed else 0)
         # Final review I1: the timers start only once the bring-up and its
@@ -10428,7 +10445,9 @@ def cmd_align(args) -> int:
         print(f'    {it.component:<16} {line}')
     if rate_limited:
         print(f'  commit distances skipped: {rate_limited}')
-    native_due = _align_native_decoders(False, base)
+    native_due = _align_native_decoders(
+        False, base, covered=rebuilds | {it.component for it in plan
+                                         if it.status == 'move'})
     # A candidate has no tag on GitHub yet: read its files at its commit.
     files = align.image_file_drift(rel.appliance_commit if rel.candidate else rel.tag)
     from sigmond import align_apply as _aa
