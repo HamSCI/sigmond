@@ -9254,7 +9254,7 @@ def _align_unit_enabled_state(unit: str, run) -> str:
 
 
 def _align_follow_devices(apply: bool, *, say=print, start: bool = True,
-                          run=None) -> int:
+                          run=None, off_out=None) -> int:
     """Device-reading clients follow the device on this machine.
 
     AC1SN (installed 2026-10-15) kept gmag-webui enabled with no
@@ -9281,7 +9281,9 @@ def _align_follow_devices(apply: bool, *, say=print, start: bool = True,
     (``apply`` False): one `would ...` line each.  Runs before `_align_enable_declared_units`,
     which then finds a switched-off client's main service stopped and
     leaves it.  Returns the clients switched, or that --apply would
-    switch."""
+    switch.  ``off_out`` collects the clients switched off (dry run: that
+    --apply would switch off), so the dry run's declared-units listing
+    skips them as --apply does (final review M3)."""
     from sigmond import hardware
     from sigmond.catalog import load_catalog
     from sigmond.drift import build_report as drift_report
@@ -9337,6 +9339,8 @@ def _align_follow_devices(apply: bool, *, say=print, start: bool = True,
                 say(f'  {name}: not switched off (--no-restart): no {label} '
                     f'on this machine')
                 continue
+            if off_out is not None:
+                off_out.append(name)
             if not apply:
                 say(f'  would switch off {name}: no {label} on this machine')
             else:
@@ -9484,7 +9488,8 @@ def _align_device_steps(*, start: bool, base='/opt/git/sigmond') -> list:
 
 
 def _align_enable_declared_units(apply: bool, *, base='/opt/git/sigmond',
-                                 say=print, timers_out=None) -> int:
+                                 say=print, timers_out=None,
+                                 switched_off=()) -> int:
     """Link and enable the declared `.timer` units of every running component.
 
     A timer a component adds after its first install stayed disabled: only
@@ -9516,7 +9521,9 @@ def _align_enable_declared_units(apply: bool, *, base='/opt/git/sigmond',
     is (B4 suspends HPPS by hand); an exceptions file that cannot be read
     enables nothing.  A declared unit systemd does not know goes
     unmentioned: the drift report faults it.  Dry run: one `would enable
-    <unit> (<component>)` line each, nothing changed.  Returns the units
+    <unit> (<component>)` line each, nothing changed; a component in
+    ``switched_off`` (the dry run's device step would switch it off, and
+    --apply then finds it stopped) is left out.  Returns the units
     enabled, or that --apply would enable."""
     from sigmond.catalog import load_catalog
     from sigmond.drift import build_report as drift_report
@@ -9536,7 +9543,8 @@ def _align_enable_declared_units(apply: bool, *, base='/opt/git/sigmond',
         return 0
     count = 0
     for name in sorted(enabled):
-        if not enabled[name] or name not in catalog or name in local:
+        if (not enabled[name] or name not in catalog or name in local
+                or name in switched_off):
             continue
         repo = base / name
         if not (repo / 'deploy.toml').is_file():
@@ -11004,9 +11012,11 @@ def cmd_align(args) -> int:
         False, base, covered=rebuilds | {it.component for it in plan
                                          if it.status == 'move'},
         ran_out=native_builders)
-    _align_follow_devices(False, start=not getattr(args, 'no_restart', False))
+    switched_off: list = []
+    _align_follow_devices(False, start=not getattr(args, 'no_restart', False),
+                          off_out=switched_off)
     _align_gmag_webui_unit(False, base=base)
-    _align_enable_declared_units(False, base=base)
+    _align_enable_declared_units(False, base=base, switched_off=set(switched_off))
     own_due, own_err = _align_own_timers_due(_ALIGN_UNIT_DIR, subprocess.run)
     if own_err is not None:
         print(f'  sigmond timers: {own_err}; --apply would enable none')

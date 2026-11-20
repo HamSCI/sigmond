@@ -664,3 +664,20 @@ def test_readiness_probe_that_raises_reads_unknown():
         items = br.build("AC0G-T", readers=readers).items
     assert not [i for i in items if i.subject == "check"], items
     assert not [i for i in items if i.subject == "mag-recorder"]
+
+
+# --- final review M3: the dry run skips what the device step switches off ----
+
+def test_dry_run_names_no_enable_for_a_client_it_would_switch_off():
+    """AC1SN shape: mag-recorder runs with its upload timer disabled and no
+    magnetometer was ever seen.  --apply switches it off first, and then
+    enables nothing of it; the dry run must say the same."""
+    enabled = [u for u in _ALL_UNITS if u != "mag-recorder-upload.timer"]
+    sysd, out, _, _ = _drive(ready={"mag-recorder": False, "gmag-webui": True},
+                             dry=True, enabled_units=enabled)
+    assert "would switch off mag-recorder" in out, out
+    assert "would enable mag-recorder-upload.timer" not in out, out
+    sysd, out, _, _ = _drive(ready={"mag-recorder": False, "gmag-webui": True},
+                             enabled_units=enabled)
+    assert "switched off mag-recorder" in out, out
+    assert ["systemctl", "enable", "mag-recorder-upload.timer"] not in sysd.calls
