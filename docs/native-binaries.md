@@ -201,6 +201,16 @@ path-based `rm`. When it lacks permission, it runs itself again as root
 code. After a ka9q-web rebuild, the command prints a
 reminder to restart ka9q-web; it does not restart the viewer itself.
 
+`smd align --apply` runs these builds too, so a station need not wait for
+`smd update`.  It runs the UberSDR decoder build, the onion build and the
+wsjtx build when each falls due, and a dry run lists each as `native rebuild
+due`.  It also rebuilds ka9q-radio and ka9q-web whose binary trails the
+checkout.  The dry run names a radiod rebuild `REBUILDS and RESTARTS radiod`,
+with the reason.  A radiod rebuilt but not yet restarted leaves a restart due.
+ka9q-web writes its build record only after a real build.  align never builds
+a ka9q-radio that the site profile marks `locally_managed`.  An align that
+runs under an older smd skips the decoder stage and says so.
+
 Git in these checkouts runs as the tree's owner, never as root. `smd
 install` elevates itself, so on v3.85 and earlier images each build's
 `git clone` ran as root and left onion, wsjtx and ubersdr_wsprd root-owned.
