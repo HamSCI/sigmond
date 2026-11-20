@@ -180,7 +180,8 @@ def _write_at(dfd: int, dst: os.stat_result, name: str, path: Path,
 
 def write_owned(path: Union[str, Path], data: Union[str, bytes], *,
                 mode: int = 0o644, owner_from_dir: bool = True,
-                owner: Optional[Tuple[int, int]] = None) -> None:
+                owner: Optional[Tuple[int, int]] = None,
+                dir_fd: Optional[int] = None) -> None:
     """Write `data` to `path` atomically, safe in a directory others can write.
 
     `mode` is set exactly, whatever the umask.  With `owner_from_dir`, a
@@ -191,24 +192,32 @@ def write_owned(path: Union[str, Path], data: Union[str, bytes], *,
     owner, or the write is refused.  Raises OSError for a non-regular file
     at `path` or a symlink at its directory, and FileNotFoundError when the
     directory is missing.
+
+    `dir_fd`, an open descriptor of `path`'s directory, is used in place of
+    opening `path.parent` again, so a caller that has already opened (and
+    checked) the directory by descriptor cannot have it swapped by path in
+    between.  `path` then serves only for its name and the messages.  The
+    caller keeps the descriptor and closes it.
     """
     path = Path(path)
     name = _name_of(path)
     if isinstance(data, str):
         data = data.encode("utf-8")
-    dfd = _open_parent(path.parent)
+    dfd = _open_parent(path.parent) if dir_fd is None else dir_fd
     try:
         dst = os.fstat(dfd)
         if owner is None and owner_from_dir:
             owner = (dst.st_uid, dst.st_gid)
         _write_at(dfd, dst, name, path, data, mode, owner)
     finally:
-        os.close(dfd)
+        if dir_fd is None:
+            os.close(dfd)
 
 
 def rewrite_owned(path: Union[str, Path],
                   transform: Callable[[Optional[str]], Union[str, bytes]], *,
-                  mode: Optional[int] = 0o644, keep_owner: bool = False) -> None:
+                  mode: Optional[int] = 0o644, keep_owner: bool = False,
+                  dir_fd: Optional[int] = None) -> None:
     """Read `path`, pass its text to `transform`, write what it returns.
 
     The read and the write share one directory descriptor, opened once with
@@ -221,11 +230,11 @@ def rewrite_owned(path: Union[str, Path],
     `keep_owner` keeps the existing file's uid and gid, which ``_read_at``
     has already checked are root or the directory's owner; otherwise, and
     for a new file, the file goes to the directory's owner as write_owned
-    does.
+    does.  `dir_fd` works as in write_owned.
     """
     path = Path(path)
     name = _name_of(path)
-    dfd = _open_parent(path.parent)
+    dfd = _open_parent(path.parent) if dir_fd is None else dir_fd
     try:
         dst = os.fstat(dfd)
         got = _read_at(dfd, dst, name, path)
@@ -239,7 +248,8 @@ def rewrite_owned(path: Union[str, Path],
             else (dst.st_uid, dst.st_gid)
         _write_at(dfd, dst, name, path, data, mode, owner)
     finally:
-        os.close(dfd)
+        if dir_fd is None:
+            os.close(dfd)
 
 
 def read_nofollow(path: Union[str, Path]) -> Optional[str]:

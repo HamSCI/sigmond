@@ -624,3 +624,90 @@ def test_root_runs_git_as_the_owner_by_default(tmp_path):
         smd._seat_listed_checkouts(_rl(**{"ka9q-python": c1}), base,
                                    run=run, check_only=True)
     assert seen and all(a[:2] == ["runuser", "-u"] for a in seen)
+
+
+# --- security round 2: F1 (owner of the git folder), F2 (no path re-resolve) --
+
+def _stat_with_uid(target: Path, uid: int):
+    real = os.stat
+
+    def fake(p, *a, **kw):
+        st = real(p, *a, **kw)
+        if not a and not kw and Path(p) == target:
+            return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink,
+                                   uid, st.st_gid, st.st_size, int(st.st_atime),
+                                   int(st.st_mtime), int(st.st_ctime)))
+        return st
+    return fake
+
+
+def test_checkout_and_git_folder_with_different_owners_refuse(tmp_path):
+    origin, c1, c2 = _origin_with_two_commits(tmp_path)
+    base = tmp_path / "base"
+    repo = _clone(origin, base)
+    rec = _Recorder()
+    with mock.patch.object(smd.os, "stat",
+                           _stat_with_uid(repo / ".git", 4242424)):
+        errors = smd._seat_listed_checkouts(_rl(**{"ka9q-python": c1}), base,
+                                            run=rec, as_owner=_identity_owner)
+    assert errors and "different owners" in errors[0]
+    assert rec.argvs == []
+
+
+def _separate_gitdir_clone(tmp_path, origin, base, name="ka9q-python"):
+    base.mkdir(parents=True, exist_ok=True)
+    gd = tmp_path / "gitdirs" / name
+    gd.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "clone", "-q", f"--separate-git-dir={gd}",
+                    str(origin), str(base / name)], check=True,
+                   capture_output=True)
+    return base / name, gd
+
+
+def test_gitdir_file_is_followed_for_the_owner(tmp_path):
+    origin, c1, c2 = _origin_with_two_commits(tmp_path)
+    base = tmp_path / "base"
+    repo, gd = _separate_gitdir_clone(tmp_path, origin, base)
+    assert (repo / ".git").is_file()
+    assert smd._release_git_dirs(repo) == [gd]
+    rec = _Recorder()
+    # The gitdir target, not the .git file, decides: give it a stranger.
+    with mock.patch.object(smd.os, "stat", _stat_with_uid(gd, 4242424)):
+        errors = smd._seat_listed_checkouts(_rl(**{"ka9q-python": c1}), base,
+                                            run=rec, as_owner=_identity_owner)
+    assert errors and "different owners" in errors[0] and str(gd) in errors[0]
+    assert rec.argvs == []
+
+
+def test_gitdir_checkout_with_one_owner_seats(tmp_path):
+    origin, c1, c2 = _origin_with_two_commits(tmp_path)
+    base = tmp_path / "base"
+    repo, _gd = _separate_gitdir_clone(tmp_path, origin, base)
+    assert smd._seat_listed_checkouts(_rl(**{"ka9q-python": c1}), base,
+                                      as_owner=_identity_owner) == []
+    assert _git(repo, "rev-parse", "HEAD") == c1
+
+
+def test_pin_writes_go_through_the_open_directory_descriptors(tmp_path):
+    """F2: exclude and .pin are written with dir_fd=, never by path again."""
+    origin, c1, c2 = _origin_with_two_commits(tmp_path)
+    base = tmp_path / "base"
+    repo = _clone(origin, base)
+    from sigmond import safe_write
+    seen = []
+    real_w, real_r = safe_write.write_owned, safe_write.rewrite_owned
+
+    def w(path, data, **kw):
+        seen.append(("write", Path(path).name, kw.get("dir_fd")))
+        return real_w(path, data, **kw)
+
+    def r(path, transform, **kw):
+        seen.append(("rewrite", Path(path).name, kw.get("dir_fd")))
+        return real_r(path, transform, **kw)
+
+    with mock.patch.object(safe_write, "write_owned", w), \
+         mock.patch.object(safe_write, "rewrite_owned", r):
+        assert smd._write_release_pins(_rl(**{"ka9q-python": c2}), base) == []
+    assert [(k, n) for k, n, _ in seen] == [("rewrite", "exclude"), ("write", ".pin")]
+    assert all(isinstance(fd, int) for _, _, fd in seen)
+    assert (repo / ".pin").read_text() == c2 + "\n"

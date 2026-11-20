@@ -14859,10 +14859,41 @@ def _release_checkouts(rl, base: Path) -> list:
     return out
 
 
+def _release_git_dirs(repo: Path) -> list:
+    """The folders whose config git reads for checkout ``repo``: the git
+    folder (``.git``, or where a ``gitdir:`` file points), and its common
+    folder when a ``commondir`` file names one (a linked worktree)."""
+    dot = repo / '.git'
+    if dot.is_file():
+        line = dot.read_text(encoding='utf-8', errors='replace').strip()
+        if not line.startswith('gitdir:'):
+            raise OSError(f'{dot}: a file without a gitdir: line')
+        gd = Path(line[len('gitdir:'):].strip())
+        git_dir = gd if gd.is_absolute() else repo / gd
+    else:
+        git_dir = dot
+    dirs = [git_dir]
+    common = git_dir / 'commondir'
+    if common.is_file():
+        cd = Path(common.read_text(encoding='utf-8', errors='replace').strip())
+        dirs.append(cd if cd.is_absolute() else git_dir / cd)
+    return dirs
+
+
 def _release_owner(repo: Path):
-    """(name, uid) of the account that owns checkout ``repo``, by lstat."""
+    """(name, uid) of the one account that owns checkout ``repo`` and every
+    folder git reads its config from (_release_git_dirs).  Owners that
+    differ raise OSError: no single account can run git there safely."""
     import pwd as _pwd
-    uid = os.lstat(repo).st_uid
+    owners = {str(repo): os.stat(repo).st_uid}
+    for d in _release_git_dirs(repo):
+        owners[str(d)] = os.stat(d).st_uid
+    uids = set(owners.values())
+    if len(uids) != 1:
+        shown = ', '.join(f'{p} uid {u}' for p, u in owners.items())
+        raise OSError(f'{repo}: the checkout and its git folder have different '
+                      f'owners ({shown}); refusing to run git in it')
+    uid = uids.pop()
     try:
         return _pwd.getpwuid(uid).pw_name, uid
     except KeyError:
@@ -14873,10 +14904,12 @@ def _release_owner_run(repo: Path, run, as_owner):
     """``run`` for git in ``repo``, as the checkout's owner.
 
     Even a read-only git command runs repo config (core.fsmonitor, hooks,
-    filters), so root never runs one in a checkout another account owns:
-    as root every argv goes through ``as_owner`` (runuser -u <owner>).  A
-    caller who owns the checkout runs it directly.  Anyone else is refused
-    with ApplyError.  Tests pass their own ``as_owner``."""
+    filters), so root never runs one in a checkout another account owns.
+    The owner is read from the checkout AND the git folder git will use
+    (a ``gitdir:`` file followed); when they differ, _release_owner
+    refuses.  As root every argv goes through ``as_owner`` (runuser -u
+    <owner>); the owner runs git directly; anyone else is refused with
+    ApplyError.  Tests pass their own ``as_owner``."""
     from sigmond import align_apply
     owner, uid = _release_owner(repo)
     if as_owner is None:
@@ -14989,29 +15022,50 @@ def _release_write_pin(repo: Path, row: str) -> None:
     """Write ``repo/.pin`` and list it in ``.git/info/exclude``, as root,
     without following a link the checkout's owner planted.
 
-    Refuses (OSError, nothing written) when the checkout, .git, .git/info,
-    exclude or .pin is a symlink, or when .git or .git/info belongs to
-    anyone but the checkout's owner.  The writes go through
-    sigmond.safe_write: an O_NOFOLLOW directory descriptor, a fresh
-    O_EXCL temp file fchown'd to the directory's owner, then rename."""
+    Every step works through directory descriptors opened O_NOFOLLOW, one
+    from the next: the checkout, then .git, then .git/info.  The exclude
+    rewrite and the .pin write go through sigmond.safe_write with those
+    descriptors (dir_fd=), so nothing is resolved by path again after the
+    checks.  Refuses (OSError, nothing written) when the checkout, .git,
+    .git/info, exclude or .pin is a symlink, or when .git or .git/info
+    belongs to anyone but the checkout's owner.  A ``gitdir:`` file at
+    .git is refused too: the pin pass writes only in a plain .git."""
     import errno as _errno
     import stat as _stat
     from sigmond.safe_write import _open_parent, rewrite_owned, write_owned
+    nofollow_dir = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+    def _open_in(dfd: int, name: str, path: Path) -> int:
+        try:
+            return os.open(name, nofollow_dir, dir_fd=dfd)
+        except OSError as exc:
+            if exc.errno in (_errno.ELOOP, _errno.ENOTDIR):
+                raise OSError(exc.errno, f'{path}: a symlink or not a '
+                              f'folder; refusing to write the pin through '
+                              f'it') from None
+            raise
+
+    def _no_link(dfd: int, name: str, path: Path) -> None:
+        try:
+            st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if _stat.S_ISLNK(st.st_mode):
+            raise OSError(_errno.ELOOP, f'{path}: a symlink; refusing to '
+                          f'write the pin through it')
+
     git_dir = repo / '.git'
     info = git_dir / 'info'
-    for p in (repo, git_dir, info, info / 'exclude', repo / '.pin'):
-        try:
-            st = os.lstat(p)
-        except FileNotFoundError:
-            if p in (repo, git_dir):
-                raise
-            continue
-        if _stat.S_ISLNK(st.st_mode):
-            raise OSError(_errno.ELOOP, f'{p}: a symlink; refusing to write '
-                          f'the pin through it')
-    uid = os.lstat(repo).st_uid
-    gfd = _open_parent(git_dir)
     try:
+        rfd = _open_parent(repo)
+    except OSError as exc:
+        raise OSError(exc.errno, f'{repo}: {exc.strerror or exc}; a symlink '
+                      f'checkout gets no pin') from None
+    gfd = ifd = -1
+    try:
+        uid = os.fstat(rfd).st_uid
+        _no_link(rfd, '.pin', repo / '.pin')
+        gfd = _open_in(rfd, '.git', git_dir)
         gst = os.fstat(gfd)
         if gst.st_uid != uid:
             raise OSError(_errno.EPERM, f'{git_dir}: owned by uid '
@@ -15024,24 +15078,25 @@ def _release_write_pin(repo: Path, row: str) -> None:
             if os.geteuid() == 0:
                 os.chown('info', gst.st_uid, gst.st_gid, dir_fd=gfd,
                          follow_symlinks=False)
-    finally:
-        os.close(gfd)
-    ifd = _open_parent(info)
-    try:
+        ifd = _open_in(gfd, 'info', info)
         if os.fstat(ifd).st_uid != uid:
             raise OSError(_errno.EPERM, f'{info}: not owned by the '
                           f'checkout\'s owner {uid}')
+        _no_link(ifd, 'exclude', info / 'exclude')
+
+        def _with_pin(old):
+            lines = (old or '').splitlines()
+            if '.pin' not in lines:
+                lines.append('.pin')
+            return '\n'.join(lines) + '\n'
+
+        rewrite_owned(info / 'exclude', _with_pin, mode=None, keep_owner=True,
+                      dir_fd=ifd)
+        write_owned(repo / '.pin', row + '\n', mode=0o644, dir_fd=rfd)
     finally:
-        os.close(ifd)
-
-    def _with_pin(old):
-        lines = (old or '').splitlines()
-        if '.pin' not in lines:
-            lines.append('.pin')
-        return '\n'.join(lines) + '\n'
-
-    rewrite_owned(info / 'exclude', _with_pin, mode=None, keep_owner=True)
-    write_owned(repo / '.pin', row + '\n', mode=0o644)
+        for fd in (ifd, gfd, rfd):
+            if fd >= 0:
+                os.close(fd)
 
 
 def _write_release_pins(rl, base: Path, *, run=subprocess.run,

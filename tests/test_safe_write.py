@@ -526,3 +526,59 @@ def test_write_owned_refuses_an_explicit_owner_that_is_a_stranger(
     with pytest.raises(OSError, match="owner"):
         write_owned(tmp_path / "x", "x", owner=(uid + 4242, 0))
     assert not (tmp_path / "x").exists()
+
+
+# --- dir_fd: write through a directory the caller already opened ------------
+
+def _open_dir(d):
+    return os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+
+
+def test_write_owned_dir_fd_writes_in_the_open_directory_not_the_path(tmp_path):
+    """The descriptor wins: a directory swapped in at the path after the
+    open does not receive the write."""
+    real = tmp_path / "real"
+    real.mkdir()
+    fd = _open_dir(real)
+    try:
+        real.rename(tmp_path / "moved")
+        (tmp_path / "decoy").mkdir()
+        (tmp_path / "real").symlink_to(tmp_path / "decoy")
+        write_owned(tmp_path / "real" / "f", "x\n", dir_fd=fd)
+        os.fstat(fd)                       # still open: the caller closes it
+    finally:
+        os.close(fd)
+    assert (tmp_path / "moved" / "f").read_text() == "x\n"
+    assert not (tmp_path / "decoy" / "f").exists()
+
+
+def test_rewrite_owned_dir_fd_reads_and_writes_in_the_open_directory(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "f").write_text("a\n")
+    fd = _open_dir(real)
+    try:
+        real.rename(tmp_path / "moved")
+        (tmp_path / "decoy").mkdir()
+        (tmp_path / "decoy" / "f").write_text("decoy\n")
+        (tmp_path / "real").symlink_to(tmp_path / "decoy")
+        rewrite_owned(tmp_path / "real" / "f", lambda old: (old or "") + "b\n",
+                      mode=None, keep_owner=True, dir_fd=fd)
+        os.fstat(fd)
+    finally:
+        os.close(fd)
+    assert (tmp_path / "moved" / "f").read_text() == "a\nb\n"
+    assert (tmp_path / "decoy" / "f").read_text() == "decoy\n"
+
+
+def test_rewrite_owned_dir_fd_still_refuses_a_link_at_the_name(tmp_path, victim):
+    d = tmp_path / "d"
+    d.mkdir()
+    (d / "f").symlink_to(victim)
+    fd = _open_dir(d)
+    try:
+        with pytest.raises(OSError):
+            rewrite_owned(d / "f", lambda old: "new\n", dir_fd=fd)
+    finally:
+        os.close(fd)
+    assert victim.read_text() == "VICTIM\n"
