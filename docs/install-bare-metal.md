@@ -36,8 +36,11 @@ sudo mkdir -p /opt/git/sigmond
 sudo chown $USER /opt/git/sigmond
 git clone https://github.com/HamSCI/sigmond /opt/git/sigmond/sigmond
 cd /opt/git/sigmond/sigmond
+git checkout v3.94
 ./install.sh
 ```
+
+`git checkout v3.94` puts the checkout on the blessed version this page was verified against.
 
 `install.sh` creates a `sigmond` system user, adds you to its group, builds sigmond's venv and
 puts `smd` on your PATH.  Open a new shell afterwards (or `newgrp sigmond`).

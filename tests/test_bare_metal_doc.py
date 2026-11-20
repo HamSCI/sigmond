@@ -49,7 +49,8 @@ smd bringup dasi2 --callsign AC0G --grid EM38ww --reporter AC0G/S \\
 def test_extract_current_doc():
     steps = bmd.extract((ROOT / "docs" / "install-bare-metal.md").read_text())
     assert "--release-list" in steps.bringup
-    assert steps.checkout_version is None
+    # The release ladder adds `git checkout vN` before the bare-metal test.
+    assert steps.checkout_version and steps.checkout_version.startswith("v")
     assert "./install.sh" in steps.install
 
 
