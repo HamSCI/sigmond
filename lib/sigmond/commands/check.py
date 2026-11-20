@@ -181,8 +181,16 @@ def _installed(name: str) -> bool:
 
 
 def _sdr_present() -> Optional[bool]:
-    from ..hardware import _sdr_present as probe
-    return probe()
+    """Tri-state: None when lsusb gave nothing (missing, timed out, raised, or
+    an empty bus), so an SDR we could not look for never reads as absent."""
+    from .. import hardware
+    try:
+        out = hardware._lsusb()
+    except Exception:                                  # noqa: BLE001
+        return None
+    if not (out or '').strip():
+        return None
+    return bool(hardware.SDR_RE.search(out))
 
 
 def default_env() -> Env:

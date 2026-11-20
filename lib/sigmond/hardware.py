@@ -69,13 +69,16 @@ def _magnetometer_present() -> bool:
     return bool(re.search(r"1ffb:250[23]|pololu", _lsusb(), re.I))
 
 
+SDR_RE = re.compile(r"rx888|04b4:(00bc|00f[013])", re.I)
+
+
 def _sdr_present() -> bool:
     """RX888 / RX888mk2 — a Cypress FX3 (04b4:00bc/00f0/00f1/00f3) on the USB bus.
 
     Keep the PID set in sync with discovery/usb_sdr.py's KNOWN_SDR_DEVICES
     (they had drifted: this regex lacked 00bc, that table lacked 00f0).
     """
-    return bool(re.search(r"rx888|04b4:(00bc|00f[013])", _lsusb(), re.I))
+    return bool(SDR_RE.search(_lsusb()))
 
 
 def _gpsdo_present() -> bool:

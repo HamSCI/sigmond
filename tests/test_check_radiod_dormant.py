@@ -135,3 +135,69 @@ def test_verdict_is_wait_exit_2():
     assert len(lines) == 4
     assert check.verdict(lines) == 'WAIT'
     assert check.EXIT_CODES[check.verdict(lines)] == 2
+
+
+# ---- the default probe is tri-state: lsusb that says nothing is "unknown" ----
+
+RX888_LINE = 'Bus 001 Device 004: ID 04b4:00f3 Cypress Semiconductor Corp. RX888\n'
+HUB_LINE = 'Bus 001 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub\n'
+
+
+def _probe(monkeypatch, out=None, exc=None):
+    from sigmond import hardware
+
+    def fake():
+        if exc:
+            raise exc
+        return out
+    monkeypatch.setattr(hardware, '_lsusb', fake)
+    return check._sdr_present()
+
+
+def test_probe_empty_output_is_unknown(monkeypatch):
+    assert _probe(monkeypatch, out='') is None
+
+
+def test_probe_raise_is_unknown(monkeypatch):
+    assert _probe(monkeypatch, exc=OSError('no lsusb')) is None
+
+
+def test_probe_sees_rx888(monkeypatch):
+    assert _probe(monkeypatch, out=RX888_LINE + HUB_LINE) is True
+
+
+def test_probe_bus_without_sdr_is_false(monkeypatch):
+    assert _probe(monkeypatch, out=HUB_LINE) is False
+
+
+@pytest.mark.parametrize("out,exc", [('', None), (None, OSError('boom'))])
+@pytest.mark.parametrize("fn,label", LINES)
+def test_blind_lsusb_keeps_consumers_failing(monkeypatch, fn, label, out, exc):
+    from sigmond import hardware
+
+    def fake():
+        if exc:
+            raise exc
+        return out
+    monkeypatch.setattr(hardware, '_lsusb', fake)
+    env = _env(service=lambda p: svc('inactive', None, enabled=False),
+               sdr_present=check._sdr_present)
+    line = fn(env)
+    assert line.mark == check.FAIL and 'dormant' not in line.text
+
+
+@pytest.mark.parametrize("fn,label", LINES)
+def test_real_rx888_line_is_not_dormant(monkeypatch, fn, label):
+    from sigmond import hardware
+    monkeypatch.setattr(hardware, '_lsusb', lambda: RX888_LINE + HUB_LINE)
+    env = _env(service=lambda p: svc('inactive', None, enabled=False),
+               sdr_present=check._sdr_present)
+    assert fn(env).mark == check.FAIL
+
+
+def test_real_hub_only_bus_is_dormant(monkeypatch):
+    from sigmond import hardware
+    monkeypatch.setattr(hardware, '_lsusb', lambda: HUB_LINE)
+    env = _env(service=lambda p: svc('inactive', None, enabled=False),
+               sdr_present=check._sdr_present)
+    assert check.psk_line(env).mark == check.WAIT
