@@ -25,7 +25,7 @@ from typing import Any, Callable, Optional
 
 from sigmond.drift import exceptions as drift_exceptions
 from sigmond.drift.builds import build_items
-from sigmond.drift.devices import device_items
+from sigmond.drift.devices import NEVER_GATED, device_items
 from sigmond.drift.model import KINDS, Item, Report, run_collectors
 from sigmond.drift.overrides import override_items
 from sigmond.drift.source import host_items, source_items
@@ -128,6 +128,19 @@ def build(station: str, *, readers: Readers) -> Report:
     r = readers
     base = Path(r.base)
     sigmond_repo = Path(r.sigmond_repo) if r.sigmond_repo else base / "sigmond"
+    probed: dict = {}
+
+    def ready(name):
+        # Each gated client is probed once per report.
+        if name not in probed:
+            probed[name] = r.device_ready(name)
+        return probed[name]
+
+    def dormant() -> set:
+        gated = _v(r.gated) or {}
+        on = _v(r.enabled) or {}
+        return {n for n in gated
+                if n not in NEVER_GATED and on.get(n) and ready(n) is False}
     collectors = [
         ("source", lambda: source_items(list(_v(r.plan) or ()),
                                         baseline=r.baseline)),
@@ -141,10 +154,11 @@ def build(station: str, *, readers: Readers) -> Report:
                                     unit_dir=Path(r.unit_dir),
                                     is_enabled=r.is_enabled,
                                     service_active=r.service_active,
-                                    template_instances=r.template_instances)),
+                                    template_instances=r.template_instances,
+                                    dormant=dormant())),
         ("unit", lambda: device_items(_v(r.enabled) or {},
                                       gated=_v(r.gated) or {},
-                                      ready=r.device_ready,
+                                      ready=ready,
                                       seen=r.device_seen)),
         ("override", lambda: override_items(
             client_configs=_v(r.client_configs) or {},

@@ -14,10 +14,14 @@ least once (docs/superpowers/specs/2026-11-19-run-with-purpose-design.md,
   (/etc/mag-recorder/mag-recorder-config.toml; default
   /var/lib/mag-recorder).  A spool that cannot be read counts as seen.
 * gmag-webui: mag-recorder's evidence (the same magnetometer).
-* gpsdo-monitor: always seen.  Its only record of a fix,
-  /run/gpsdo/<serial>.json, lives on tmpfs and goes at each reboot, so an
-  empty /run/gpsdo cannot show the device was never there.  A missing
-  GPSDO faults; it never switches gpsdo-monitor off.
+* gpsdo-monitor: the station's location came from a GPSDO read here.
+  Its own record of a fix, /run/gpsdo/<serial>.json, lives on tmpfs and
+  goes at each reboot; sigmond's location record persists.  The reader is
+  drift.publish's ``pos_source``: ``location_source = "gpsdo"`` in the
+  site profile's [station] or coordination's [host] (`smd config location
+  --from-gps` writes it), else sigmond-location-check's GPSDO marker on
+  the grid_square line.  Anything else (operator, a typed grid, nothing)
+  reads never seen: a station behind a shared GPSDO switches it off.
 
 ``device_items`` turns "enabled, device absent, seen before" into one
 drift fault per client, for the drift report and so `smd check`.
@@ -77,7 +81,20 @@ def seen_before(name: str) -> bool:
             return True       # unreadable: cannot rule it out
         return any(n.startswith("samples-") and n.endswith(".jsonl")
                    for n in names)
+    if name == "gpsdo-monitor":
+        return gpsdo_location_recorded()
     return True
+
+
+def gpsdo_location_recorded() -> bool:
+    """True when sigmond recorded the station's location from a GPSDO."""
+    from sigmond import coordination, site_profile
+    from sigmond.drift.publish import pos_source
+    try:
+        coord = coordination.load_coordination(coordination.COORDINATION_PATH)
+    except Exception:                                  # noqa: BLE001
+        coord = None   # the site profile and the marker still answer
+    return pos_source(coord, site_profile.SITE_PROFILE_PATH) == "gpsdo"
 
 
 def missing_detail(name: str, label: str) -> str:

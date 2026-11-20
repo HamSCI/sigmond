@@ -99,11 +99,16 @@ class FakeSystemd:
 
 def _drive(*, ready, samples=False, dry=False, no_restart=False, quiet=False,
            enabled_units=None, active_units=None, topology=None,
-           gated=None, exceptions=None):
+           gated=None, exceptions=None, gmag_unit="current", gmag_device=True,
+           gpsdo_location=False, result=None):
     """Run cmd_align.  ``ready`` maps component -> True/False/None;
     ``samples`` writes a mag-recorder sample file (the magnetometer has
     delivered before).  Returns (FakeSystemd, output, topology dict,
-    readiness queries)."""
+    readiness queries).  ``gmag_unit`` is the installed gmag-webui unit
+    text ("current": sigmond's render now; None: not installed);
+    ``gmag_device`` whether /dev/ttyMAG0 exists; ``gpsdo_location`` whether
+    the station's location came from a GPSDO.  ``result``, a dict, gets
+    the gmag-webui unit text after the run."""
     topology = dict(topology or {"mag-recorder": True, "gmag-webui": True,
                                  "hf-timestd": True})
     sysd = FakeSystemd(
@@ -135,6 +140,21 @@ def _drive(*, ready, samples=False, dry=False, no_restart=False, quiet=False,
         unit_dir.mkdir()
         for u in _ALL_UNITS:
             (unit_dir / u).write_text("[Service]\nExecStart=/bin/true\n")
+        from sigmond import gmag_webui
+        gmag_path = unit_dir / gmag_webui.SERVICE
+        if gmag_unit is None:
+            gmag_path.unlink()
+        elif gmag_unit == "current":
+            gmag_path.write_text(gmag_webui.render_unit(checkout=base / "gmag-webui"))
+        else:
+            gmag_path.write_text(gmag_unit)
+        dev = base / "ttyMAG0"
+        if gmag_device:
+            dev.write_text("")
+        st.enter_context(mock.patch.object(gmag_webui, "UNIT_PATH", gmag_path))
+        st.enter_context(mock.patch.object(gmag_webui, "DEVICE", str(dev)))
+        st.enter_context(mock.patch("sigmond.drift.devices.gpsdo_location_recorded",
+                                    return_value=gpsdo_location))
         spool = base / "spool"
         spool.mkdir()
         if samples:
@@ -177,6 +197,9 @@ def _drive(*, ready, samples=False, dry=False, no_restart=False, quiet=False,
                                     return_value=[align_apply.Step("sigmond", "current")]))
         with contextlib.redirect_stdout(out):
             smd.cmd_align(_apply_args(tmp, apply=not dry, no_restart=no_restart))
+        if result is not None:
+            result["unit"] = gmag_path.read_text() if gmag_path.exists() else None
+            result["render"] = gmag_webui.render_unit(checkout=base / "gmag-webui")
     return sysd, out.getvalue(), topology, asked
 
 
@@ -299,15 +322,23 @@ def test_hf_timestd_never_gated():
     assert "timestd-core-recorder.service" in sysd.active
 
 
-def test_gpsdo_monitor_absent_faults_without_evidence():
-    # gpsdo-monitor keeps no record that survives a reboot (/run/gpsdo is
-    # tmpfs), so "never seen" cannot be shown: it faults, never switches off.
+def test_gpsdo_monitor_absent_seen_by_location_source_faults():
+    # The station's location came from a GPSDO read here: seen before.
     sysd, out, _, _ = _drive(
         ready={"mag-recorder": True, "gmag-webui": True, "gpsdo-monitor": False},
         topology={"mag-recorder": True, "gmag-webui": True, "hf-timestd": True,
-                  "gpsdo-monitor": True})
+                  "gpsdo-monitor": True}, gpsdo_location=True)
     assert _touching(sysd.calls, "gpsdo-monitor.service") == [], out
     assert f"{GPS} missing; gpsdo-monitor has recorded from it before" in out
+
+
+def test_gpsdo_monitor_absent_never_seen_switches_off():
+    # A station behind a shared GPSDO: location typed or from a grid.
+    sysd, out, _, _ = _drive(
+        ready={"mag-recorder": True, "gmag-webui": True, "gpsdo-monitor": False},
+        topology={"mag-recorder": True, "gmag-webui": True, "hf-timestd": True,
+                  "gpsdo-monitor": True}, gpsdo_location=False)
+    assert ["systemctl", "disable", "--now", "gpsdo-monitor.service"] in sysd.calls, out
 
 
 def test_topology_disabled_client_untouched():
@@ -395,4 +426,146 @@ def test_seen_before_reads_mag_spool_from_config():
             (spool / "samples-2026-10-01.jsonl").write_text("{}\n")
             assert devices.seen_before("mag-recorder") is True
             assert devices.seen_before("gmag-webui") is True
-        assert devices.seen_before("gpsdo-monitor") is True
+
+
+def test_gpsdo_seen_before_reads_location_source():
+    from sigmond import coordination, site_profile
+    from sigmond.drift import devices
+    cases = [
+        ('[station]\nlocation_source = "gpsdo"\n', "", True),
+        ('[station]\nlocation_source = "operator"\n', "", False),
+        ('[station]\ngrid_square = "EN34"\n', "", False),
+        ("", '[host]\nlocation_source = "gpsdo"\n', True),
+        ("", '[host]\ngrid = "EN34"\n', False),
+        ("", "", False),
+    ]
+    for prof, coord, want in cases:
+        with tempfile.TemporaryDirectory() as tmp:
+            pp, cp = Path(tmp) / "site-profile.toml", Path(tmp) / "coordination.toml"
+            if prof:
+                pp.write_text(prof)
+            if coord:
+                cp.write_text(coord)
+            with mock.patch.object(site_profile, "SITE_PROFILE_PATH", pp), \
+                    mock.patch.object(coordination, "COORDINATION_PATH", cp):
+                assert devices.seen_before("gpsdo-monitor") is want, (prof, coord)
+
+
+# --- ruling 2: a dormant client is not "stopped" drift ------------------------
+
+def _unit_report(*, ready, seen):
+    from sigmond.drift import build_report as br
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        (base / "mag-recorder").mkdir()
+        (base / "mag-recorder" / "deploy.toml").write_text(
+            '[systemd]\nunits = ["mag-recorder.service"]\n')
+        unit_dir = base / "units"
+        unit_dir.mkdir()
+        (unit_dir / "mag-recorder.service").write_text("[Service]\n")
+        readers = br.Readers(
+            base=base, sigmond_repo=base / "sigmond", unit_dir=unit_dir,
+            exceptions_path=base / "none.toml",
+            enabled={"mag-recorder": True}, gated={"mag-recorder": MAG},
+            service_active=lambda u: False, is_enabled=lambda u: False,
+            device_ready=lambda n: ready, device_seen=lambda n: seen)
+        return [i for i in br.build("AC0G-T", readers=readers).items
+                if "mag-recorder" in i.subject]
+
+
+def test_switched_off_client_is_not_stopped_drift():
+    # AC1SN after the switch-off: smd check reads "no magnetometer;
+    # dormant" as ok, so the drift report says nothing either.
+    assert _unit_report(ready=False, seen=False) == []
+
+
+def test_seen_before_client_gets_the_fault_only():
+    items = _unit_report(ready=False, seen=True)
+    assert [(i.severity, i.subject) for i in items] == [("fault", "mag-recorder")]
+    assert not any("smd start" in i.fix for i in items)
+
+
+def test_stopped_client_with_device_stays_drift():
+    for ready in (True, None):
+        items = _unit_report(ready=ready, seen=False)
+        assert [(i.severity, i.fix) for i in items] == [("drift", "smd start mag-recorder")]
+
+
+# --- ruling 3: align re-renders sigmond's gmag-webui unit ---------------------
+
+_OLD_UNIT = "[Unit]\nDescription=old\n[Service]\nExecStart=/bin/true\n"
+
+
+def _reloads(calls):
+    return [c for c in calls if c[:2] == ["systemctl", "daemon-reload"]]
+
+
+def test_gmag_unit_rerendered_and_running_service_restarted_once():
+    res = {}
+    sysd, out, _, _ = _drive(ready={"mag-recorder": True, "gmag-webui": True},
+                             gmag_unit=_OLD_UNIT, result=res)
+    assert res["unit"] == res["render"]
+    assert "ConditionPathExists=/dev/ttyMAG0" in res["unit"]
+    assert len(_reloads(sysd.calls)) == 1, out
+    assert _touching(sysd.calls, "gmag-webui.service") == [
+        ["systemctl", "restart", "gmag-webui.service"]], out
+
+
+def test_gmag_unit_current_untouched():
+    sysd, out, _, _ = _drive(ready={"mag-recorder": True, "gmag-webui": True})
+    assert _reloads(sysd.calls) == [] and _mutating(sysd.calls) == [], out
+
+
+def test_gmag_unit_rerendered_inactive_not_started():
+    res = {}
+    on = [u for u in _ALL_UNITS if u != "gmag-webui.service"]
+    sysd, out, _, _ = _drive(ready={"mag-recorder": None, "gmag-webui": None},
+                             gmag_unit=_OLD_UNIT, active_units=on, result=res)
+    assert res["unit"] == res["render"]
+    assert len(_reloads(sysd.calls)) == 1
+    assert _touching(sysd.calls, "gmag-webui.service") == [], out
+
+
+def test_gmag_unit_dry_run_lists_only():
+    res = {}
+    sysd, out, _, _ = _drive(ready={"mag-recorder": True, "gmag-webui": True},
+                             gmag_unit=_OLD_UNIT, dry=True, result=res)
+    assert res["unit"] == _OLD_UNIT
+    assert _reloads(sysd.calls) == [] and _mutating(sysd.calls) == [], out
+    assert "would re-render gmag-webui.service" in out
+
+
+def test_gmag_unit_no_restart_writes_without_restarting():
+    res = {}
+    sysd, out, _, _ = _drive(ready={"mag-recorder": True, "gmag-webui": True},
+                             gmag_unit=_OLD_UNIT, no_restart=True, result=res)
+    assert res["unit"] == res["render"]
+    assert _touching(sysd.calls, "gmag-webui.service") == [], out
+    assert "--no-restart" in out
+
+
+def test_gmag_unit_not_installed_not_written():
+    res = {}
+    sysd, out, _, _ = _drive(ready={"mag-recorder": True, "gmag-webui": True},
+                             gmag_unit=None, result=res)
+    assert res["unit"] is None
+    assert _reloads(sysd.calls) == []
+
+
+def test_gmag_unit_running_without_device_not_restarted():
+    # The new condition would keep a restarted unit down: the restart waits.
+    res = {}
+    sysd, out, _, _ = _drive(ready={"mag-recorder": None, "gmag-webui": None},
+                             gmag_unit=_OLD_UNIT, gmag_device=False, result=res)
+    assert res["unit"] == res["render"]
+    assert _touching(sysd.calls, "gmag-webui.service") == [], out
+
+
+def test_gmag_unit_drift_exception_keeps_it():
+    from tests.test_align_enables_units import _exceptions_text
+    res = {}
+    sysd, out, _, _ = _drive(ready={"mag-recorder": True, "gmag-webui": True},
+                             gmag_unit=_OLD_UNIT, result=res,
+                             exceptions=_exceptions_text(["gmag-webui.service"]))
+    assert res["unit"] == _OLD_UNIT
+    assert _reloads(sysd.calls) == []

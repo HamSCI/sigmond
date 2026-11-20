@@ -7011,7 +7011,9 @@ _PRELOAD_MODULES = {
               'sigmond.archive_health', 'sigmond.commands.check',
               'sigmond.radiod_publish', 'sigmond.radiod_rename',
               'sigmond.sdr_map', 'sigmond.station_role',
-              'sigmond.topology_drift'),
+              'sigmond.topology_drift',
+              # _align_gmag_webui_unit renders the unit
+              'sigmond.gmag_webui'),
 }
 
 
@@ -9440,15 +9442,103 @@ def _align_follow_devices(apply: bool, *, say=print, start: bool = True,
     return count
 
 
-def _align_device_steps(*, start: bool) -> list:
-    """`_align_follow_devices` as one bring-up Step, or none when it had
-    nothing to say.  Never blocking."""
+def _align_gmag_webui_unit(apply: bool, *, base='/opt/git/sigmond', say=print,
+                           start: bool = True, run=None) -> int:
+    """Re-render sigmond's gmag-webui unit where the installed file differs
+    from what sigmond renders now, so a change to the render (v3.94:
+    ConditionPathExists=/dev/ttyMAG0) reaches stations installed before
+    it; `smd install gmag-webui` alone wrote it until now.
+
+    Only an installed unit is rewritten (never a new install), atomically
+    and 0644, then one daemon-reload.  A running gmag-webui restarts once,
+    because its unit changed; not under --no-restart (``start`` False),
+    and not while /dev/ttyMAG0 is absent, since the new condition would
+    keep the restarted unit down (a line says so each time).  Enables
+    nothing.  A live `unit:gmag-webui.service` drift exception keeps the
+    file as it is; an exceptions file that cannot be read rewrites
+    nothing.  Dry run: one `would re-render` line.  Returns 1 when it
+    rewrote (or would rewrite) the unit, else 0."""
+    from sigmond import gmag_webui as gw
+    from sigmond.drift import units as drift_units
+    run = run or subprocess.run
+    path = Path(gw.UNIT_PATH)
+    try:
+        current = path.read_text()
+    except FileNotFoundError:
+        return 0
+    except OSError as exc:
+        say(f'  {gw.SERVICE}: not checked ({exc})')
+        return 0
+    want = gw.render_unit(checkout=Path(base) / gw.COMPONENT)
+    if current == want:
+        return 0
+    excepted, err = drift_units.excepted_units(None, None)
+    if err is not None:
+        say(f'  {gw.SERVICE}: {err}; not re-rendered')
+        return 0
+    if gw.SERVICE in excepted:
+        say(f'  {gw.SERVICE}: left as it is: a drift exception covers '
+            f'unit:{gw.SERVICE}')
+        return 0
+    if not apply:
+        say(f"  would re-render {gw.SERVICE}: the installed unit differs from "
+            f"sigmond's render")
+        return 1
+    import tempfile as _tf
+    fd, tmp = _tf.mkstemp(dir=path.parent, prefix=f'.{gw.SERVICE}.')
+    try:
+        with os.fdopen(fd, 'w') as f:
+            f.write(want)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    _align_run(['systemctl', 'daemon-reload'], run=run, timeout=60,
+               action='systemctl daemon-reload')
+    active = _align_run(['systemctl', 'is-active', '--quiet', gw.SERVICE], run=run,
+                        timeout=15, action=f'systemctl is-active {gw.SERVICE}'
+                        ).returncode == 0
+    if not active:
+        say(f'  re-rendered {gw.SERVICE}')
+    elif not start:
+        say(f'  re-rendered {gw.SERVICE}; not restarted (--no-restart): '
+            f'systemctl restart {gw.SERVICE}')
+    elif not os.path.exists(gw.DEVICE):
+        say(f'  re-rendered {gw.SERVICE}; not restarted: no {gw.DEVICE}, and the '
+            f'new unit does not start without it')
+    else:
+        r = _align_run(['systemctl', 'restart', gw.SERVICE], run=run, timeout=90,
+                       action=f'systemctl restart {gw.SERVICE}')
+        if r.returncode == 0:
+            say(f'  re-rendered {gw.SERVICE}; restarted it')
+        else:
+            why = ((r.stderr or r.stdout or '').strip().splitlines() or ['?'])[-1]
+            say(f'  re-rendered {gw.SERVICE}; restart failed: {why}')
+    return 1
+
+
+def _align_device_steps(*, start: bool, base='/opt/git/sigmond') -> list:
+    """`_align_follow_devices`, then `_align_gmag_webui_unit`, as bring-up
+    Steps (none for one that had nothing to say).  Never blocking.  The
+    unit step runs second: a gmag-webui just switched off reads stopped
+    and is not restarted."""
     from sigmond import align_apply
+    steps = []
     lines = []
     if _align_follow_devices(True, say=lines.append, start=start) or lines:
-        return [align_apply.Step('device clients', 'ran',
-                                 '; '.join(ln.strip() for ln in lines))]
-    return []
+        steps.append(align_apply.Step('device clients', 'ran',
+                                      '; '.join(ln.strip() for ln in lines)))
+    lines = []
+    if _align_gmag_webui_unit(True, base=base, say=lines.append, start=start) or lines:
+        steps.append(align_apply.Step('gmag-webui unit', 'ran',
+                                      '; '.join(ln.strip() for ln in lines)))
+    return steps
 
 
 def _align_enable_declared_units(apply: bool, *, base='/opt/git/sigmond',
@@ -9659,7 +9749,7 @@ def _align_bringup(*, run=subprocess.run, say=print, site_timing_refreshed: bool
     # ``start_timers`` is just "not --no-restart".  Device clients first: a
     # client switched off for a device never seen then reads stopped, and
     # the declared-units step leaves it.
-    steps += _align_device_steps(start=start_timers)
+    steps += _align_device_steps(start=start_timers, base=base)
     steps += _align_declared_units_steps(base, start_timers=start_timers)
 
     try:
@@ -10231,7 +10321,7 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
             # _align_start_timers, which runs on this path too).  Device
             # clients first, as in _align_bringup.
             _start = not getattr(args, 'no_restart', False)
-            _align_print_steps(_align_device_steps(start=_start))
+            _align_print_steps(_align_device_steps(start=_start, base=base))
             _align_print_steps(_align_declared_units_steps(
                 base, start_timers=_start))
             # Still route: this retries a routing run that failed on an
@@ -10797,6 +10887,7 @@ def cmd_align(args) -> int:
         False, base, covered=rebuilds | {it.component for it in plan
                                          if it.status == 'move'})
     _align_follow_devices(False)
+    _align_gmag_webui_unit(False, base=base)
     _align_enable_declared_units(False, base=base)
     own_due, own_err = _align_own_timers_due(_ALIGN_UNIT_DIR, subprocess.run)
     if own_err is not None:

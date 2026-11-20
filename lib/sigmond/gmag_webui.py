@@ -31,6 +31,7 @@ COMPONENT   = "gmag-webui"
 CHECKOUT    = Path("/opt/git/sigmond") / COMPONENT
 SERVICE     = "gmag-webui.service"
 UNIT_PATH   = Path("/etc/systemd/system") / SERVICE
+DEVICE      = "/dev/ttyMAG0"   # the unit's ConditionPathExists: mag-recorder's adapter
 SERVICE_USER = "gmagweb"
 HOST        = "0.0.0.0"
 # 8000 = timestd web-api, 8081 = ka9q-web (RAC VM-web), 8765 = mag-usb WS.

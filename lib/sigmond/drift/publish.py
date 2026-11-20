@@ -102,6 +102,9 @@ def _pos_source(coord, profile) -> str:
     return "gpsdo" if _marker_on_grid_line(profile) else "operator"
 
 
+pos_source = _pos_source
+
+
 def position(coord, *, profile: Optional[Path] = None) -> tuple:
     """(grid6, pos_source) for this host.
 

@@ -12,6 +12,9 @@
   installed copies byte for byte.  Whether they are enabled stays out of
   scope: several install on purpose without enabling.
 * a unit enabled for a component that topology disables is drift.
+* a stopped component whose local device reads absent (``dormant``)
+  raises nothing here: align switched it off, or the device collector
+  faults it.
 
 install_own_units copies sigmond's own units the way install.sh does, so
 `smd align --apply` can land units added after a station's install.
@@ -133,7 +136,12 @@ def unit_items(base: Path, enabled: Mapping[str, bool], *,
                unit_dir: Path = Path("/etc/systemd/system"),
                is_enabled: Callable[[str], bool],
                service_active: Callable[[str], bool],
-               template_instances: Callable[[str], int]) -> list:
+               template_instances: Callable[[str], int],
+               dormant=frozenset()) -> list:
+    """``dormant``: components whose local device reads absent (v3.94
+    Task 8).  A stopped one raises no "not running" drift: `smd start`
+    refuses it, and `smd check` reads it "dormant" (or the device
+    collector faults it, when it recorded from the device before)."""
     out = []
     unit_dir = Path(unit_dir)
     for name in sorted(enabled):
@@ -144,6 +152,8 @@ def unit_items(base: Path, enabled: Mapping[str, bool], *,
             # missing main service is a failed install and faults below.
             if (svc is not None and _exists(unit_dir, svc)
                     and not component_running(units, True, service_active)):
+                if name in dormant:
+                    continue
                 out.append(Item("unit", "drift", svc,
                                 f"{name} is enabled but {svc} is not "
                                 "running", f"smd start {name}"))
