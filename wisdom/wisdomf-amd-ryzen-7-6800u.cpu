@@ -1,0 +1,19 @@
+model=AMD Ryzen 7 6800U with Radeon Graphics
+l3_bytes=16777216
+l3_ways=16
+mem_total_kb=20240944
+radiod_core_type=uniform
+radiod_l3_bytes=16777216
+samprate=129600000
+codelets=536
+bytes=81637
+planned_profiles=cdb15,cob15,cdb45,cob45,cdb55,cif55,cob55,cdb85,cob85,cdb100,cif100,cob100,cdb160,cob160,cdb175,cif175,cob175,cdb200,cif200,cob200,cdb205,cob205,cdb220,cif220,cob220,cdb300,cif300,cob300,cdb320,cob320,cdb350,cif350,cob350,cdb400,cif400,cob400,cdb405,cob405,cdb420,cif420,cob420,cdb480,cob480,cdb512,cif512,cob512,cof512,cdb600,cif600,cob600,cdb800,cob800,cdb810,cob810,cdb825,cif825,cob825,cdb960,cob960,cdb1200,cob1200,cdb1600,cif1600,cob1600,cdb1620,cob1620,cof1625,cof1638,cdb1650,cif1650,cob1650,cof1650,cof1664,cof1680,cof1750,cof1760,cdb1920,cob1920,cdb2000,cif2000,cob2000,cof2000,cdb2048,cif2048,cob2048,cof2048,cdb2080,cif2080,cob2080,cof2200,cdb2400,cif2400,cob2400,cdb2500,cif2500,cob2500,cdb3200,cif3200,cob3200,cdb3240,cob3240,rof3240,cdb3250,cif3250,cob3250,cdb4000,cif4000,cob4000,rof4050,cdb4095,cif4095,cob4095,cdb4800,cif4800,cob4800,cdb4860,cob4860,cif4875,cob4875,cdb5500,cif5500,cob5500,rof6480,cdb6930,cif6930,cob6930,cdb8100,cob8100,rof8100,cdb8125,cif8125,cob8125,cdb9600,cob9600,rof12960,cdb16200,cob16200,rof16200,rof25920,cdb32400,cob32400,rof32400,cdb40500,cob40500,rof64800,cdb81000,cob81000,rof81000,rof129600,cdb162000,cob162000,rof162000,rof259200,rof324000,rof1620000,rof3240000
+# Planned on bare metal on a 6800U (G3ZIL's home Beelink, RAC 142, Ubuntu
+# 24.04.5, libfftw3 3.3.10-1ubuntu3), laid out the way sigmond runs radiod:
+# radiod's pair = CPUs 14-15 at 3200 MHz, every other CPU capped at 1400 MHz,
+# resctrl group 'radiod' = CPUs 14-15 with L3:0=3ff (10 of 16 ways), xhci
+# IRQs moved to 0-13, WD/radiod/decoders stopped, load 0.27 at the start.
+# radiod_l3_bytes is the L3 domain sysfs reports (radiod_placement()), not
+# the CAT share.  `taskset -c 14 fftwf-wisdom -v -T 1 -n` (fresh, nothing
+# imported) over 156 specs: every one of sigmond's 151 FFT_WISDOM_PROFILES
+# plus WD's extras.  842 plans; 2 h 6 m 35 s (2026-11-19 18:15Z - 20:21Z).
