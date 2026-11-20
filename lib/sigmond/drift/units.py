@@ -69,7 +69,12 @@ def main_service(units) -> "str | None":
 def component_running(units, enabled: bool,
                       service_active: Callable[[str], bool]) -> bool:
     """True when topology enables the component and its main service
-    (``main_service(units)``) is active, or it declares no such service."""
+    (``main_service(units)``) is active, or it declares no such service.
+
+    A component that declares only templated units counts as running when
+    enabled.  A declared main service that is missing reads as not running:
+    this checks no unit file, so a caller that needs the install state
+    checks existence itself."""
     if not enabled:
         return False
     svc = main_service(units)
@@ -106,8 +111,11 @@ def unit_items(base: Path, enabled: Mapping[str, bool], *,
     for name in sorted(enabled):
         units = _declared(base, name)
         if enabled[name]:
-            if not component_running(units, True, service_active):
-                svc = main_service(units)
+            svc = main_service(units)
+            # A stop is deliberate only when the service is installed; a
+            # missing main service is a failed install and faults below.
+            if (svc is not None and _exists(unit_dir, svc)
+                    and not component_running(units, True, service_active)):
                 out.append(Item("unit", "drift", svc,
                                 f"{name} is enabled but {svc} is not "
                                 "running", f"smd start {name}"))

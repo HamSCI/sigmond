@@ -282,3 +282,17 @@ def test_disabled_timer_fix_is_align_apply(env):
     assert [(i.subject, i.detail, i.fix) for i in got] == [
         ("foo.timer", "foo timer foo.timer is installed but not enabled",
          "smd align --apply")]
+
+
+def test_enabled_component_with_main_service_missing_faults(env):
+    """A failed install (main service never linked) stays a fault, not the
+    'enabled but not running' drift a deliberate stop gets."""
+    base, _, ud = env
+    _comp(base, "hf-timestd",
+          '[systemd]\nunits = ["timestd-core-recorder.service", '
+          '"timestd-events.timer"]\n')
+    (ud / "timestd-events.timer").write_text("x")
+    got = _items(env, {"hf-timestd": True}, is_enabled=lambda n: True,
+                 service_active=lambda s: False)
+    assert [(i.severity, i.subject, i.fix) for i in got] == [
+        ("fault", "timestd-core-recorder.service", "smd align --apply")]

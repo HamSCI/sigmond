@@ -61,7 +61,9 @@ def _systemctl_active(unit: str) -> bool:
 
 def _systemctl_template_instances(template: str) -> int:
     """How many instances of ``x@.service`` systemd has loaded: enabled
-    ones load at boot, so an enabled-but-stopped instance counts too."""
+    ones load at boot, so an enabled-but-stopped instance counts too.
+    Only loaded units count: an instance enabled since the last
+    daemon-reload is missed until the next reload or boot."""
     prefix, _, suffix = template.partition("@")
     try:
         r = subprocess.run(

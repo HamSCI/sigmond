@@ -10131,7 +10131,7 @@ def _align_drift_report(rel, plan, files, base):
         base=Path(base),
         # The decoder check compares against the commit sigmond builds from,
         # never the checkout HEAD (W7WKR 2026-11-19: checkout ahead of pin).
-        native_pins=lambda: {n: _native_pin(n) for n in _native_constants()})
+        native_pins=lambda: {'ubersdr_wsprd': _native_pin('ubersdr_wsprd')})
     return br.build(br.station_name(), readers=readers)
 
 
