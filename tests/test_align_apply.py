@@ -1842,19 +1842,38 @@ class RepointOriginTests(unittest.TestCase):
 S40 = "daba1f6" + "0" * 33
 
 
-def git_remote(tags):
+# What git prints for a GitHub repo that does not exist, with prompts off:
+# GitHub answers 401, and git cannot ask for a username.
+NO_REPO = ("fatal: could not read Username for 'https://github.com': "
+           "terminal prompts disabled\n")
+NO_NET = ("fatal: unable to access 'https://github.com/HamSCI/sigmond-proxmox/': "
+          "Could not resolve host: github.com\n")
+
+
+def git_remote(tags, failures=None):
     """A fake run answering `git ls-remote <url> refs/tags/T refs/tags/T^{}`
-    from {url: {tag: commit}}; records each argv."""
-    calls = []
+    from {url: {tag: commit}}.  A url in ``failures`` exits 128 with that
+    stderr; a url in neither is a repo that does not exist.  Records each
+    argv, and each call's env."""
+    calls, envs = [], []
+    failures = failures or {}
 
     def run(argv, **kw):
         calls.append(argv)
+        envs.append(kw.get("env"))
         url, tag = argv[2], argv[3].rsplit("/", 1)[-1]
-        commit = tags.get(url, {}).get(tag)
+        if url in failures:
+            return types.SimpleNamespace(returncode=128, stdout="", stderr=failures[url])
+        if url not in tags:
+            return types.SimpleNamespace(returncode=128, stdout="", stderr=NO_REPO)
+        commit = tags[url].get(tag)
         out = f"{'9' * 40}\trefs/tags/{tag}\n{commit}\trefs/tags/{tag}^{{}}\n" if commit else ""
         return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
-    run.calls = calls
+    run.calls, run.envs = calls, envs
     return run
+
+
+L_URL = "https://github.com/HamSCI/sigmond-appliance"
 
 
 def srel(source="HamSCI/sigmond", sigmond_row="daba1f6", commit=C, tag="v3.94"):
@@ -1905,10 +1924,62 @@ class VerifyReleaseHomeTests(unittest.TestCase):
             align_apply.verify_release(srel(sigmond_row=None), run)
 
     def test_verify_proxmox_source_unchanged(self):
-        for source in ("HamSCI/sigmond-proxmox", "HamSCI/sigmond-appliance"):
-            run = git_remote({self.P: {"v3.93": C}})
-            align_apply.verify_release(srel(source=source, tag="v3.93"), run)
-            self.assertEqual([c[2] for c in run.calls], [self.P])
+        # One ls-remote, at the repo the release came from.
+        run = git_remote({self.P: {"v3.93": C}})
+        align_apply.verify_release(srel(source="HamSCI/sigmond-proxmox", tag="v3.93"), run)
+        self.assertEqual([c[2] for c in run.calls], [self.P])
+
+    def test_verify_appliance_source_reads_that_repo(self):
+        # Before the rename sigmond-proxmox does not exist (GitHub redirects
+        # old -> new only), so a v3.93 read from sigmond-appliance must be
+        # checked there.
+        run = git_remote({L_URL: {"v3.93": C}})
+        align_apply.verify_release(srel(source="HamSCI/sigmond-appliance", tag="v3.93"), run)
+        self.assertEqual([c[2] for c in run.calls], [L_URL])
+
+    def test_verify_sigmond_source_falls_to_appliance_when_proxmox_missing(self):
+        run = git_remote({self.S: {"v3.94": S40}, L_URL: {"v3.94": C}})
+        align_apply.verify_release(srel(), run)
+        self.assertEqual([c[2] for c in run.calls], [self.S, self.P, L_URL])
+
+    def test_verify_network_failure_on_image_repo_refuses(self):
+        # Review Focus 1: only "no such repository" moves on.
+        run = git_remote({self.S: {"v3.94": S40}, L_URL: {"v3.94": C}},
+                         failures={self.P: NO_NET})
+        with self.assertRaises(align_apply.ApplyError) as cm:
+            align_apply.verify_release(srel(), run)
+        self.assertIn("Could not resolve host", str(cm.exception))
+        self.assertNotIn(L_URL, [c[2] for c in run.calls])
+
+    def test_verify_network_failure_on_appliance_source_refuses(self):
+        run = git_remote({}, failures={L_URL: NO_NET})
+        with self.assertRaises(align_apply.ApplyError):
+            align_apply.verify_release(srel(source="HamSCI/sigmond-appliance", tag="v3.93"), run)
+
+    def test_verify_no_image_repo_at_all_refuses(self):
+        run = git_remote({self.S: {"v3.94": S40}})
+        with self.assertRaises(align_apply.ApplyError) as cm:
+            align_apply.verify_release(srel(), run)
+        self.assertIn("HamSCI/sigmond-appliance", str(cm.exception))
+
+    def test_verify_tag_missing_in_existing_image_repo_does_not_move_on(self):
+        # The repo answered; it lacks the tag.  That refuses.
+        run = git_remote({self.S: {"v3.94": S40}, self.P: {}, L_URL: {"v3.94": C}})
+        with self.assertRaises(align_apply.ApplyError) as cm:
+            align_apply.verify_release(srel(), run)
+        self.assertIn("not found", str(cm.exception))
+        self.assertNotIn(L_URL, [c[2] for c in run.calls])
+
+    def test_verify_unknown_source_refuses(self):
+        with self.assertRaises(align_apply.ApplyError):
+            align_apply.verify_release(srel(source="evil/repo"), git_remote({}))
+
+    def test_ls_remote_never_prompts(self):
+        run = git_remote({self.S: {"v3.94": S40}, L_URL: {"v3.94": C}})
+        align_apply.verify_release(srel(), run)
+        self.assertTrue(run.envs)
+        for env in run.envs:
+            self.assertEqual((env or {}).get("GIT_TERMINAL_PROMPT"), "0")
 
 
 class RefreshImageFileFallbackTests(unittest.TestCase):

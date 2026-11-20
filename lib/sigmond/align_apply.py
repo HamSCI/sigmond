@@ -17,14 +17,29 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from sigmond.align import (AHEAD_NOTE, FULL_SHA_RE, LIBRARIES_FIRST, RADIOD, RAW_BASES,
-                           RELEASE_SLUG, RELEASE_TAG_RE, Item, Release, target_label)
+from sigmond.align import (AHEAD_NOTE, FULL_SHA_RE, LIBRARIES_FIRST, PROXMOX_SLUGS, RADIOD,
+                           RAW_BASES, RELEASE_SLUG, RELEASE_TAG_RE, Item, Release,
+                           target_label)
 from sigmond.doctor import _sha_equal
 
 SIGMOND_REPO_URL = "https://github.com/HamSCI/sigmond"
-# The image repo.  ls-remote follows GitHub's redirect from the old name,
-# HamSCI/sigmond-appliance, so this one URL serves either side of the rename.
-PROXMOX_REPO_URL = "https://github.com/HamSCI/sigmond-proxmox"
+# The image repo.  GitHub redirects the old name to the new one, never the
+# reverse: until the rename this URL does not exist, so verify_release reads
+# the image repo at the release's own source, or, for a release from
+# HamSCI/sigmond, at each of PROXMOX_SLUGS in turn (`_image_repo_commit`).
+PROXMOX_REPO_URL = f"https://github.com/{PROXMOX_SLUGS[0]}"
+
+
+class _RepoMissing(RuntimeError):
+    """git ls-remote found no repository at the URL (GitHub answers 401 for
+    a repo that does not exist, which git reports as a failed prompt)."""
+
+
+# git's words for a repo that is not there.  Anything else that fails --
+# DNS, a refused connection, a timeout, a 5xx -- says nothing about absence.
+_REPO_MISSING_RE = re.compile(
+    r"Repository not found|could not read Username|terminal prompts disabled"
+    r"|returned error: 404", re.IGNORECASE)
 
 
 class ApplyError(RuntimeError):
@@ -44,9 +59,21 @@ def _run(run: Callable, argv: list, where, what: str, timeout: int, **kw):
 
 
 def _tag_commit(run: Callable, repo_url: str, tag: str) -> str:
-    """The commit ``tag`` names in ``repo_url`` (peeled), by ls-remote."""
+    """The commit ``tag`` names in ``repo_url`` (peeled), by ls-remote.
+
+    GIT_TERMINAL_PROMPT=0: a missing GitHub repo asks for a username, and
+    the prompt would hang an unattended align.  With it off, git fails at
+    once, and that failure raises _RepoMissing; any other failure is an
+    ApplyError naming git's own words."""
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
     r = _run(run, ["git", "ls-remote", repo_url, f"refs/tags/{tag}",
-                   f"refs/tags/{tag}^{{}}"], repo_url, "ls-remote", 60)
+                   f"refs/tags/{tag}^{{}}"], repo_url, "ls-remote", 60, env=env)
+    if r.returncode != 0:
+        err = (r.stderr or "").strip()
+        if _REPO_MISSING_RE.search(err):
+            raise _RepoMissing(f"no repository at {repo_url}")
+        last = err.splitlines()[-1] if err else f"exit {r.returncode}"
+        raise ApplyError(f"release tag {tag}: git ls-remote {repo_url} failed: {last}")
     plain = peeled = None
     for line in (r.stdout or "").splitlines():
         sha, _, ref = line.partition("\t")
@@ -55,9 +82,27 @@ def _tag_commit(run: Callable, repo_url: str, tag: str) -> str:
         elif ref.strip() == f"refs/tags/{tag}":
             plain = sha.strip()
     tag_commit = peeled or plain
-    if r.returncode != 0 or not tag_commit:
+    if not tag_commit:
         raise ApplyError(f"release tag {tag} not found in {repo_url}")
     return tag_commit
+
+
+def _image_repo_commit(rel: Release, run: Callable) -> str:
+    """The commit the image repo's tag ``rel.tag`` names.
+
+    A release read from the image repo is checked there, at the slug it
+    came from.  A release read from HamSCI/sigmond is checked at each of
+    PROXMOX_SLUGS in turn, moving on only when a repo does not exist (before
+    the rename sigmond-proxmox does not); a network failure, or a repo
+    that exists without the tag, refuses."""
+    slugs = PROXMOX_SLUGS if rel.source == RELEASE_SLUG else (rel.source,)
+    for slug in slugs:
+        try:
+            return _tag_commit(run, f"https://github.com/{slug}", rel.tag)
+        except _RepoMissing:
+            continue
+    raise ApplyError(f"release tag {rel.tag}: no image repo found "
+                     f"({', '.join(slugs)}) — cannot verify it")
 
 
 def verify_release(rel: Release, run: Callable = subprocess.run) -> None:
@@ -82,17 +127,22 @@ def verify_release(rel: Release, run: Callable = subprocess.run) -> None:
         return
     if not rel.appliance_commit:
         raise ApplyError(f"release {rel.tag}: manifest records no appliance_commit — cannot verify it")
+    if rel.source != RELEASE_SLUG and rel.source not in PROXMOX_SLUGS:
+        raise ApplyError(f"release {rel.tag}: unknown source {rel.source!r} — cannot verify it")
     if rel.source == RELEASE_SLUG:
         row = rel.components.get("sigmond")
         if not row:
             raise ApplyError(f"release {rel.tag}: manifest has no sigmond row — cannot verify "
                              f"the {RELEASE_SLUG} tag")
-        sigmond_commit = _tag_commit(run, SIGMOND_REPO_URL, rel.tag)
+        try:
+            sigmond_commit = _tag_commit(run, SIGMOND_REPO_URL, rel.tag)
+        except _RepoMissing as exc:
+            raise ApplyError(f"release tag {rel.tag}: {exc}") from exc
         if not _sha_equal(sigmond_commit, row):
             raise ApplyError(f"release tag {rel.tag} in {RELEASE_SLUG} does not point at the "
                              f"manifest's sigmond row ({sigmond_commit[:12]} vs {row[:12]}) "
                              f"— refusing")
-    tag_commit = _tag_commit(run, PROXMOX_REPO_URL, rel.tag)
+    tag_commit = _image_repo_commit(rel, run)
     if tag_commit != rel.appliance_commit:
         raise ApplyError(f"release tag {rel.tag} does not point at the manifest's appliance_commit "
                          f"({tag_commit[:12]} vs {rel.appliance_commit[:12]}) — refusing")
