@@ -17,11 +17,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from sigmond.align import (AHEAD_NOTE, FULL_SHA_RE, LIBRARIES_FIRST, RADIOD, RAW_BASE,
-                           RELEASE_TAG_RE, Item, Release, target_label)
+from sigmond.align import (AHEAD_NOTE, FULL_SHA_RE, LIBRARIES_FIRST, RADIOD, RAW_BASES,
+                           RELEASE_SLUG, RELEASE_TAG_RE, Item, Release, target_label)
 from sigmond.doctor import _sha_equal
 
-APPLIANCE_REPO = "https://github.com/HamSCI/sigmond-appliance"
+SIGMOND_REPO_URL = "https://github.com/HamSCI/sigmond"
+# The image repo.  ls-remote follows GitHub's redirect from the old name,
+# HamSCI/sigmond-appliance, so this one URL serves either side of the rename.
+PROXMOX_REPO_URL = "https://github.com/HamSCI/sigmond-proxmox"
 
 
 class ApplyError(RuntimeError):
@@ -40,8 +43,27 @@ def _run(run: Callable, argv: list, where, what: str, timeout: int, **kw):
         raise ApplyError(f"{where}: git {what} could not run: {exc}") from exc
 
 
+def _tag_commit(run: Callable, repo_url: str, tag: str) -> str:
+    """The commit ``tag`` names in ``repo_url`` (peeled), by ls-remote."""
+    r = _run(run, ["git", "ls-remote", repo_url, f"refs/tags/{tag}",
+                   f"refs/tags/{tag}^{{}}"], repo_url, "ls-remote", 60)
+    plain = peeled = None
+    for line in (r.stdout or "").splitlines():
+        sha, _, ref = line.partition("\t")
+        if ref.endswith("^{}"):
+            peeled = sha.strip()
+        elif ref.strip() == f"refs/tags/{tag}":
+            plain = sha.strip()
+    tag_commit = peeled or plain
+    if r.returncode != 0 or not tag_commit:
+        raise ApplyError(f"release tag {tag} not found in {repo_url}")
+    return tag_commit
+
+
 def verify_release(rel: Release, run: Callable = subprocess.run) -> None:
-    """The release tag must point at the manifest's appliance_commit.
+    """The image repo's tag must point at the manifest's appliance_commit.
+    A release read from HamSCI/sigmond (``rel.source``) carries a second
+    tag, sigmond's own, which must point at the manifest's sigmond row.
 
     A release candidate has no tag on GitHub yet, so nothing can point at
     it; it is checked for what it can show instead: a release-format tag, a
@@ -60,18 +82,17 @@ def verify_release(rel: Release, run: Callable = subprocess.run) -> None:
         return
     if not rel.appliance_commit:
         raise ApplyError(f"release {rel.tag}: manifest records no appliance_commit — cannot verify it")
-    r = _run(run, ["git", "ls-remote", APPLIANCE_REPO, f"refs/tags/{rel.tag}",
-                   f"refs/tags/{rel.tag}^{{}}"], APPLIANCE_REPO, "ls-remote", 60)
-    plain = peeled = None
-    for line in (r.stdout or "").splitlines():
-        sha, _, ref = line.partition("\t")
-        if ref.endswith("^{}"):
-            peeled = sha.strip()
-        elif ref.strip() == f"refs/tags/{rel.tag}":
-            plain = sha.strip()
-    tag_commit = peeled or plain
-    if r.returncode != 0 or not tag_commit:
-        raise ApplyError(f"release tag {rel.tag} not found in {APPLIANCE_REPO}")
+    if rel.source == RELEASE_SLUG:
+        row = rel.components.get("sigmond")
+        if not row:
+            raise ApplyError(f"release {rel.tag}: manifest has no sigmond row — cannot verify "
+                             f"the {RELEASE_SLUG} tag")
+        sigmond_commit = _tag_commit(run, SIGMOND_REPO_URL, rel.tag)
+        if not _sha_equal(sigmond_commit, row):
+            raise ApplyError(f"release tag {rel.tag} in {RELEASE_SLUG} does not point at the "
+                             f"manifest's sigmond row ({sigmond_commit[:12]} vs {row[:12]}) "
+                             f"— refusing")
+    tag_commit = _tag_commit(run, PROXMOX_REPO_URL, rel.tag)
     if tag_commit != rel.appliance_commit:
         raise ApplyError(f"release tag {rel.tag} does not point at the manifest's appliance_commit "
                          f"({tag_commit[:12]} vs {rel.appliance_commit[:12]}) — refusing")
@@ -900,11 +921,12 @@ def refresh_image_file(ref: str, name: str, dest: Path, *,
                        urlopen: Callable = urllib.request.urlopen,
                        timeout: float = 20.0) -> Step:
     """Replace one image-carried helper script (`align.IMAGE_FILES`) with
-    sigmond-appliance's copy at ``ref`` — the write half of
+    the image repo's (sigmond-proxmox's) copy at ``ref`` — the write half of
     `align.image_file_drift`'s read-only compare.  ``--apply`` passes the
     release's appliance_commit, which `verify_release` has already matched
     to the tag, never the tag itself: a tag can move between the verify
-    and this fetch (final review / I7).
+    and this fetch (final review / I7).  It reads each of `align.RAW_BASES`
+    in turn, moving on after a 404 alone (the image repo's old name).
 
     Unlike a component checkout, there is no operator owner to preserve:
     these scripts run as root under cron/systemd, so the refreshed file is
@@ -922,13 +944,22 @@ def refresh_image_file(ref: str, name: str, dest: Path, *,
     raising must not leave it behind at the real path (`/usr/local/sbin`
     on a station) — remove it and report failed instead."""
     dest = Path(dest)
-    url = f"{RAW_BASE}/{ref}/{name}"
-    try:
-        with urlopen(url, timeout=timeout) as resp:
-            status = getattr(resp, "status", 200)
-            body = resp.read()
-    except (urllib.error.URLError, OSError) as exc:
-        return Step(str(dest), "failed", f"{url}: {exc}")
+    for i, base in enumerate(RAW_BASES):
+        url = f"{base}/{ref}/{name}"
+        last = i == len(RAW_BASES) - 1
+        try:
+            with urlopen(url, timeout=timeout) as resp:
+                status = getattr(resp, "status", 200)
+                body = resp.read()
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404 and not last:
+                continue
+            return Step(str(dest), "failed", f"{url}: {exc}")
+        except (urllib.error.URLError, OSError) as exc:
+            return Step(str(dest), "failed", f"{url}: {exc}")
+        if status == 404 and not last:
+            continue
+        break
     if status != 200:
         return Step(str(dest), "failed", f"{url}: HTTP {status}")
     if not body:
@@ -952,7 +983,7 @@ def refresh_image_file(ref: str, name: str, dest: Path, *,
 
 # sigmond-site-timing moved into sigmond (2026-11-15).  /usr/local/sbin holds a
 # link to the checkout, made by scripts/install/site-timing-link.sh, so align
-# no longer fetches it from sigmond-appliance.  The script changes the station
+# no longer fetches it from the image repo.  The script changes the station
 # (timestd profile, metrology channels, chrony), so align re-runs it only when
 # the bytes it would run differ from the bytes it last ran — the stamp below.
 SITE_TIMING_DEST = Path("/usr/local/sbin/sigmond-site-timing")

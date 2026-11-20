@@ -1833,3 +1833,109 @@ class RepointOriginTests(unittest.TestCase):
                                         owner_of=lambda p: "sigmond", say=said.append)
             self.assertEqual(origins["ka9q-web"], self.OLD)
             self.assertIn("could not repoint", said[0])
+
+
+# --- Release home (2026-11-20): a release read from HamSCI/sigmond carries
+# two tags, sigmond's own (at the manifest's sigmond row) and the image
+# repo's (at appliance_commit).  verify_release checks both.
+
+S40 = "daba1f6" + "0" * 33
+
+
+def git_remote(tags):
+    """A fake run answering `git ls-remote <url> refs/tags/T refs/tags/T^{}`
+    from {url: {tag: commit}}; records each argv."""
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        url, tag = argv[2], argv[3].rsplit("/", 1)[-1]
+        commit = tags.get(url, {}).get(tag)
+        out = f"{'9' * 40}\trefs/tags/{tag}\n{commit}\trefs/tags/{tag}^{{}}\n" if commit else ""
+        return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
+    run.calls = calls
+    return run
+
+
+def srel(source="HamSCI/sigmond", sigmond_row="daba1f6", commit=C, tag="v3.94"):
+    comps = {"hf-timestd": "5c8196d"}
+    if sigmond_row is not None:
+        comps["sigmond"] = sigmond_row
+    return align.Release(tag=tag, manifest_text="", appliance_commit=commit,
+                         components=comps, source=source)
+
+
+class VerifyReleaseHomeTests(unittest.TestCase):
+    def setUp(self):
+        self.S = getattr(align_apply, "SIGMOND_REPO_URL", None)
+        self.P = getattr(align_apply, "PROXMOX_REPO_URL", None)
+
+    def test_urls(self):
+        self.assertEqual(self.S, "https://github.com/HamSCI/sigmond")
+        self.assertEqual(self.P, "https://github.com/HamSCI/sigmond-proxmox")
+        self.assertFalse(hasattr(align_apply, "APPLIANCE_REPO"))
+
+    def test_verify_sigmond_release_checks_both_tags(self):
+        run = git_remote({self.S: {"v3.94": S40}, self.P: {"v3.94": C}})
+        align_apply.verify_release(srel(), run)
+        self.assertEqual(sorted(c[2] for c in run.calls), sorted([self.S, self.P]))
+
+    def test_verify_sigmond_tag_elsewhere_refuses(self):
+        run = git_remote({self.S: {"v3.94": "e" * 40}, self.P: {"v3.94": C}})
+        with self.assertRaises(align_apply.ApplyError) as cm:
+            align_apply.verify_release(srel(), run)
+        self.assertIn("HamSCI/sigmond", str(cm.exception))
+        self.assertIn("sigmond", str(cm.exception))
+
+    def test_verify_sigmond_tag_missing_refuses(self):
+        run = git_remote({self.P: {"v3.94": C}})
+        with self.assertRaises(align_apply.ApplyError) as cm:
+            align_apply.verify_release(srel(), run)
+        self.assertIn(self.S, str(cm.exception))
+
+    def test_verify_sigmond_source_proxmox_tag_elsewhere_refuses(self):
+        run = git_remote({self.S: {"v3.94": S40}, self.P: {"v3.94": "2" * 40}})
+        with self.assertRaises(align_apply.ApplyError) as cm:
+            align_apply.verify_release(srel(), run)
+        self.assertIn("appliance_commit", str(cm.exception))
+
+    def test_verify_sigmond_source_without_sigmond_row_refuses(self):
+        run = git_remote({self.S: {"v3.94": S40}, self.P: {"v3.94": C}})
+        with self.assertRaises(align_apply.ApplyError):
+            align_apply.verify_release(srel(sigmond_row=None), run)
+
+    def test_verify_proxmox_source_unchanged(self):
+        for source in ("HamSCI/sigmond-proxmox", "HamSCI/sigmond-appliance"):
+            run = git_remote({self.P: {"v3.93": C}})
+            align_apply.verify_release(srel(source=source, tag="v3.93"), run)
+            self.assertEqual([c[2] for c in run.calls], [self.P])
+
+
+class RefreshImageFileFallbackTests(unittest.TestCase):
+    def test_404_on_proxmox_tries_legacy_name(self):
+        seen = []
+
+        def urlopen(url, timeout=None):
+            seen.append(url)
+            if url.startswith(align.RAW_BASES[0]):
+                raise urllib.error.HTTPError(url, 404, "Not Found", None, None)
+            return _FakeHTTPResponse(200, b"#!/bin/sh\n")
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("os.chown"):
+            step = align_apply.refresh_image_file(C, "sigmond-location-check",
+                                                  Path(tmp) / "s", urlopen=urlopen)
+        self.assertEqual(step.outcome, "refreshed")
+        self.assertEqual(seen, [f"{b}/{C}/sigmond-location-check" for b in align.RAW_BASES])
+
+    def test_5xx_does_not_try_the_legacy_name(self):
+        seen = []
+
+        def urlopen(url, timeout=None):
+            seen.append(url)
+            raise urllib.error.HTTPError(url, 503, "Unavailable", None, None)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            step = align_apply.refresh_image_file(C, "sigmond-location-check",
+                                                  Path(tmp) / "s", urlopen=urlopen)
+        self.assertEqual(step.outcome, "failed")
+        self.assertEqual(len(seen), 1)

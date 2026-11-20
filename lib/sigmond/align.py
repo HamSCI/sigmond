@@ -1,4 +1,4 @@
-"""smd align — how far a station sits from the latest blessed appliance release.
+"""smd align — how far a station sits from the latest blessed sigmond release.
 
 Design: docs/superpowers/specs/2026-09-24-smd-align-design.md.  This module
 plans; it never changes a station.  Every network read goes through an
@@ -19,12 +19,34 @@ from typing import Callable, Optional
 
 from sigmond.doctor import _parse_manifest_components, _sha_equal
 
-RELEASES_API = "https://api.github.com/repos/HamSCI/sigmond-appliance/releases"
-# github.com's own release pages: no API rate limit (60 calls/h per address,
-# which a shared site address can spend before align runs -- N8UR, 2026-11-15).
-RELEASES_WEB = "https://github.com/HamSCI/sigmond-appliance/releases"
-_MANIFEST_HREF = re.compile(
-    r'href="(/HamSCI/sigmond-appliance/releases/download/([^"/]+)/[^"/]+\.manifest\.txt)"')
+# Releases live on HamSCI/sigmond from v3.94 on (release-home design,
+# 2026-11-20).  Older ones live only on the image repo, so a release
+# HamSCI/sigmond does not have is looked for there -- on a 404 alone, never
+# on a timeout or a 5xx, which could aim a station at an older latest.
+RELEASE_SLUG = "HamSCI/sigmond"
+# The image repo.  HamSCI/sigmond-appliance is its name before the rename;
+# it goes when the mirror ends (no station left on a pre-v3.94 smd).
+PROXMOX_SLUGS = ("HamSCI/sigmond-proxmox", "HamSCI/sigmond-appliance")
+
+
+def releases_api(slug: str) -> str:
+    return f"https://api.github.com/repos/{slug}/releases"
+
+
+def releases_web(slug: str) -> str:
+    """github.com's own release pages: no API rate limit (60 calls/h per
+    address, which a shared site address can spend before align runs --
+    N8UR, 2026-11-15)."""
+    return f"https://github.com/{slug}/releases"
+
+
+def manifest_href_re(slug: str) -> "re.Pattern":
+    return re.compile(r'href="(/' + re.escape(slug)
+                      + r'/releases/download/([^"/]+)/[^"/]+\.manifest\.txt)"')
+
+
+RELEASES_API = releases_api(RELEASE_SLUG)
+RELEASES_WEB = releases_web(RELEASE_SLUG)
 _MAX_BODY = 1 << 20          # no reply we read is anywhere near 1 MiB
 
 
@@ -34,6 +56,16 @@ class LookupError_(RuntimeError):
 
 class RateLimited(LookupError_):
     """The GitHub API refused for its rate limit."""
+
+
+class NotFound(LookupError_):
+    """The server answered 404: the thing asked for is not there.  Every
+    other failure (network, timeout, 5xx) says nothing about absence."""
+
+
+class ReleaseNotFound(NotFound):
+    """The repo holds no such release (a 404 on a /releases/ URL, or the
+    release pages show none).  The one failure fetch_release falls back on."""
 
 
 def _default_urlopen(url: str, timeout: float):
@@ -69,7 +101,11 @@ def _get(url: str, urlopen, timeout: float) -> bytes:
             raise RateLimited(
                 f"GitHub API rate limit reached{_rate_limit_reset(headers)}") from exc
         if exc.code == 404 and "/releases/tags/" in url:
-            raise LookupError_(f"no such release: {url.rsplit('/', 1)[-1]}") from exc
+            raise ReleaseNotFound(f"no such release: {url.rsplit('/', 1)[-1]}") from exc
+        if exc.code == 404 and "/releases/" in url:
+            raise ReleaseNotFound(f"HTTP 404 from {url}") from exc
+        if exc.code == 404:
+            raise NotFound(f"HTTP 404 from {url}") from exc
         raise LookupError_(f"HTTP {exc.code} from {url}") from exc
     except (urllib.error.URLError, OSError, http.client.HTTPException, TimeoutError) as exc:
         raise LookupError_(f"could not reach {url}: {exc}") from exc
@@ -88,6 +124,10 @@ class Release:
     # to it before the bless; nothing records it as blessed.
     candidate: bool = False
     manifest_path: Optional[str] = None
+    # The repo whose Release this is: RELEASE_SLUG, or one of PROXMOX_SLUGS
+    # for a release older than v3.94.  verify_release checks sigmond's own
+    # tag only for the first.
+    source: str = "HamSCI/sigmond-proxmox"
 
 
 def target_label(rel: Release) -> str:
@@ -108,7 +148,7 @@ def _preamble(text: str, key: str) -> Optional[str]:
 # The trust boundary: everything above this point is our own code; a
 # manifest's component/sha rows and its self-declared tag come from a
 # release asset on GitHub — reachable by anyone who can push a release
-# to the appliance repo. A malformed row must refuse the WHOLE manifest
+# to HamSCI/sigmond or the image repo. A malformed row must refuse the WHOLE manifest
 # rather than let a partially-bad table drive a later `--apply`.
 COMPONENT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
@@ -119,16 +159,31 @@ def fetch_release(tag: Optional[str] = None, urlopen: Optional[Callable] = None,
                   timeout: float = 20.0) -> Release:
     """The blessed release ``tag`` (default: the latest) and its manifest.
 
-    Asks the GitHub API first; when the API refuses for its rate limit,
-    reads the same release from github.com's pages instead."""
+    Reads HamSCI/sigmond first.  Only when it answers "no such release"
+    (ReleaseNotFound) does it try each of PROXMOX_SLUGS in turn; any other
+    failure refuses at once.  Within each repo it asks the GitHub API
+    first, and when the API refuses for its rate limit, reads the same
+    release from github.com's pages instead.  The fallback covers finding
+    the release, not reading its manifest: a release that names a
+    manifest it cannot serve refuses."""
     if tag is not None and not RELEASE_TAG_RE.match(tag):
         raise LookupError_(f"not a release tag: {tag}")
     urlopen = urlopen or _default_urlopen
+    for slug in (RELEASE_SLUG, *PROXMOX_SLUGS):
+        try:
+            tag_name, manifest_url = _release_in(slug, tag, urlopen, timeout)
+            break
+        except ReleaseNotFound:
+            continue
+    else:
+        raise ReleaseNotFound(f"no such release: {tag or 'latest'} -- none on "
+                              f"{', '.join((RELEASE_SLUG, *PROXMOX_SLUGS))}")
     try:
-        tag_name, manifest_url = _release_from_api(tag, urlopen, timeout)
-    except RateLimited as exc:
-        tag_name, manifest_url = _release_from_web(tag, urlopen, timeout, str(exc))
-    text = _get(manifest_url, urlopen, timeout).decode("utf-8", "replace")
+        text = _get(manifest_url, urlopen, timeout).decode("utf-8", "replace")
+    except NotFound as exc:
+        # The release exists and names this asset: a missing asset is a
+        # broken release, not an absent one.
+        raise LookupError_(f"release {tag_name} on {slug}: manifest asset missing ({exc})") from exc
     components = _parse_manifest_components(text)
     if components is None:
         raise LookupError_(f"release {tag_name}: manifest is missing or truncated")
@@ -141,9 +196,21 @@ def fetch_release(tag: Optional[str] = None, urlopen: Optional[Callable] = None,
         raise LookupError_(
             f"release {tag_name}: manifest preamble tag {preamble_tag!r} does not "
             f"match the release tag {tag_name!r}")
+    if slug == RELEASE_SLUG and "sigmond" not in components:
+        # The sigmond tag names that row's commit; verify_release checks it.
+        raise LookupError_(f"release {tag_name} on {slug}: manifest has no sigmond row")
     return Release(tag=tag_name, manifest_text=text,
                    appliance_commit=_preamble(text, "appliance_commit"),
-                   components=components)
+                   components=components, source=slug)
+
+
+def _release_in(slug: str, tag: Optional[str], urlopen, timeout: float) -> tuple:
+    """(tag, manifest URL) of ``tag`` (or the latest) on ``slug``; raises
+    ReleaseNotFound when that repo has none."""
+    try:
+        return _release_from_api(slug, tag, urlopen, timeout)
+    except RateLimited as exc:
+        return _release_from_web(slug, tag, urlopen, timeout, str(exc))
 
 
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -151,8 +218,9 @@ FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 def load_candidate(path: str) -> Release:
     """A release candidate from the local manifest file at ``path`` -- the
-    file the rig writes beside the image (``sigmond-appliance-<tag>-<date>-
-    release.manifest.txt``), before any GitHub Release exists.
+    file the rig writes beside the image (``sigmond-<tag>-<date>-release.
+    manifest.txt``, ``sigmond-appliance-...`` before v3.94), before any
+    GitHub Release exists.
 
     The same checks as a fetched release, minus the Release itself: the
     components block parses and every row is well formed, the preamble
@@ -191,9 +259,12 @@ def load_candidate(path: str) -> Release:
                    components=components, candidate=True, manifest_path=str(path))
 
 
-def _release_from_api(tag: Optional[str], urlopen, timeout: float) -> tuple:
-    """(tag, manifest URL) from the GitHub API's release record."""
-    url = f"{RELEASES_API}/tags/{tag}" if tag else f"{RELEASES_API}/latest"
+def _release_from_api(slug: str, tag: Optional[str], urlopen, timeout: float) -> tuple:
+    """(tag, manifest URL) from the GitHub API's release record on ``slug``.
+    The API answers 404 for a missing tag, for /latest on a repo with no
+    release, and for a repo that does not exist: all ReleaseNotFound."""
+    api = releases_api(slug)
+    url = f"{api}/tags/{tag}" if tag else f"{api}/latest"
     try:
         meta = json.loads(_get(url, urlopen, timeout))
     except ValueError as exc:
@@ -217,28 +288,49 @@ def _final_url(url: str, urlopen, timeout: float) -> str:
         with urlopen(url, timeout=timeout) as resp:
             return resp.geturl()
     except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise ReleaseNotFound(f"HTTP 404 from {url}") from exc
         raise LookupError_(f"HTTP {exc.code} from {url}") from exc
     except (urllib.error.URLError, OSError, http.client.HTTPException, TimeoutError) as exc:
         raise LookupError_(f"could not reach {url}: {exc}") from exc
 
 
-def _release_from_web(tag: Optional[str], urlopen, timeout: float, why: str) -> tuple:
-    """(tag, manifest URL) from github.com's pages, for when the API is rate-limited.
+def _release_from_web(slug: str, tag: Optional[str], urlopen, timeout: float,
+                      why: str) -> tuple:
+    """(tag, manifest URL) from ``slug``'s github.com pages, for when the API
+    is rate-limited.
 
     /releases/latest redirects to the newest release that is neither draft
-    nor prerelease, so it proves the latest blessed.  Nothing on these pages
-    proves a named older tag is no prerelease, so a named tag must be the
-    latest; any other waits for the API."""
-    landed = _final_url(f"{RELEASES_WEB}/latest", urlopen, timeout)
-    prefix = f"{RELEASES_WEB}/tag/"
+    nor prerelease, so it proves the latest blessed.  On a repo with no
+    release it lands on /releases itself: ReleaseNotFound, as is a 404.
+    Any other landing refuses.  Nothing on these pages proves a named older
+    tag is no prerelease, so a named tag must be the latest; any other
+    waits for the API, unless its asset page answers 404, which proves the
+    repo has no such release."""
+    web = releases_web(slug)
+    landed = _final_url(f"{web}/latest", urlopen, timeout)
+    if landed.rstrip("/") == web:
+        raise ReleaseNotFound(f"{why}; {slug} has no release ({web}/latest led to {landed!r})")
+    prefix = f"{web}/tag/"
     latest = landed[len(prefix):] if landed.startswith(prefix) else ""
     if not RELEASE_TAG_RE.match(latest):
-        raise LookupError_(f"{why}; {RELEASES_WEB}/latest led to {landed!r}, not a release")
+        raise LookupError_(f"{why}; {web}/latest led to {landed!r}, not a release")
     if tag is not None and tag != latest:
+        try:
+            _get(f"{web}/expanded_assets/{tag}", urlopen, timeout)
+        except ReleaseNotFound as exc:
+            raise ReleaseNotFound(f"{why}; {slug} has no release {tag}") from exc
+        except LookupError_:
+            pass        # absence unproven: refuse as below, never fall back
         raise LookupError_(f"{why}; without the API only the latest release ({latest}) can "
                            f"be read, not {tag} — try again after the reset")
-    page = _get(f"{RELEASES_WEB}/expanded_assets/{latest}", urlopen, timeout)
-    links = sorted({href for href, t in _MANIFEST_HREF.findall(page.decode("utf-8", "replace"))
+    try:
+        page = _get(f"{web}/expanded_assets/{latest}", urlopen, timeout)
+    except NotFound as exc:
+        # /latest just named this release; its asset page cannot prove it absent.
+        raise LookupError_(f"{why}; release {latest}'s asset list: {exc}") from exc
+    links = sorted({href for href, t in manifest_href_re(slug).findall(
+                        page.decode("utf-8", "replace"))
                     if t == latest})
     if len(links) != 1:
         raise LookupError_(f"{why}; release {latest}'s asset list names "
@@ -398,7 +490,11 @@ def classify(items: list, is_ancestor: Callable) -> list:
     return out
 
 
-RAW_BASE = "https://raw.githubusercontent.com/HamSCI/sigmond-appliance"
+# Image-carried host files come from the image repo, not HamSCI/sigmond:
+# they belong to the image.  The second base is the repo's name before the
+# rename, tried on a 404 alone; it goes with the mirror.
+RAW_BASES = tuple(f"https://raw.githubusercontent.com/{s}" for s in PROXMOX_SLUGS)
+RAW_BASE = RAW_BASES[0]
 # sigmond-site-timing left this list on 2026-11-15: it lives in sigmond now,
 # and /usr/local/sbin links to the checkout (align_apply.link_site_timing).
 IMAGE_FILES = (
@@ -436,9 +532,21 @@ def _read_local(path: str) -> Optional[bytes]:
         return None
 
 
+def _get_first(urls: tuple, urlopen, timeout: float) -> bytes:
+    """The body of the first of ``urls`` that is there.  Moves on after a
+    404 alone; any other failure raises at once."""
+    for url in urls[:-1]:
+        try:
+            return _get(url, urlopen, timeout)
+        except NotFound:
+            continue
+    return _get(urls[-1], urlopen, timeout)
+
+
 def image_file_drift(ref: str, read_local: Optional[Callable] = None,
                      urlopen: Optional[Callable] = None, timeout: float = 20.0) -> list:
-    """Each image-carried file against sigmond-appliance's copy at ``ref``.
+    """Each image-carried file against the image repo's (sigmond-proxmox's)
+    copy at ``ref``, from each of RAW_BASES in turn on a 404 alone.
 
     The dry run passes the release tag (all it has before verification);
     ``--apply`` passes the release's appliance_commit, already verified to
@@ -448,7 +556,8 @@ def image_file_drift(ref: str, read_local: Optional[Callable] = None,
     out = []
     for vm_path, repo_path in IMAGE_FILES:
         try:
-            want = _get(f"{RAW_BASE}/{ref}/{repo_path}", urlopen or _default_urlopen, timeout)
+            want = _get_first(tuple(f"{b}/{ref}/{repo_path}" for b in RAW_BASES),
+                              urlopen or _default_urlopen, timeout)
         except LookupError_ as exc:
             out.append({"path": vm_path, "status": "unknown", "note": str(exc)})
             continue
