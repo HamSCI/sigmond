@@ -31,8 +31,16 @@ from tests.test_align_enables_units import _drive
 from tests.test_align_cli import smd  # the module _drive runs
 
 OLD = "8719788" + "c" * 33          # what the image build wrote on SIGMA
-RETIRED = ("component-pins.toml.retired-"
-           + datetime.now(timezone.utc).strftime("%Y%m%d"))
+
+
+def _today() -> str:
+    # Computed at assertion time: a run that crosses UTC midnight must not
+    # compare against yesterday's name.
+    return datetime.now(timezone.utc).strftime("%Y%m%d")
+
+
+def _retired() -> str:
+    return "component-pins.toml.retired-" + _today()
 
 
 @pytest.fixture
@@ -192,7 +200,7 @@ def test_align_retires_station_pin_file(pin_file):
         assert pin_file.exists()
 
         _calls, out = _drive()
-        retired = pin_file.with_name(RETIRED)
+        retired = pin_file.with_name(_retired())
         assert not pin_file.exists()
         assert retired.read_text().startswith("[pins]")
         lines = [ln for ln in out.splitlines() if "component-pins" in ln]
@@ -212,7 +220,7 @@ def test_align_retires_a_symlink_without_following_it(pin_file, tmp_path):
     with mock.patch.object(smd, "_COMPONENT_PINS_FILE", pin_file):
         _drive()
     assert not os.path.lexists(pin_file)
-    assert pin_file.with_name(RETIRED).is_symlink()
+    assert pin_file.with_name(_retired()).is_symlink()
     assert target.read_text() == "keep me\n"
 
 
@@ -261,7 +269,8 @@ def test_catalog_override_is_drift_and_align_prunes(tmp_path):
         assert op.read_text() == OP_CAT
         _calls, out = _drive()
     assert "pruned 2 field(s)" in out
-    assert (etc / "catalog.toml.bak").read_text() == OP_CAT
+    # align's prune keeps a dated backup and never overwrites an older one.
+    assert (etc / f"catalog.toml.bak-{_today()}").read_text() == OP_CAT
     # The differing repo stays, and stays a drift item; it is never
     # deleted silently.
     assert "someone/b-staging" in op.read_text()
@@ -297,3 +306,105 @@ def test_locally_managed_is_no_catalog_override(tmp_path):
     op.write_text('[components]\nlocally_managed = ["ka9q-radio"]\n')
     repo.write_text(REPO_CAT)
     assert _cat_items(op, repo) == []
+
+
+# -- fix round 1 -------------------------------------------------------------
+
+def test_onion_pin_is_the_onion_the_v393_image_built():
+    # Ruling 2026-11-20: the blessed v3.93 image built and tested onion
+    # 124c28c; a constant left at de8ea93 would roll SIGMA, KFS-MAIN and
+    # AC1SN back once align retires their pin file.
+    assert smd._ONION_COMMIT == "124c28c8f74fa73ffa2cc5a3b0273633563be366"
+
+
+PROFILE_REPO = REPO_CAT + ('[profile.dasi2]\ndescription = "core"\n'
+                           'clients = ["a", "b"]\n')
+PROFILE_OP = ('[client.a]\nrepo = "https://github.com/HamSCI/a"\n'
+              '[profile.dasi2]\ndescription = "core"\n'
+              '[profile.mine]\ndescription = "my bundle"\n'
+              'clients = ["a"]\n'
+              '[components]\nlocally_managed = ["ka9q-radio"]\n')
+
+
+def test_align_prune_keeps_profiles_and_other_tables(tmp_path):
+    import tomllib
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    op, repo = etc / "catalog.toml", tmp_path / "repo-catalog.toml"
+    op.write_text(PROFILE_OP)
+    repo.write_text(PROFILE_REPO)
+
+    got = _cat_items(op, repo)
+    by = {i.subject: i for i in got}
+    # A profile field that copies the repo is pruned like a client copy; an
+    # operator's own profile is an override item.
+    assert by["catalog:profile.dasi2.description"].fix == "smd config catalog-prune"
+    assert "replacing the release's catalog" in by["catalog:profile.mine.clients"].detail
+    assert not [s for s in by if "components" in s]
+
+    with mock.patch.object(catalog_prune, "OPERATOR_CATALOG", op), \
+         mock.patch.object(catalog_prune, "REPO_CATALOG", repo):
+        _calls, out = _drive()
+    assert "pruned 2 field(s)" in out
+    # Every client block was a copy, yet the file stays: other tables remain.
+    data = tomllib.loads(op.read_text())
+    assert "client" not in data
+    assert data["profile"] == {"mine": {"description": "my bundle",
+                                        "clients": ["a"]}}
+    assert data["components"] == {"locally_managed": ["ka9q-radio"]}
+
+
+def test_prune_never_unlinks_while_other_tables_remain(tmp_path):
+    op, repo = tmp_path / "catalog.toml", tmp_path / "repo-catalog.toml"
+    op.write_text('[client.a]\nrepo = "https://github.com/HamSCI/a"\n'
+                  '[components]\nlocally_managed = ["ka9q-radio"]\n')
+    repo.write_text(REPO_CAT)
+    report = catalog_prune.prune_operator_catalog(op, repo)
+    assert not report.removed_file
+    assert "locally_managed" in op.read_text()
+
+
+def test_align_prune_backup_is_dated_and_never_overwritten(tmp_path):
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    op, repo = etc / "catalog.toml", tmp_path / "repo-catalog.toml"
+    op.write_text(OP_CAT)
+    repo.write_text(REPO_CAT)
+    older = etc / f"catalog.toml.bak-{_today()}"
+    older.write_text("an older backup\n")
+    with mock.patch.object(catalog_prune, "OPERATOR_CATALOG", op), \
+         mock.patch.object(catalog_prune, "REPO_CATALOG", repo):
+        _drive()
+    assert older.read_text() == "an older backup\n"
+    assert (etc / f"catalog.toml.bak-{_today()}.1").read_text() == OP_CAT
+
+
+def test_missing_repo_catalog_is_one_fault(tmp_path):
+    op = tmp_path / "catalog.toml"
+    op.write_text(OP_CAT)
+    got = overrides.override_items(
+        client_configs={}, catalog_override=op,
+        repo_catalog=tmp_path / "no-such-repo-catalog.toml",
+        pins_file=tmp_path / "none-pins.toml", coordination=tmp_path / "co.toml")
+    assert [(i.severity, i.subject) for i in got] == [
+        ("fault", str(tmp_path / "no-such-repo-catalog.toml"))]
+
+
+def test_retire_never_replaces_an_existing_name(tmp_path, monkeypatch):
+    from sigmond import safe_write
+    src = tmp_path / "component-pins.toml"
+    src.write_text("new\n")
+    (tmp_path / "x.retired").write_text("old\n")
+    # Even when the free-name probe is fooled, the link refuses to replace.
+    real_stat = os.stat
+
+    def blind(path, *a, **kw):
+        if path == "x.retired":
+            raise FileNotFoundError(path)
+        return real_stat(path, *a, **kw)
+    monkeypatch.setattr(safe_write.os, "stat", blind)
+    got = safe_write.retire_nofollow(src, "x.retired")
+    assert got == "x.retired.1"
+    assert (tmp_path / "x.retired").read_text() == "old\n"
+    assert (tmp_path / "x.retired.1").read_text() == "new\n"
+    assert not src.exists()

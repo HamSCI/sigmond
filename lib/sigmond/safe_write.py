@@ -280,8 +280,10 @@ def retire_nofollow(path: Union[str, Path], new_name: str) -> Optional[str]:
     link: the directory is opened with O_DIRECTORY|O_NOFOLLOW and the
     rename runs relative to it, so a symlink at `path` is renamed itself and
     its target stays untouched.  A name already taken gets ``.1``, ``.2``,
-    ... appended, so nothing retired earlier is overwritten.  Returns the
-    name used, or None when nothing stands at `path`."""
+    ... appended, so nothing retired earlier is overwritten: the new name is
+    made by ``link(2)`` (which refuses an existing name, unlike
+    ``rename(2)``) and the old one then unlinked.  Returns the name used,
+    or None when nothing stands at `path`."""
     path = Path(path)
     name = _name_of(path)
     _name_of(Path(new_name))
@@ -291,20 +293,25 @@ def retire_nofollow(path: Union[str, Path], new_name: str) -> Optional[str]:
             os.stat(name, dir_fd=dfd, follow_symlinks=False)
         except FileNotFoundError:
             return None
-        dest, n = new_name, 0
-        while True:
+        for n in range(_TMP_TRIES + 1):
+            dest = new_name if n == 0 else f"{new_name}.{n}"
             try:
                 os.stat(dest, dir_fd=dfd, follow_symlinks=False)
+                continue                    # taken: try the next name
             except FileNotFoundError:
-                break
-            n += 1
-            if n > _TMP_TRIES:
-                raise OSError(errno.EEXIST, f"{path}: no free name to "
-                              f"retire it as {new_name}")
-            dest = f"{new_name}.{n}"
-        os.rename(name, dest, src_dir_fd=dfd, dst_dir_fd=dfd)
-        os.fsync(dfd)
-        return dest
+                pass
+            try:
+                # follow_symlinks=False links a symlink itself, never its
+                # target; link(2) fails on a name that appeared meanwhile.
+                os.link(name, dest, src_dir_fd=dfd, dst_dir_fd=dfd,
+                        follow_symlinks=False)
+            except FileExistsError:
+                continue
+            os.unlink(name, dir_fd=dfd)
+            os.fsync(dfd)
+            return dest
+        raise OSError(errno.EEXIST, f"{path}: no free name to retire it "
+                      f"as {new_name}")
     finally:
         os.close(dfd)
 

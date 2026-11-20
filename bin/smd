@@ -1410,7 +1410,11 @@ def _build_onion(src_dir: Path, *, force: bool = False) -> bool:
 # Pinned to a known-good commit (never a bare branch/HEAD) per
 # docs/native-binaries.md — bump _ONION_COMMIT when a newer onion is validated.
 _ONION_REPO   = 'https://github.com/davidmoreno/onion.git'
-_ONION_COMMIT = 'de8ea938342b36c28024fd8393ebc27b8442a161'   # master, build-validated 2026-06-01 (libonion.so.0.8.191)
+# 124c28c (2026-10-07): the onion the blessed v3.93 image built at master and
+# its ladder tested (moved from de8ea93, build-validated 2026-06-01, in v3.94:
+# every pin comes from the release, and align would otherwise rebuild the
+# v3.93 stations' ka9q-web back to the older onion).
+_ONION_COMMIT = '124c28c8f74fa73ffa2cc5a3b0273633563be366'   # master 2026-10-07, v3.93 image
 _ONION_SRC    = Path('/opt/git/sigmond/onion')      # sibling checkout (was /home/wsprdaemon/onion)
 # Where ka9q-web's own Makefile installs the binary.  Named because the build
 # reads it to decide whether a compile is needed at all.
@@ -9772,7 +9776,9 @@ def _align_station_pins(apply: bool, *, say=print) -> int:
 
 def _align_catalog_prune(apply: bool, *, say=print) -> int:
     """Drop the fields of /etc/sigmond/catalog.toml that copy the repo
-    catalog, through `smd config catalog-prune`'s own code (v3.94 Task 9).
+    catalog, through `smd config catalog-prune`'s own code (v3.94 Task 9),
+    keeping a dated backup (``catalog.toml.bak-<UTC date>``, never
+    overwritten).  Tables the prune does not compare stay verbatim.
     A field that differs stays, and drift reports it until the operator
     removes it.  The dry run names the count.  Returns 1 when the dry run
     finds copies or the prune fails, else 0."""
@@ -9782,7 +9788,7 @@ def _align_catalog_prune(apply: bool, *, say=print) -> int:
         return 0
     try:
         _minimal, report = cp.compute_minimal_operator(op, repo)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, TypeError) as exc:
         say(f'  could not read {op}: {exc}')
         return 1
     n = len(report.pruned_keys)
@@ -9792,9 +9798,15 @@ def _align_catalog_prune(apply: bool, *, say=print) -> int:
         say(f'  would prune {n} field(s) that copy the repo catalog from '
             f'{op} (smd config catalog-prune)')
         return 1
+    from datetime import datetime, timezone
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%d')
     try:
-        done = cp.prune_operator_catalog(op, repo)
-    except (OSError, ValueError) as exc:
+        # A dated backup that never overwrites an older one: align runs
+        # unattended, and an operator may want the file from before it.
+        done = cp.prune_operator_catalog(op, repo,
+                                         backup_suffix=f'.bak-{stamp}',
+                                         keep_backups=True)
+    except (OSError, ValueError, TypeError) as exc:
         say(f'  could not prune {op}: {exc}')
         return 1
     say(f'  pruned {n} field(s) that copy the repo catalog from {op} '
@@ -30715,7 +30727,7 @@ def cmd_config_catalog_prune(args) -> int:
     try:
         report = prune_operator_catalog(OPERATOR_CATALOG, REPO_CATALOG,
                                          dry_run=dry_run)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, TypeError) as exc:
         # A symlink at the operator path, among others: the prune reads and
         # writes through sigmond.safe_write, which refuses to follow one.
         _err(f'config catalog-prune: {exc}')

@@ -9,7 +9,9 @@ def _run(tmp_path, cfgs, **kw):
     kw.setdefault("catalog_override", tmp_path / "c.toml")
     kw.setdefault("pins_file", tmp_path / "p.toml")
     kw.setdefault("coordination", tmp_path / "co.toml")
-    kw.setdefault("repo_catalog", tmp_path / "repo-catalog.toml")
+    if "repo_catalog" not in kw:
+        kw["repo_catalog"] = tmp_path / "repo-catalog.toml"
+        kw["repo_catalog"].touch()      # an empty repo catalog
     return overrides.override_items(client_configs=cfgs, **kw)
 
 

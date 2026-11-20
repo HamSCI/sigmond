@@ -10,8 +10,10 @@ Site configuration (callsign, grid, receivers, channels) never counts.
   (``<base>/<component>/config/*.toml.template``): the same dotted key
   when the template has it, else any template value under the same key
   name.  Without a readable template, ``RELEASE_DEFAULTS`` stands in.
-* /etc/sigmond/catalog.toml: each field of a [client.*] or [deprecated.*]
-  entry, one item per field (v3.94 Task 9).  A field that copies the repo
+* /etc/sigmond/catalog.toml: each field of a [client.*], [deprecated.*] or
+  [profile.*] entry, one item per field (v3.94 Task 9), subject
+  ``catalog:<name>.<key>`` for a client and ``catalog:<section>.<name>.<key>``
+  for the others.  A missing or unreadable repo catalog is one fault.  A field that copies the repo
   catalog (``<sigmond>/etc/catalog.toml``) is fixed by
   ``smd config catalog-prune``, which ``smd align --apply`` runs.  A field
   that differs (a staging-fork repo, say) stays an item until the operator
@@ -135,18 +137,19 @@ def _client_items(client_configs, out: list, base=None) -> None:
                     "release's own software", f"remove {dotted} from {name}"))
 
 
-_CATALOG_SECTIONS = ("client", "deprecated")
+_CATALOG_SECTIONS = ("client", "deprecated", "profile")
 
 
 def _catalog_items(path: Path, repo_catalog: Path, out: list) -> None:
     data = _load(path, out)
     if data is None:
         return
+    if not any(isinstance(data.get(s), dict) and data.get(s)
+               for s in _CATALOG_SECTIONS):
+        return
     try:
         with open(repo_catalog, "rb") as f:
             repo = tomllib.load(f)
-    except FileNotFoundError:
-        repo = {}
     except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
         out.append(Item("override", "fault", str(repo_catalog),
                         f"could not read {repo_catalog}: {exc}",
@@ -164,20 +167,21 @@ def _catalog_items(path: Path, repo_catalog: Path, out: list) -> None:
                 continue
             want = repo_table.get(name)
             want = want if isinstance(want, dict) else {}
+            where = name if section == "client" else f"{section}.{name}"
             for key in sorted(entry):
-                subject = f"catalog:{name}.{key}"
+                subject = f"catalog:{where}.{key}"
                 if key in want and want[key] == entry[key]:
                     out.append(Item(
                         "override", "drift", subject,
-                        f"{path} sets {key} for {name}, which copies the "
+                        f"{path} sets {key} for {where}, which copies the "
                         "repo catalog and would hide a later change to it",
                         "smd config catalog-prune"))
                 else:
                     out.append(Item(
                         "override", "drift", subject,
-                        f"{path} sets {key} = {entry[key]!r} for {name}, "
+                        f"{path} sets {key} = {entry[key]!r} for {where}, "
                         "replacing the release's catalog",
-                        f"remove {key} for {name} from {path} (smd config "
+                        f"remove {key} for {where} from {path} (smd config "
                         "catalog-prune keeps a field that differs)"))
 
 

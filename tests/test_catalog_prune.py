@@ -45,7 +45,8 @@ class TestComputeMinimalOperator:
         op = tmp_path / 'op.toml'  # does not exist
         minimal, report = compute_minimal_operator(op, repo)
         assert report.no_op is True
-        assert minimal == {'client': {}, 'deprecated': {}}
+        assert minimal == {'client': {}, 'deprecated': {}, 'profile': {},
+                           'other': {}}
 
     def test_full_duplicate_collapses_to_empty(self, tmp_path):
         repo = tmp_path / 'repo.toml'
@@ -61,7 +62,8 @@ class TestComputeMinimalOperator:
         op = tmp_path / 'op.toml'
         op.write_text(repo.read_text())
         minimal, report = compute_minimal_operator(op, repo)
-        assert minimal == {'client': {}, 'deprecated': {}}
+        assert minimal == {'client': {}, 'deprecated': {}, 'profile': {},
+                           'other': {}}
         assert ('client', 'foo') in report.dropped_blocks
         assert ('deprecated', 'old') in report.dropped_blocks
 
@@ -206,3 +208,22 @@ class TestRenderMinimal:
         import tomllib
         parsed = tomllib.loads(rendered)
         assert parsed['client']['foo']['description'] == 'has "quotes" inside'
+
+
+def test_tables_the_prune_does_not_compare_round_trip(tmp_path):
+    """v3.94 fix round: a table outside client/deprecated/profile survives a
+    prune verbatim, nested tables and arrays of tables included."""
+    import tomllib
+    op, repo = tmp_path / 'op.toml', tmp_path / 'repo.toml'
+    repo.write_text('[client.foo]\nrepo = "https://repo/foo"\n')
+    body = ('top = "level"\n'
+            '[client.foo]\nrepo = "https://repo/foo"\n'
+            '[components]\nlocally_managed = ["ka9q-radio"]\nratio = 0.5\n'
+            '[server.y]\nbranch = "d"\n'
+            '[[hosts]]\nname = "a"\n[[hosts]]\nname = "b"\n')
+    op.write_text(body)
+    before = tomllib.loads(body)
+    prune_operator_catalog(op, repo)
+    after = tomllib.loads(op.read_text())
+    del before['client']
+    assert after == before

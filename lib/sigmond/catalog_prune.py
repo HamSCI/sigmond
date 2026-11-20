@@ -9,13 +9,17 @@ win regardless of whether they actually differ.
 
 This module removes the dead weight:
 
-* For every ``[client.<name>]`` / ``[deprecated.<name>]`` block in the
-  operator file that has a matching block in the repo file, drop any
-  key whose value is byte-equal to the repo's value for the same key.
+* For every ``[client.<name>]`` / ``[deprecated.<name>]`` /
+  ``[profile.<name>]`` block in the operator file that has a matching
+  block in the repo file, drop any key whose value is byte-equal to the
+  repo's value for the same key.
+* Every other table or key in the operator file (``[components]
+  locally_managed``, say) is carried through verbatim: the prune knows
+  nothing of it, so it never drops it.
 * If a block ends up empty after that, drop the block entirely.
 * Operator-only blocks (those whose name is absent from the repo file)
   are kept verbatim.
-* If the operator file ends up with no blocks at all, the file is
+* If the operator file ends up with nothing at all, the file is
   removed — sigmond's sparse-overlay handles missing operator files
   fine and an empty file just adds noise to the system.
 
@@ -34,6 +38,7 @@ planted at either written name is replaced, never written through.
 
 from __future__ import annotations
 
+import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -58,27 +63,41 @@ class PruneReport:
     no_op: bool = False     # nothing to do
 
 
+SECTIONS = ('client', 'deprecated', 'profile')
+OTHER = 'other'     # the minimal mapping's key for everything else, verbatim
+
+
+def _empty() -> dict:
+    out: dict = {section: {} for section in SECTIONS}
+    out[OTHER] = {}
+    return out
+
+
 def _load_sections(path: Path, *, nofollow: bool = False
-                   ) -> dict[str, dict[str, dict]]:
+                   ) -> dict[str, dict]:
     """Return ``{section: {name: raw_block_dict}}`` for the catalog
-    sections we care about (``client``, ``deprecated``).  Missing
+    sections the prune compares (``SECTIONS``), plus ``OTHER``: every
+    other top-level key and table of the file, verbatim.  Missing
     file → empty mapping (treat as "no operator overrides at all").
     ``nofollow`` (the operator file) reads through
     ``safe_write.read_nofollow``, which refuses a symlink."""
     if nofollow:
         text = read_nofollow(path)
         if text is None:
-            return {'client': {}, 'deprecated': {}}
+            return _empty()
         data = tomllib.loads(text)
     else:
         if not path.exists():
-            return {'client': {}, 'deprecated': {}}
+            return _empty()
         with open(path, 'rb') as f:
             data = tomllib.load(f)
-    return {
-        'client': dict((data.get('client') or {}).items()),
-        'deprecated': dict((data.get('deprecated') or {}).items()),
-    }
+    out = _empty()
+    for key, value in data.items():
+        if key in SECTIONS and isinstance(value, dict):
+            out[key] = dict(value.items())
+        else:
+            out[OTHER][key] = value
+    return out
 
 
 def _prune_block(op_block: dict, repo_block: dict) -> dict:
@@ -106,13 +125,14 @@ def compute_minimal_operator(operator_path: Path = OPERATOR_CATALOG,
     op = _load_sections(operator_path, nofollow=True)
     repo = _load_sections(repo_path)
 
-    minimal: dict[str, dict[str, dict]] = {'client': {}, 'deprecated': {}}
+    minimal = _empty()
     any_op_content = any(op[section] for section in op)
     if not any_op_content:
         report.no_op = True
         return minimal, report
+    minimal[OTHER] = dict(op[OTHER])
 
-    for section in ('client', 'deprecated'):
+    for section in SECTIONS:
         for name, op_block in op[section].items():
             repo_block = repo[section].get(name)
             if repo_block is None:
@@ -139,6 +159,8 @@ def _format_toml_value(value) -> str:
         return 'true' if value else 'false'
     if isinstance(value, int):
         return str(value)
+    if isinstance(value, float):
+        return repr(value)
     if isinstance(value, str):
         # Backslash-escape, then wrap in double quotes — sufficient for
         # repo URLs, descriptions, and the rest of the schema.
@@ -159,6 +181,49 @@ def _format_block(section: str, name: str, block: dict) -> str:
     return '\n'.join(out) + '\n'
 
 
+def _bare_key(key: str) -> str:
+    import re
+    return key if re.fullmatch(r'[A-Za-z0-9_-]+', key) else \
+        _format_toml_value(key)
+
+
+def _is_aot(value) -> bool:
+    """An array of tables (``[[name]]``)."""
+    return (isinstance(value, list) and bool(value)
+            and all(isinstance(x, dict) for x in value))
+
+
+def _format_aot(path: list, items: list) -> list:
+    out = []
+    head = '.'.join(_bare_key(p) for p in path)
+    for item in items:
+        out.append(f'[[{head}]]')
+        for k, v in item.items():
+            out.append(f'{_bare_key(k)} = {_format_toml_value(v)}')
+        out.append('')
+    return out
+
+
+def _format_table(path: list, table: dict) -> list:
+    """``[a.b]`` with its scalar keys, then its sub-tables and arrays of
+    tables, recursively: any table read by tomllib, written back."""
+    head = '.'.join(_bare_key(p) for p in path)
+    scalars = [(k, v) for k, v in table.items()
+               if not isinstance(v, dict) and not _is_aot(v)]
+    out = []
+    if scalars or not table:
+        out.append(f'[{head}]')
+        for k, v in scalars:
+            out.append(f'{_bare_key(k)} = {_format_toml_value(v)}')
+        out.append('')
+    for k, v in table.items():
+        if isinstance(v, dict):
+            out += _format_table(path + [k], v)
+        elif _is_aot(v):
+            out += _format_aot(path + [k], v)
+    return out
+
+
 def _render_minimal(sections: dict[str, dict[str, dict]]) -> str:
     """Render the minimal-content sections back to a TOML string.
     Includes a generated-by header so an operator opening the file
@@ -172,22 +237,50 @@ def _render_minimal(sections: dict[str, dict[str, dict]]) -> str:
         '# the repo value.\n',
         '\n',
     ]
-    for section in ('client', 'deprecated'):
-        for name, block in sections[section].items():
+    other = sections.get(OTHER) or {}
+    # Top-level keys first: TOML puts every key after a header into it.
+    bare = [(k, v) for k, v in other.items()
+            if not isinstance(v, dict) and not _is_aot(v)]
+    for key, value in bare:
+        parts.append(f'{_bare_key(key)} = {_format_toml_value(value)}\n')
+    if bare:
+        parts.append('\n')
+    for section in SECTIONS:
+        for name, block in (sections.get(section) or {}).items():
             parts.append(_format_block(section, name, block))
             parts.append('\n')
+    for key, value in other.items():
+        if isinstance(value, dict):
+            parts.append('\n'.join(_format_table([key], value)) + '\n')
+        elif _is_aot(value):
+            parts.append('\n'.join(_format_aot([key], value)) + '\n')
     return ''.join(parts).rstrip() + '\n'
+
+
+def _free_name(path: Path) -> Path:
+    """``path``, or ``path.1``, ``path.2`` ... : the first name nothing
+    stands at (a dangling link counts as standing there)."""
+    cand, n = path, 0
+    while os.path.lexists(cand):
+        n += 1
+        cand = path.with_name(f'{path.name}.{n}')
+    return cand
 
 
 def prune_operator_catalog(operator_path: Path = OPERATOR_CATALOG,
                             repo_path: Path = REPO_CATALOG,
-                            *, dry_run: bool = False) -> PruneReport:
+                            *, dry_run: bool = False,
+                            backup_suffix: str = '.bak',
+                            keep_backups: bool = False) -> PruneReport:
     """Prune the operator catalog in place.  Returns a report describing
     what changed.  Safe to call when ``operator_path`` doesn't exist
     (returns ``no_op=True``).
 
     Side effects when ``dry_run=False`` and there's work to do:
-      * Writes ``operator_path.bak`` (overwriting any previous backup).
+      * Writes ``operator_path`` + ``backup_suffix`` (default ``.bak``),
+        overwriting any previous backup unless ``keep_backups``, which
+        takes the next free ``.1``, ``.2`` ... name instead (``smd align
+        --apply`` passes a dated suffix and keeps them).
       * If the pruned result is empty: removes ``operator_path``.
       * Otherwise: rewrites ``operator_path`` with the minimal content.
     """
@@ -207,8 +300,10 @@ def prune_operator_catalog(operator_path: Path = OPERATOR_CATALOG,
     original = read_nofollow(operator_path)
     if original is None:
         return report
-    report.backup_path = operator_path.with_suffix(
-        operator_path.suffix + '.bak')
+    report.backup_path = operator_path.with_name(
+        operator_path.name + backup_suffix)
+    if keep_backups:
+        report.backup_path = _free_name(report.backup_path)
     write_owned(report.backup_path, original, mode=0o644,
                 owner_from_dir=False)
 

@@ -219,7 +219,10 @@ its own.
 - **onion, wsjtx and ubersdr_wsprd** build from the constants in `bin/smd`
   (`_ONION_COMMIT`, `_WSJTX_COMMIT`, `_UBERSDR_COMMIT`).  Every lookup goes
   through `_native_pin()`, so builds, `smd update`, `smd doctor` and the
-  drift report agree on one commit.
+  drift report agree on one commit.  v3.94 moved `_ONION_COMMIT` from
+  de8ea93 to 124c28c, the onion that the blessed v3.93 image built and its
+  ladder tested; left behind, align would have rebuilt those stations'
+  ka9q-web against the older onion.
 - **ka9q-radio has one owner: ka9q-python.**  Its pin comes from
   ka9q-python's compat commit (`sync_types.py --apply`), never from
   track-main.  ka9q-python follows main like any component, so an image
@@ -236,10 +239,14 @@ its own.
   date>`, after which align's native rebuilds bring the binaries to the
   release's pins.
 - **`/etc/sigmond/catalog.toml`** may hold only fields that differ from
-  `etc/catalog.toml`.  The drift report lists every field there; `smd align
-  --apply` runs `smd config catalog-prune`, which drops the copies (a
-  `.bak` first).  A field that differs, such as a staging-fork `repo`,
-  stays a drift item until the operator removes it.
+  `etc/catalog.toml`.  The drift report lists every field of its
+  `[client.*]`, `[deprecated.*]` and `[profile.*]` entries; `smd align
+  --apply` runs `smd config catalog-prune`'s code, which drops the copies
+  after a dated backup (`catalog.toml.bak-<UTC date>`, never overwritten).
+  A field that differs, such as a staging-fork `repo` or an operator's own
+  profile, stays a drift item until the operator removes it.  The prune
+  carries every other table (`[components] locally_managed`, say) through
+  untouched, and keeps the file while anything remains in it.
 - **`SIGMOND_TRACK_MAIN=1`** resolves onion and ubersdr_wsprd to `git
   ls-remote <repo> HEAD` instead of their pin.  The rig sets it to build an
   image candidate at newest main.  The bless gate (sigmond-appliance
