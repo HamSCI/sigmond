@@ -23,6 +23,7 @@ and the bring-up's child smd runs are stubbed."""
 import contextlib
 import io
 import json
+import os
 import subprocess
 import tempfile
 import types
@@ -54,9 +55,10 @@ class FakeSystemd:
     """systemctl with state: `disable --now` disables and stops, `enable
     --now` enables and starts."""
 
-    def __init__(self, enabled=(), active=()):
+    def __init__(self, enabled=(), active=(), masked=()):
         self.enabled = set(enabled)
         self.active = set(active)
+        self.masked = set(masked)
         self.calls = []
 
     def __call__(self, argv, **kw):
@@ -72,7 +74,8 @@ class FakeSystemd:
             return subprocess.CompletedProcess(argv, 0 if unit in self.active else 3,
                                                "", "")
         if verb == "is-enabled":
-            state = "enabled" if unit in self.enabled else "disabled"
+            state = ("masked" if unit in self.masked
+                     else "enabled" if unit in self.enabled else "disabled")
             return subprocess.CompletedProcess(argv, 0 if state == "enabled" else 1,
                                                state + "\n", "")
         if verb == "show":
@@ -100,7 +103,8 @@ class FakeSystemd:
 def _drive(*, ready, samples=False, dry=False, no_restart=False, quiet=False,
            enabled_units=None, active_units=None, topology=None,
            gated=None, exceptions=None, gmag_unit="current", gmag_device=True,
-           gpsdo_location=False, result=None):
+           gpsdo_location=False, result=None, masked=(), gmag_masked=False,
+           runs=1, call=None):
     """Run cmd_align.  ``ready`` maps component -> True/False/None;
     ``samples`` writes a mag-recorder sample file (the magnetometer has
     delivered before).  Returns (FakeSystemd, output, topology dict,
@@ -113,7 +117,8 @@ def _drive(*, ready, samples=False, dry=False, no_restart=False, quiet=False,
                                  "hf-timestd": True})
     sysd = FakeSystemd(
         enabled=_ALL_UNITS if enabled_units is None else enabled_units,
-        active=_ALL_UNITS if active_units is None else active_units)
+        active=_ALL_UNITS if active_units is None else active_units,
+        masked=masked)
     gated = gated if gated is not None else {"mag-recorder": MAG, "gmag-webui": MAG,
                                              "gpsdo-monitor": GPS}
     asked = []
@@ -142,7 +147,10 @@ def _drive(*, ready, samples=False, dry=False, no_restart=False, quiet=False,
             (unit_dir / u).write_text("[Service]\nExecStart=/bin/true\n")
         from sigmond import gmag_webui
         gmag_path = unit_dir / gmag_webui.SERVICE
-        if gmag_unit is None:
+        if gmag_masked:
+            gmag_path.unlink()
+            gmag_path.symlink_to("/dev/null")
+        elif gmag_unit is None:
             gmag_path.unlink()
         elif gmag_unit == "current":
             gmag_path.write_text(gmag_webui.render_unit(checkout=base / "gmag-webui"))
@@ -196,9 +204,17 @@ def _drive(*, ready, samples=False, dry=False, no_restart=False, quiet=False,
         st.enter_context(mock.patch("sigmond.align_apply.apply_plan",
                                     return_value=[align_apply.Step("sigmond", "current")]))
         with contextlib.redirect_stdout(out):
-            smd.cmd_align(_apply_args(tmp, apply=not dry, no_restart=no_restart))
+            for _ in range(runs):
+                if call is not None:
+                    call()
+                else:
+                    smd.cmd_align(_apply_args(tmp, apply=not dry, no_restart=no_restart))
         if result is not None:
-            result["unit"] = gmag_path.read_text() if gmag_path.exists() else None
+            result["link"] = (os.readlink(gmag_path) if gmag_path.is_symlink()
+                              else None)
+            result["unit"] = (gmag_path.read_text()
+                              if gmag_path.exists() and not gmag_path.is_symlink()
+                              else None)
             result["render"] = gmag_webui.render_unit(checkout=base / "gmag-webui")
     return sysd, out.getvalue(), topology, asked
 
@@ -569,3 +585,82 @@ def test_gmag_unit_drift_exception_keeps_it():
                              exceptions=_exceptions_text(["gmag-webui.service"]))
     assert res["unit"] == _OLD_UNIT
     assert _reloads(sysd.calls) == []
+
+
+# --- review fix round ---------------------------------------------------------
+
+def test_masked_gmag_unit_left_across_two_aligns():
+    # An operator masked gmag-webui: the unit path is a symlink to /dev/null.
+    res = {}
+    sysd, out, _, _ = _drive(ready={"mag-recorder": True, "gmag-webui": True},
+                             gmag_masked=True, masked=("gmag-webui.service",),
+                             enabled_units=[u for u in _ALL_UNITS
+                                            if u != "gmag-webui.service"],
+                             active_units=[u for u in _ALL_UNITS
+                                           if u != "gmag-webui.service"],
+                             runs=2, result=res)
+    assert res["link"] == "/dev/null", out
+    assert _touching(sysd.calls, "gmag-webui.service") == [], out
+    assert _reloads(sysd.calls) == [], out
+    assert "gmag-webui.service" not in sysd.enabled | sysd.active
+
+
+def test_masked_unit_makes_follow_devices_hands_off():
+    sysd, out, _, _ = _drive(ready={"mag-recorder": False, "gmag-webui": False},
+                             masked=("gmag-webui.service",))
+    assert _touching(sysd.calls, "gmag-webui.service") == [], out
+    assert "gmag-webui: left as it is: gmag-webui.service is masked" in out
+    assert ["systemctl", "disable", "--now", "mag-recorder.service"] in sysd.calls
+
+
+def test_unreadable_mag_config_counts_as_seen():
+    from sigmond.drift import devices
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = Path(tmp) / "c.toml"
+        cfg.write_text("this is [not toml\n")
+        empty = Path(tmp) / "empty"
+        empty.mkdir()
+        with mock.patch.object(devices, "MAG_CONFIG", cfg), \
+                mock.patch.object(devices, "MAG_SPOOL_DEFAULT", empty):
+            assert devices.seen_before("mag-recorder") is True
+        cfg.write_text("")
+        cfg.chmod(0)
+        with mock.patch.object(devices, "MAG_CONFIG", cfg), \
+                mock.patch.object(devices, "MAG_SPOOL_DEFAULT", empty), \
+                mock.patch("builtins.open", side_effect=PermissionError("denied")):
+            assert devices.seen_before("mag-recorder") is True
+        missing = Path(tmp) / "absent.toml"
+        with mock.patch.object(devices, "MAG_CONFIG", missing), \
+                mock.patch.object(devices, "MAG_SPOOL_DEFAULT", empty):
+            assert devices.seen_before("mag-recorder") is False
+
+
+def test_dry_run_under_no_restart_names_only_what_apply_does():
+    # cmd_align refuses a dry run with --no-restart today; the step itself
+    # still names only what --apply would do when told not to start.
+    sysd, out, _, _ = _drive(ready={"mag-recorder": False, "gmag-webui": False},
+                             call=lambda: smd._align_follow_devices(False, start=False))
+    assert _mutating(sysd.calls) == [], out
+    assert "would switch off" not in out
+    assert "mag-recorder: not switched off (--no-restart)" in out
+    sysd, out, _, _ = _drive(ready={"mag-recorder": True, "gmag-webui": True},
+                             enabled_units=[], active_units=[],
+                             call=lambda: smd._align_follow_devices(False, start=False))
+    assert "would enable and start" not in out
+    assert "not switched on (--no-restart)" in out
+
+
+def test_readiness_probe_that_raises_reads_unknown():
+    from sigmond.drift import build_report as br
+
+    def boom(name):
+        raise RuntimeError("inventory hung")
+    with tempfile.TemporaryDirectory() as tmp:
+        readers = br.Readers(
+            base=Path(tmp), sigmond_repo=Path(tmp) / "sigmond",
+            unit_dir=Path(tmp), exceptions_path=Path(tmp) / "none.toml",
+            enabled={"mag-recorder": True}, gated={"mag-recorder": MAG},
+            device_ready=boom, device_seen=lambda n: True)
+        items = br.build("AC0G-T", readers=readers).items
+    assert not [i for i in items if i.subject == "check"], items
+    assert not [i for i in items if i.subject == "mag-recorder"]

@@ -9344,11 +9344,11 @@ def _align_follow_devices(apply: bool, *, say=print, start: bool = True,
       explicit operator verb: hardware appearing alone starts nothing).
     * None: no change; one info line.
 
-    A component any of whose units a live `unit:` drift exception covers
-    stays as it is; an exceptions file that cannot be read switches
+    A component any of whose units a live `unit:` drift exception covers,
+    or that systemd reads masked, stays as it is; an exceptions file that cannot be read switches
     nothing.  Without ``start`` (--no-restart) nothing is stopped or
-    started; a line names what was held.  Dry run (``apply`` False): one
-    `would ...` line each.  Runs before `_align_enable_declared_units`,
+    started, in the dry run too; a line names what was held.  Dry run
+    (``apply`` False): one `would ...` line each.  Runs before `_align_enable_declared_units`,
     which then finds a switched-off client's main service stopped and
     leaves it.  Returns the clients switched, or that --apply would
     switch."""
@@ -9392,19 +9392,23 @@ def _align_follow_devices(apply: bool, *, say=print, start: bool = True,
         if held:
             say(f'  {name}: left as it is: a drift exception covers unit:{held[0]}')
             continue
+        states = {u: _align_unit_enabled_state(u, run) for u in units}
+        masked = sorted(u for u, st in states.items() if st.startswith('masked'))
+        if masked:
+            say(f'  {name}: left as it is: {masked[0]} is masked')
+            continue
         if ready is False:
             live = [u for u in units if _align_run(
                 ['systemctl', 'is-active', '--quiet', u], run=run, timeout=15,
                 action=f'systemctl is-active {u}').returncode == 0]
-            if not live and not any(_align_unit_enabled_state(u, run) == 'enabled'
-                                    for u in units):
+            if not live and not any(st == 'enabled' for st in states.values()):
                 continue
-            if not apply:
-                say(f'  would switch off {name}: no {label} on this machine')
-            elif not start:
+            if not start:
                 say(f'  {name}: not switched off (--no-restart): no {label} '
                     f'on this machine')
                 continue
+            if not apply:
+                say(f'  would switch off {name}: no {label} on this machine')
             else:
                 _dormant_disable_units(name)
                 # It disables (and stops) only enabled units; a unit running
@@ -9419,17 +9423,17 @@ def _align_follow_devices(apply: bool, *, say=print, start: bool = True,
                     f'(topology still enables it)')
             count += 1
             continue
-        off = [u for u in units if _align_unit_enabled_state(u, run)
-               in ('disabled', 'linked', 'linked-runtime')]
+        off = [u for u, st in states.items()
+               if st in ('disabled', 'linked', 'linked-runtime')]
         if not off:
+            continue
+        if not start:
+            say(f'  {name}: not switched on (--no-restart): {label} present; '
+                f'systemctl enable --now {" ".join(off)}')
             continue
         if not apply:
             say(f'  would enable and start {name}: {label} present '
                 f'({", ".join(off)})')
-        elif not start:
-            say(f'  {name}: not switched on (--no-restart): {label} present; '
-                f'systemctl enable --now {" ".join(off)}')
-            continue
         else:
             for u in off:
                 r = _align_run(['systemctl', 'enable', '--now', u], run=run,
@@ -9449,7 +9453,9 @@ def _align_gmag_webui_unit(apply: bool, *, base='/opt/git/sigmond', say=print,
     ConditionPathExists=/dev/ttyMAG0) reaches stations installed before
     it; `smd install gmag-webui` alone wrote it until now.
 
-    Only an installed unit is rewritten (never a new install), atomically
+    A unit path that is a symlink (an operator's mask -> /dev/null, or a
+    `systemctl link`) stays as it is, one line.  Only an installed unit is
+    rewritten (never a new install), atomically
     and 0644, then one daemon-reload.  A running gmag-webui restarts once,
     because its unit changed; not under --no-restart (``start`` False),
     and not while /dev/ttyMAG0 is absent, since the new condition would
@@ -9462,6 +9468,12 @@ def _align_gmag_webui_unit(apply: bool, *, base='/opt/git/sigmond', say=print,
     from sigmond.drift import units as drift_units
     run = run or subprocess.run
     path = Path(gw.UNIT_PATH)
+    if path.is_symlink():
+        # A mask (-> /dev/null) or a `systemctl link`: the operator's, not
+        # sigmond's render.  Reading through it would replace a mask.
+        say(f'  {gw.SERVICE}: left as it is: {path} is a symlink '
+            f'(-> {os.readlink(path)})')
+        return 0
     try:
         current = path.read_text()
     except FileNotFoundError:
@@ -10886,7 +10898,7 @@ def cmd_align(args) -> int:
     native_due = _align_native_decoders(
         False, base, covered=rebuilds | {it.component for it in plan
                                          if it.status == 'move'})
-    _align_follow_devices(False)
+    _align_follow_devices(False, start=not getattr(args, 'no_restart', False))
     _align_gmag_webui_unit(False, base=base)
     _align_enable_declared_units(False, base=base)
     own_due, own_err = _align_own_timers_due(_ALIGN_UNIT_DIR, subprocess.run)

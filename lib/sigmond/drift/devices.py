@@ -12,7 +12,8 @@ least once (docs/superpowers/specs/2026-11-19-run-with-purpose-design.md,
 
 * mag-recorder: a ``samples-*.jsonl`` file under its ``[paths] spool_dir``
   (/etc/mag-recorder/mag-recorder-config.toml; default
-  /var/lib/mag-recorder).  A spool that cannot be read counts as seen.
+  /var/lib/mag-recorder).  A config or spool that cannot be read counts
+  as seen.
 * gmag-webui: mag-recorder's evidence (the same magnetometer).
 * gpsdo-monitor: the station's location came from a GPSDO read here.
   Its own record of a fix, /run/gpsdo/<serial>.json, lives on tmpfs and
@@ -57,13 +58,17 @@ def gated_components(catalog) -> dict:
     return out
 
 
-def mag_spool_dir() -> Path:
-    """mag-recorder's ``[paths] spool_dir``, or its default."""
+def mag_spool_dir():
+    """mag-recorder's ``[paths] spool_dir``, or its default when the config
+    is absent or names none.  None when the config exists but cannot be
+    read or parsed: then the spool is unknown."""
     try:
         with open(MAG_CONFIG, "rb") as f:
             cfg = tomllib.load(f)
-    except (OSError, tomllib.TOMLDecodeError):
+    except FileNotFoundError:
         return MAG_SPOOL_DEFAULT
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
     spool = (cfg.get("paths") or {}).get("spool_dir")
     return Path(spool) if isinstance(spool, str) and spool else MAG_SPOOL_DEFAULT
 
@@ -73,8 +78,11 @@ def seen_before(name: str) -> bool:
     when that cannot be ruled out (the module docstring)."""
     name = EVIDENCE_OF.get(name, name)
     if name == "mag-recorder":
+        spool = mag_spool_dir()
+        if spool is None:
+            return True       # config unreadable: cannot rule it out
         try:
-            names = os.listdir(mag_spool_dir())
+            names = os.listdir(spool)
         except FileNotFoundError:
             return False
         except OSError:

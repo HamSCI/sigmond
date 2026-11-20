@@ -133,7 +133,10 @@ def build(station: str, *, readers: Readers) -> Report:
     def ready(name):
         # Each gated client is probed once per report.
         if name not in probed:
-            probed[name] = r.device_ready(name)
+            try:
+                probed[name] = r.device_ready(name)
+            except Exception:  # noqa: BLE001 - a failed probe reads unknown
+                probed[name] = None
         return probed[name]
 
     def dormant() -> set:
