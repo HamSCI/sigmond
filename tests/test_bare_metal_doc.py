@@ -73,9 +73,15 @@ def test_bringup_without_release_list_refuses():
         bmd.extract(DOC.replace(f"{RL} \\\n", "").replace(RL, ""))
 
 
-def test_bringup_not_dasi2_refuses():
+def test_other_profile_or_none_passes():
+    assert bmd.extract(DOC.replace("smd bringup dasi2", "smd bringup other")).bringup.startswith("smd bringup other ")
+    sensed = DOC.replace("smd bringup dasi2 ", "smd bringup ")
+    assert bmd.extract(sensed).bringup.startswith("smd bringup --callsign")
+
+
+def test_non_bringup_command_refuses():
     with pytest.raises(bmd.DocError):
-        bmd.extract(DOC.replace("smd bringup dasi2", "smd bringup other"))
+        bmd.extract(DOC.replace("smd bringup dasi2", "smd status"))
 
 
 def test_digest_ignores_prose_and_verified_line():

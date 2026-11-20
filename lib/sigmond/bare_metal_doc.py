@@ -92,8 +92,10 @@ def extract(md: str) -> DocSteps:
         raise DocError('section 3 has no bash block')
     cmds = _join_continuations(blocks[0])
     bringup = ' '.join(cmds)
-    if not bringup.startswith('smd bringup dasi2'):
-        raise DocError('the bring-up command does not start "smd bringup dasi2"')
+    # Each release ships its own bring-up (a named profile today, the sensed
+    # one later), so the doc's command is the truth; only the verb is fixed.
+    if bringup.split()[:2] != ['smd', 'bringup']:
+        raise DocError('the bring-up command does not start "smd bringup"')
     if '--release-list' not in bringup.split():
         raise DocError('the bring-up command lacks --release-list')
     found = [m.group(1) for m in map(_CHECKOUT.match, install) if m]
