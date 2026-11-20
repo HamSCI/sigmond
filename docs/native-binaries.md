@@ -209,7 +209,10 @@ checkout.  The dry run names a radiod rebuild `REBUILDS and RESTARTS radiod`,
 with the reason.  A radiod rebuilt but not yet restarted leaves a restart due.
 ka9q-web writes its build record only after a real build.  align never builds
 a ka9q-radio that the site profile marks `locally_managed`.  An align that
-runs under an older smd skips the decoder stage and says so.
+runs under an older smd skips the native rebuilds and says so.  When the
+onion build rebuilds ka9q-web, align restarts ka9q-web.  A ka9q-web build
+that fails leaves the old binary running and a failure marker for `smd
+doctor`; align finishes the rest of the alignment and exits 1.
 
 Git in these checkouts runs as the tree's owner, never as root. `smd
 install` elevates itself, so on v3.85 and earlier images each build's

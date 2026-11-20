@@ -210,37 +210,88 @@ replaces no installed unit.
 these steps; `--apply` does them.  `--no-restart` holds every start and stop.
 
 - *Rebuilds that trail the checkout.*  align rebuilds ka9q-radio or ka9q-web
-  when the installed binary trails the checkout.  This is the B4 case: the
-  checkout moved, the binary did not.  The dry run says `REBUILDS and RESTARTS
-  radiod` with the reason, and warns of a recording gap of about 60 seconds.
-  align never builds, moves or restarts a ka9q-radio that the site profile
-  marks `locally_managed`.  When align rebuilds radiod but does not restart it,
-  the restart stays due and the next align restarts it.  ka9q-web writes its
-  build record only after a real build, so a failed build repeats on the next
-  run.
+  when the installed binary trails the checkout.  The dry run says `REBUILDS
+  and RESTARTS radiod` with the reason, and warns of a recording gap of about
+  60 seconds.  align never builds, moves or restarts a ka9q-radio that the
+  site profile marks `locally_managed`.  When align rebuilds radiod but does
+  not restart it, the restart stays due and the next align restarts it.
+  ka9q-web writes its build record only after a real build, so a failed build
+  repeats on the next run.
+- *A failed build.*  A radiod build that fails stops the run: nothing
+  restarts, and the old radiod keeps running.  A ka9q-web build that fails
+  stops nothing.  align leaves the old ka9q-web running, does not restart it
+  for its own sake, leaves a marker that `smd doctor` reports, finishes the
+  rest of the alignment and exits 1.
 - *Native rebuilds that are due.*  align runs the UberSDR decoder build (pin
   5eeeb53), the onion build (pin 124c28c) and the wsjtx build when each falls
-  due.  See [native-binaries](../native-binaries.md).
-- *Units.*  align enables the units that a running component declares in its
-  `deploy.toml`.  It also enables the timers that sigmond's install enables,
+  due.  The onion build rebuilds ka9q-web, so align then restarts ka9q-web.
+  A build that fails here leaves the alignment recorded and the timers
+  started; align names the failure in one line and exits 1.  See
+  [native-binaries](../native-binaries.md).
+- *Units.*  align enables the timers that a running component declares in
+  its `deploy.toml`.  It enables no service: each component's own install
+  decides those.  hf-timestd chooses which of its timers run through its
+  service profile, so align asks `hf-timestd profile show --json` and leaves
+  off every timer the profile leaves off.  When that command fails, align
+  enables none of hf-timestd's timers and says why in one line.  align
+  enables these timers during bring-up and starts them only after its
+  restarts and checks; `--no-restart`, or a run that did not finish cleanly,
+  starts none.  It also enables the timers that sigmond's install enables,
   and `sigmond-archive-health.timer` when the station has an archive.  It
-  leaves off the timers that install leaves off on purpose, such as the
-  heartbeat and the watchdogs.  A `unit:` drift exception keeps align away
-  from that unit.  So before a station with hand-disabled timers runs align,
-  record `smd align --accept unit:<timer>` for each one.  Otherwise align
-  enables it again.
+  leaves `sigmond-sdr-recover.timer` off where the site manages ka9q-radio by
+  hand, since that timer restarts radiod.  It leaves off the timers that
+  install leaves off on purpose, such as the heartbeat and the watchdogs.  A
+  `unit:` drift exception keeps align away from that unit.  So before a
+  station with hand-disabled timers runs align, record `smd align --accept
+  unit:<timer>` for each one.  Otherwise align enables it again.
 - *Device-reading clients.*  A client that reads a local device follows that
   device.  When the device is missing and the client recorded from it before,
   align changes nothing and `smd check` raises a fault.  When the device has
   never appeared, align switches the client off.  When the device is present,
-  align enables the client.  hf-timestd never takes part in this gate.  The
-  gmag-webui unit waits for `/dev/ttyMAG0`.  align leaves a masked unit alone.
+  align enables the client.  hf-timestd never takes part in this gate.  "Recorded
+  from it before" counts the client's own output, and also a record that
+  `--apply` leaves each time it finds the device present,
+  `/var/lib/sigmond/purpose/<client>.<device>`.  That record outlives
+  mag-recorder's 7-day spool, so a magnetometer lost for a month still raises
+  the fault rather than switching its clients off.  The gmag-webui unit waits
+  for `/dev/ttyMAG0`.  When align re-renders that unit, it keeps the old copy
+  as `gmag-webui.service.bak-drift-<UTC stamp>`.  align leaves a masked unit
+  alone.
 - *Pins.*  Every pin comes from the release.  align renames
   `/etc/sigmond/component-pins.toml` to `component-pins.toml.retired-<date>`.
   It prunes from `/etc/sigmond/catalog.toml` every field that copies the repo
   catalog, after it saves a dated `.bak`.  A field that differs stays in the
-  file, and the drift report lists it.  The bless gate in sigmond-appliance
+  file, and the drift report lists it.  align reads the pruned file back
+  before it writes, and writes nothing when that reading differs from what it
+  meant to keep.  A `catalog.toml` that is a symlink stays as it is, with one
+  line.  The bless gate in sigmond-appliance
   refuses an image whose built commits differ from the release's pins.
+
+**`smd update --apply` does not do these.**  Only `smd align --apply` runs the
+stages above: the trailing native rebuilds, the device gate, the unit enables,
+the pin retirement and the catalog prune.  `smd update --apply` moves
+checkouts and builds what moved, as it did before.  A station updated that
+way keeps every one of these differences until someone runs `smd align
+--apply`, and its drift report lists them meanwhile.
+
+**Preview a release before its first align.**  The dry run shows what this
+station's own smd would do.  On a station still at v3.93, `smd align` therefore
+lists none of v3.94's new steps.  `smd align --apply` moves sigmond first,
+then re-runs itself from the new sigmond and does them.  To see them first,
+run the new release's smd from a temporary checkout, as the operator and
+without sudo.  Take the commit from the `sigmond` line of `smd align --release
+v3.94`, which names the target:
+
+```bash
+git clone -q https://github.com/HamSCI/sigmond ~/smd-preview
+git -C ~/smd-preview checkout -q <sigmond commit>
+~/smd-preview/bin/smd align --release v3.94      # a dry run: it changes nothing
+rm -rf ~/smd-preview
+```
+
+That smd reads its own `lib/` beside it, so it needs no `PYTHONPATH`, and it
+compares this station's checkouts under `/opt/git/sigmond` with the release.
+Use it for the dry run only.  Run `--apply` from the station's own smd.
 
 **Four drift rules.**  The report follows these.
 
@@ -249,7 +300,8 @@ these steps; `--apply` does them.  `--no-restart` holds every start and stop.
 2. A component that topology enables but whose main service is stopped gives
    one `drift` item, `smd start <name>`.  Its other units raise no fault.  A
    main service that is missing stays a fault.
-3. A timer that is installed but not enabled gives the fix `smd align --apply`.
+3. A timer that is installed but not enabled gives the fix `smd align --apply`,
+   unless hf-timestd's service profile leaves that timer off.
 4. The UberSDR decoders compare with sigmond's native pin, not with the
    checkout's head.
 
