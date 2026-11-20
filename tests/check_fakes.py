@@ -17,6 +17,7 @@ def svc(state='active', age_s=HOUR, enabled=True):
 
 def make_env(**kw):
     base = dict(now=NOW, installed=lambda name: True, service=lambda pattern: svc(),
-                reader=check.Reader(euid=lambda: 0), journal=lambda units, minutes: [])
+                reader=check.Reader(euid=lambda: 0), journal=lambda units, minutes: [],
+                sdr_present=lambda: None)
     base.update(kw)
     return check.Env(**base)

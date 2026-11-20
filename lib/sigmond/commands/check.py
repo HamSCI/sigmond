@@ -171,11 +171,18 @@ class Env:
     radiod_serials: Callable[[], dict] = None
     present_serials: Callable[[], set] = None
     radiod_status: Callable[[], dict] = None
+    # True/False when the USB bus shows an SDR or not; None when unknown
+    sdr_present: Callable[[], Optional[bool]] = None
 
 
 def _installed(name: str) -> bool:
     from ..component_state import compute_state
     return compute_state(name).installed
+
+
+def _sdr_present() -> Optional[bool]:
+    from ..hardware import _sdr_present as probe
+    return probe()
 
 
 def default_env() -> Env:
@@ -187,6 +194,7 @@ def default_env() -> Env:
             bringup.append(service_state(BRINGUP_UNIT))
         return bringup[0]
     return Env(installed=_installed, service=service_state, reader=reader,
+               sdr_present=_sdr_present,
                journal=read_journal, disk=_disk,
                timestd_config=lambda: read_timestd_config(reader),
                coordination=_coordination, coordination_age_s=_switch_age_s,
@@ -554,13 +562,31 @@ def bringup_awaiting_sdr(env: Env) -> bool:
     return _marker_fields(env.reader, env.bringup_marker).get('result') == 'awaiting-sdr'
 
 
+RADIOD_DORMANT = 'waits on dormant radiod'
+
+
+def radiod_dormant(env: Env) -> bool:
+    """True when radiod is installed, not running, not failed, and no SDR sits
+    on the USB bus: the radiod consumers wait, which is no fault (Michael,
+    2026-11-20, "Waiting is a pass").  A failed radiod, a present SDR, an
+    unknown SDR and a missing probe all read False, so none hides a fault."""
+    if env.sdr_present is None or not env.installed('ka9q-radio'):
+        return False
+    if env.sdr_present() is not False:
+        return False        # asked first: an unknown SDR costs no service query
+    return env.service(RADIOD_UNITS).state in ('inactive', 'absent')
+
+
 def bringup_hold(env: Env, radio: bool = True) -> Optional[str]:
     """Why bring-up has not started a client yet, or None.  `radio` names a
-    radiod-bound client, which also waits for an SDR that was missing."""
+    radiod-bound client, which also waits for an SDR that was missing, or for
+    a radiod that sits dormant."""
     if bringup_running(env):
         return 'bring-up has not started it yet'
     if radio and bringup_awaiting_sdr(env):
         return 'it starts once the SDR is plugged in'
+    if radio and radiod_dormant(env):
+        return RADIOD_DORMANT
     return None
 
 
@@ -1363,6 +1389,7 @@ PAGES = (('receiver page', 8081, None),
          ('station pages', 8000, None),
          ('magnetometer page', 8082, 'mag-recorder'))
 MAG_PAGE = 'magnetometer page'
+RECEIVER_PAGE = 'receiver page'
 
 
 def http_status(url: str, timeout: float = HTTP_TIMEOUT_S,
@@ -1378,7 +1405,7 @@ def http_status(url: str, timeout: float = HTTP_TIMEOUT_S,
         return None, str(reason)
 
 
-def page_check(label: str, port: int, needs: Optional[str]):
+def page_check(label: str, port: int, needs: Optional[str], radio: bool = False):
     def check(env: Env) -> Optional[Line]:
         if needs and not env.installed(needs):
             return None
@@ -1386,6 +1413,8 @@ def page_check(label: str, port: int, needs: Optional[str]):
         status, why = env.http(url + '/')
         if status == 200:
             return Line(OK, label, f'{url} answers')
+        if radio and radiod_dormant(env):
+            return Line(WAIT, label, f'{url} does not answer; {RADIOD_DORMANT}')
         return Line(FAIL, label, f'{url} does not answer: '
                                  f'{why or f"status {status}"}')
     return check
@@ -1426,6 +1455,7 @@ def receivers_line(env: Env) -> Optional[Line]:
     if not recs:
         return None         # no list: the host looks as it did before
     parts, worst = [], OK
+    dormant = radiod_dormant(env)
     for r in recs:
         clients = receivers.effective_clients(r, _REPORTER_KEYED)
         if not r.clients:   # the default set: only what this host installs
@@ -1441,13 +1471,18 @@ def receivers_line(env: Env) -> Optional[Line]:
         if down:
             part += f' ({", ".join(down)} down)'
         parts.append(part)
-        if up == 0:
+        if up == 0 and dormant:
+            worst = WAIT if worst != FAIL else worst
+        elif up == 0:
             worst = FAIL
         elif down and worst != FAIL:
             worst = WAIT
     if not parts:
         return Line(ABSENT, label, 'no recorder installed for the listed receivers')
-    return Line(worst, label, '; '.join(parts))
+    text = '; '.join(parts)
+    if dormant:
+        text += f'; {RADIOD_DORMANT}'
+    return Line(worst, label, text)
 
 
 # ---------------------------------------------------------------------------
@@ -1579,6 +1614,6 @@ CHECKS: List[Tuple[str, Callable[[Env], Optional[Line]]]] = [
     ('drift', drift_line),
     ('uploads', uploads_line),
     ('meteor scatter', meteor_line),
-    *[(label, mag_page_line if label == MAG_PAGE else page_check(label, port, needs))
+    *[(label, mag_page_line if label == MAG_PAGE else page_check(label, port, needs, radio=(label == RECEIVER_PAGE)))
       for label, port, needs in PAGES],
 ]
