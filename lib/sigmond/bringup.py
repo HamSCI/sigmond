@@ -213,7 +213,8 @@ def build_plan(profile, *, local_radiod: bool,
                hold_uploads: bool = False,
                receivers_declared: bool = False,
                local_receivers=(),
-               local_only=frozenset()) -> Plan:
+               local_only=frozenset(),
+               release_list: Optional[str] = None) -> Plan:
     """Pure: a profile + radiod locality -> the ordered Step list.
 
     ``local_radiod`` gates the entire radiod stack (infra, ka9q-radio, tuning,
@@ -267,6 +268,11 @@ def build_plan(profile, *, local_radiod: bool,
     loops run over them instead of ``reporter``.  ``local_only`` names the
     reporter IDs whose instances get ``config upload ... --off`` (receivers
     that do not upload, such as one sharing another's antenna).
+
+    ``release_list`` (an absolute path, `smd bringup --release-list`) is
+    appended as ``--release-list <path>`` to every ``smd install`` step, so
+    each install checks out the commits that list names.  None leaves the
+    plan exactly as it was.
     """
     deferring = bool(sdr_absent and local_radiod)
     # (status_dns, reporter_id, clients or None); None means every bound client.
@@ -692,10 +698,11 @@ def build_plan(profile, *, local_radiod: bool,
                               argv=[smd, 'start', '--components', client]))
 
     if radiod_only:
-        return _radiod_only_stage4(profile, steps, local_radiod=local_radiod,
-                                   deferring=deferring, skip=skip,
-                                   with_optional=with_optional, smd=smd,
-                                   remote_radiods=remote_radiods)
+        return _with_release_list(release_list, _radiod_only_stage4(
+            profile, steps, local_radiod=local_radiod,
+            deferring=deferring, skip=skip,
+            with_optional=with_optional, smd=smd,
+            remote_radiods=remote_radiods))
 
     # Re-render the site profile now that stages 1-3 created every client's
     # config: this pushes the PSWS station/instrument ids from
@@ -845,9 +852,21 @@ def build_plan(profile, *, local_radiod: bool,
                                   'bring-up completes when it is plugged in '
                                   '(or run `smd bringup` again)', 'note'))
 
-    return Plan(profile=profile.name, local_radiod=local_radiod,
-                remote_radiods=remote_radiods, steps=steps,
-                sdr_absent=deferring, hold_uploads=hold_uploads)
+    return _with_release_list(release_list, Plan(
+        profile=profile.name, local_radiod=local_radiod,
+        remote_radiods=remote_radiods, steps=steps,
+        sdr_absent=deferring, hold_uploads=hold_uploads))
+
+
+def _with_release_list(release_list: Optional[str], plan: Plan) -> Plan:
+    """Append ``--release-list <path>`` to each ``smd install`` step.
+    ``argv[1] == 'install'`` marks one (``argv[0]`` is smd itself; the
+    coreutils ``install -d`` step has 'install' at ``argv[0]``)."""
+    if release_list:
+        for step in plan.steps:
+            if step.argv[1:2] == ['install']:
+                step.argv = [*step.argv, '--release-list', release_list]
+    return plan
 
 
 def _radiod_only_stage4(profile, steps: list, *, local_radiod: bool,

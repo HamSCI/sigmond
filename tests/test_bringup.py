@@ -587,3 +587,40 @@ def test_a_client_plan_tunes_the_host_before_any_client_starts():
                         if s.kind in ('install', 'configure')
                         and s.label.split()[-1] in _client().clients)
     assert tune[0] < first_client
+
+
+# --- --release-list rides on every install step ------------------------------
+
+_RL_ABS = '/srv/release/components.toml'
+
+
+def _plan_variants():
+    from sigmond.catalog import Profile
+    radiod_only = Profile(name='radiod-only', clients=(),
+                          local_radiod_infra=('igmp-querier',),
+                          optional=('ka9q-web',))
+    return [
+        (_dasi2(), dict(local_radiod=True, with_optional=True)),
+        (_dasi2(), dict(local_radiod=True, sdr_absent=True)),
+        (_dasi2(), dict(local_radiod=False,
+                        remote_radiods=[('x-status.local', 'AC0G/X')])),
+        (radiod_only, dict(local_radiod=True, with_optional=True)),
+    ]
+
+
+def test_bringup_plan_forwards_release_list():
+    for prof, kw in _plan_variants():
+        p = build_plan(prof, release_list=_RL_ABS, **kw)
+        installs = [s for s in p.steps if s.argv[1:2] == ['install']]
+        assert installs, prof.name
+        for s in installs:
+            assert s.argv[-2:] == ['--release-list', _RL_ABS], s.argv
+
+
+def test_bringup_plan_without_list_unchanged():
+    for prof, kw in _plan_variants():
+        plain = build_plan(prof, **kw)
+        none = build_plan(prof, release_list=None, **kw)
+        assert [s.argv for s in plain.steps] == [s.argv for s in none.steps]
+        for s in plain.steps:
+            assert '--release-list' not in s.argv
