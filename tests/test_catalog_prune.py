@@ -227,3 +227,45 @@ def test_tables_the_prune_does_not_compare_round_trip(tmp_path):
     after = tomllib.loads(op.read_text())
     del before['client']
     assert after == before
+
+
+# -- final review I5: what the prune writes must read back as what it meant --
+
+def test_newline_tab_and_control_chars_round_trip(tmp_path):
+    import tomllib
+    repo = tmp_path / 'repo.toml'
+    repo.write_text('[client.foo]\nkind = "client"\ndescription = "x"\n')
+    op = tmp_path / 'op.toml'
+    op.write_text('[client.foo]\nkind = "client"\n'
+                  'description = "line one\\nline two\\ttab\\r\\u0001\\u007f end"\n')
+    want = tomllib.loads(op.read_text())['client']['foo']['description']
+    prune_operator_catalog(op, repo)
+    got = tomllib.loads(op.read_text())
+    assert got == {'client': {'foo': {'description': want}}}
+
+
+def test_odd_table_and_key_names_round_trip(tmp_path):
+    import tomllib
+    repo = tmp_path / 'repo.toml'
+    repo.write_text('[client.foo]\nkind = "client"\n')
+    op = tmp_path / 'op.toml'
+    op.write_text('[client.foo]\nkind = "client"\n'
+                  '[client."my.client"]\n"odd key" = "v"\nkind = "client"\n')
+    prune_operator_catalog(op, repo)
+    assert tomllib.loads(op.read_text()) == {
+        'client': {'my.client': {'odd key': 'v', 'kind': 'client'}}}
+
+
+def test_render_that_does_not_read_back_refuses_the_write(tmp_path, monkeypatch):
+    from sigmond import catalog_prune
+    repo = tmp_path / 'repo.toml'
+    repo.write_text('[client.foo]\nkind = "client"\n')
+    op = tmp_path / 'op.toml'
+    body = '[client.foo]\nkind = "client"\nrepo = "git@fork:foo"\n'
+    op.write_text(body)
+    monkeypatch.setattr(catalog_prune, '_render_minimal',
+                        lambda sections: '[client.foo]\nrepo = "something else"\n')
+    with pytest.raises(ValueError):
+        prune_operator_catalog(op, repo)
+    assert op.read_text() == body
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['op.toml', 'repo.toml']

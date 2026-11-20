@@ -408,3 +408,44 @@ def test_retire_never_replaces_an_existing_name(tmp_path, monkeypatch):
     assert (tmp_path / "x.retired").read_text() == "old\n"
     assert (tmp_path / "x.retired.1").read_text() == "new\n"
     assert not src.exists()
+
+
+# -- final review I5 / M5 ----------------------------------------------------
+
+def test_align_prune_refuses_a_render_that_does_not_read_back(tmp_path):
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    op, repo = etc / "catalog.toml", tmp_path / "repo-catalog.toml"
+    op.write_text(OP_CAT)
+    repo.write_text(REPO_CAT)
+    lines = []
+    with mock.patch.object(catalog_prune, "OPERATOR_CATALOG", op), \
+         mock.patch.object(catalog_prune, "REPO_CATALOG", repo), \
+         mock.patch.object(catalog_prune, "_render_minimal",
+                           lambda sections: "[client.zzz]\nrepo = 'x'\n"):
+        rc = smd._align_catalog_prune(True, say=lines.append)
+    assert rc == 1
+    assert len(lines) == 1, lines
+    assert op.read_text() == OP_CAT
+    assert sorted(p.name for p in etc.iterdir()) == ["catalog.toml"]
+
+
+def test_symlinked_operator_catalog_is_left_as_it_is(tmp_path):
+    """Final review M5: a symlinked /etc/sigmond/catalog.toml is refused
+    with one warning, and the dry run does not stay at rc 1 for it."""
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    real = tmp_path / "real.toml"
+    real.write_text(OP_CAT)
+    op, repo = etc / "catalog.toml", tmp_path / "repo-catalog.toml"
+    op.symlink_to(real)
+    repo.write_text(REPO_CAT)
+    with mock.patch.object(catalog_prune, "OPERATOR_CATALOG", op), \
+         mock.patch.object(catalog_prune, "REPO_CATALOG", repo):
+        for apply in (False, True):
+            lines = []
+            assert smd._align_catalog_prune(apply, say=lines.append) == 0
+            assert len(lines) == 1 and "symlink" in lines[0], lines
+            assert lines[0].isascii()
+    assert real.read_text() == OP_CAT
+    assert op.is_symlink()

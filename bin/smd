@@ -9804,10 +9804,20 @@ def _align_catalog_prune(apply: bool, *, say=print) -> int:
     overwritten).  Tables the prune does not compare stay verbatim.
     A field that differs stays, and drift reports it until the operator
     removes it.  The dry run names the count.  Returns 1 when the dry run
-    finds copies or the prune fails, else 0."""
+    finds copies or the prune fails, else 0.
+
+    A symlink at the operator path is the operator's: the prune never
+    reads or writes through one, so it stays as it is, with one line, and
+    counts as nothing to do (final review M5); otherwise the dry run would
+    exit 1 on it for good.  A render that would not read back as the
+    entries kept refuses the write (one line, 1)."""
     from sigmond import catalog_prune as cp
     op, repo = cp.OPERATOR_CATALOG, cp.REPO_CATALOG
     if not os.path.lexists(op) or not Path(repo).exists():
+        return 0
+    if os.path.islink(op):
+        say(f'  {op}: left as it is: a symlink (-> {os.readlink(op)}); the '
+            f'catalog prune never reads or writes through one')
         return 0
     try:
         _minimal, report = cp.compute_minimal_operator(op, repo)

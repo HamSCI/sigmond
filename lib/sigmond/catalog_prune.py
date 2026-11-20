@@ -28,7 +28,9 @@ for reading but no writer in 3.11).  It only needs to handle string,
 int, and list-of-string values — that's the entire catalog schema.
 
 Backup: a ``.bak`` snapshot is written before the operator file is
-rewritten or removed, in case the prune is wrong about a value.
+rewritten or removed, in case the prune is wrong about a value.  Before
+either, the rendered file is parsed back and compared with what the prune
+meant to keep; on any difference nothing is written (ValueError).
 
 Root runs this (install.sh, ``smd align --apply``), so the operator file
 is read, and the file and its ``.bak`` written, through
@@ -152,6 +154,10 @@ def compute_minimal_operator(operator_path: Path = OPERATOR_CATALOG,
     return minimal, report
 
 
+_ESCAPES = {'\\': '\\\\', '"': '\\"', '\n': '\\n', '\t': '\\t',
+            '\r': '\\r', '\b': '\\b', '\f': '\\f'}
+
+
 def _format_toml_value(value) -> str:
     """Emit a TOML scalar/list-of-scalars.  Only handles the value
     shapes the catalog schema uses (str, int, list[str])."""
@@ -162,10 +168,12 @@ def _format_toml_value(value) -> str:
     if isinstance(value, float):
         return repr(value)
     if isinstance(value, str):
-        # Backslash-escape, then wrap in double quotes — sufficient for
-        # repo URLs, descriptions, and the rest of the schema.
-        escaped = value.replace('\\', '\\\\').replace('"', '\\"')
-        return f'"{escaped}"'
+        # A TOML basic string: backslash, quote and every control
+        # character escaped, so a newline in a value cannot end the line
+        # (final review I5).
+        return '"' + ''.join(_ESCAPES.get(c) or (
+            f'\\u{ord(c):04x}' if ord(c) < 0x20 or ord(c) == 0x7f else c)
+            for c in value) + '"'
     if isinstance(value, (list, tuple)):
         return '[' + ', '.join(_format_toml_value(v) for v in value) + ']'
     raise TypeError(f"unsupported TOML value type: {type(value).__name__}")
@@ -175,9 +183,9 @@ def _format_block(section: str, name: str, block: dict) -> str:
     """Emit ``[section.name]`` plus key=value lines.  Keys are written
     in insertion order; tomllib preserves the source order so the
     result mirrors what the operator wrote."""
-    out = [f'[{section}.{name}]']
+    out = [f'[{section}.{_bare_key(name)}]']
     for key, value in block.items():
-        out.append(f'{key} = {_format_toml_value(value)}')
+        out.append(f'{_bare_key(key)} = {_format_toml_value(value)}')
     return '\n'.join(out) + '\n'
 
 
@@ -257,6 +265,27 @@ def _render_minimal(sections: dict[str, dict[str, dict]]) -> str:
     return ''.join(parts).rstrip() + '\n'
 
 
+def _intended(sections: dict) -> dict:
+    """What tomllib should read back from ``_render_minimal(sections)``."""
+    want = dict(sections.get(OTHER) or {})
+    for section in SECTIONS:
+        if sections.get(section):
+            want[section] = {n: dict(b) for n, b in sections[section].items()}
+    return want
+
+
+def _check_reads_back(rendered: str, sections: dict) -> None:
+    """Raise ValueError unless ``rendered`` parses to exactly ``sections``."""
+    try:
+        got = tomllib.loads(rendered)
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(f'the pruned catalog would not parse ({exc}); '
+                         f'left as it is') from None
+    if got != _intended(sections):
+        raise ValueError('the pruned catalog would not read back as the '
+                         'entries it keeps; left as it is')
+
+
 def _free_name(path: Path) -> Path:
     """``path``, or ``path.1``, ``path.2`` ... : the first name nothing
     stands at (a dangling link counts as standing there)."""
@@ -295,6 +324,14 @@ def prune_operator_catalog(operator_path: Path = OPERATOR_CATALOG,
     if dry_run:
         return report
 
+    # Final review I5: what is written must read back as what the prune
+    # meant to keep.  Checked before the backup, so a refusal leaves no
+    # trace and the file as it was.
+    rendered = None
+    if has_content:
+        rendered = _render_minimal(minimal)
+        _check_reads_back(rendered, minimal)
+
     # Backup before any destructive write.  Both reads and writes refuse
     # to follow a link (module docstring).
     original = read_nofollow(operator_path)
@@ -312,8 +349,7 @@ def prune_operator_catalog(operator_path: Path = OPERATOR_CATALOG,
         report.removed_file = True
         return report
 
-    write_owned(operator_path, _render_minimal(minimal), mode=0o644,
-                owner_from_dir=False)
+    write_owned(operator_path, rendered, mode=0o644, owner_from_dir=False)
     return report
 
 
