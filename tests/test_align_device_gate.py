@@ -104,7 +104,7 @@ def _drive(*, ready, samples=False, dry=False, no_restart=False, quiet=False,
            enabled_units=None, active_units=None, topology=None,
            gated=None, exceptions=None, gmag_unit="current", gmag_device=True,
            gpsdo_location=False, result=None, masked=(), gmag_masked=False,
-           runs=1, call=None):
+           runs=1, call=None, sighting=False, queued_zip=False):
     """Run cmd_align.  ``ready`` maps component -> True/False/None;
     ``samples`` writes a mag-recorder sample file (the magnetometer has
     delivered before).  Returns (FakeSystemd, output, topology dict,
@@ -112,7 +112,10 @@ def _drive(*, ready, samples=False, dry=False, no_restart=False, quiet=False,
     text ("current": sigmond's render now; None: not installed);
     ``gmag_device`` whether /dev/ttyMAG0 exists; ``gpsdo_location`` whether
     the station's location came from a GPSDO.  ``result``, a dict, gets
-    the gmag-webui unit text after the run."""
+    the gmag-webui unit text after the run, and the sighting records
+    sigmond holds then.  ``sighting``: sigmond recorded the magnetometer
+    present before (/var/lib/sigmond/purpose); ``queued_zip``: a packaged
+    OBS zip waits in mag-recorder's upload queue."""
     topology = dict(topology or {"mag-recorder": True, "gmag-webui": True,
                                  "hf-timestd": True})
     sysd = FakeSystemd(
@@ -167,8 +170,19 @@ def _drive(*, ready, samples=False, dry=False, no_restart=False, quiet=False,
         spool.mkdir()
         if samples:
             (spool / "samples-2026-11-01.jsonl").write_text('{"ts": "x"}\n')
+        queue = base / "upload"
+        queue.mkdir()
+        if queued_zip:
+            (queue / "OBS2026-11-01T00:00.zip").write_text("zip")
         mag_cfg = base / "mag-recorder-config.toml"
-        mag_cfg.write_text(f'[paths]\nspool_dir = "{spool}"\n')
+        mag_cfg.write_text(f'[paths]\nspool_dir = "{spool}"\n'
+                           f'upload_queue_dir = "{queue}"\n')
+        purpose = base / "purpose"
+        if sighting:
+            purpose.mkdir()
+            (purpose / "mag-recorder.magnetometer").write_text(
+                'last_present = "2026-11-01T00:00:00Z"\n')
+        st.enter_context(mock.patch("sigmond.drift.devices.PURPOSE_DIR", purpose))
         exc = base / "drift-exceptions.toml"
         if exceptions is not None:
             exc.write_text(exceptions)
@@ -216,6 +230,8 @@ def _drive(*, ready, samples=False, dry=False, no_restart=False, quiet=False,
                               if gmag_path.exists() and not gmag_path.is_symlink()
                               else None)
             result["render"] = gmag_webui.render_unit(checkout=base / "gmag-webui")
+            result["sightings"] = (sorted(p.name for p in purpose.iterdir())
+                                   if purpose.is_dir() else [])
     return sysd, out.getvalue(), topology, asked
 
 
@@ -673,11 +689,53 @@ def test_dry_run_names_no_enable_for_a_client_it_would_switch_off():
     magnetometer was ever seen.  --apply switches it off first, and then
     enables nothing of it; the dry run must say the same."""
     enabled = [u for u in _ALL_UNITS if u != "mag-recorder-upload.timer"]
-    sysd, out, _, _ = _drive(ready={"mag-recorder": False, "gmag-webui": True},
+    sysd, out, _, _ = _drive(ready={"mag-recorder": False, "gmag-webui": False},
                              dry=True, enabled_units=enabled)
     assert "would switch off mag-recorder" in out, out
     assert "would enable mag-recorder-upload.timer" not in out, out
-    sysd, out, _, _ = _drive(ready={"mag-recorder": False, "gmag-webui": True},
+    sysd, out, _, _ = _drive(ready={"mag-recorder": False, "gmag-webui": False},
                              enabled_units=enabled)
     assert "switched off mag-recorder" in out, out
     assert ["systemctl", "enable", "mag-recorder-upload.timer"] not in sysd.calls
+
+
+# --- final review M6: a sighting record outlives the spool's 7 days ----------
+
+def test_spool_trimmed_but_sighting_recorded_faults_not_switches_off():
+    sysd, out, _, _ = _drive(ready={"mag-recorder": False, "gmag-webui": False},
+                             sighting=True)
+    assert not [c for c in _mutating(sysd.calls) if c[1] in ("disable", "stop")], out
+    assert f"{MAG} missing; mag-recorder has recorded from it before" in out
+
+
+def test_queued_obs_zip_counts_as_seen():
+    sysd, out, _, _ = _drive(ready={"mag-recorder": False, "gmag-webui": False},
+                             queued_zip=True)
+    assert not [c for c in _mutating(sysd.calls) if c[1] in ("disable", "stop")], out
+    assert f"{MAG} missing; mag-recorder has recorded from it before" in out
+
+
+def test_present_device_leaves_a_sighting_record():
+    result = {}
+    _drive(ready={"mag-recorder": True, "gmag-webui": True,
+                  "gpsdo-monitor": None}, result=result)
+    assert "mag-recorder.magnetometer" in result["sightings"]
+
+
+def test_dry_run_writes_no_sighting_record():
+    result = {}
+    _drive(ready={"mag-recorder": True, "gmag-webui": True}, dry=True, result=result)
+    assert result["sightings"] == []
+
+
+def test_sighting_record_is_written_without_following_a_link(tmp_path):
+    from sigmond.drift import devices
+    purpose = tmp_path / "purpose"
+    purpose.mkdir()
+    victim = tmp_path / "victim"
+    victim.write_text("precious\n")
+    (purpose / "mag-recorder.magnetometer").symlink_to(victim)
+    with mock.patch.object(devices, "PURPOSE_DIR", purpose):
+        devices.record_sighting("gmag-webui")
+    assert victim.read_text() == "precious\n"
+    assert not (purpose / "mag-recorder.magnetometer").is_symlink()

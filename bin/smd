@@ -9274,6 +9274,10 @@ def _align_follow_devices(apply: bool, *, say=print, start: bool = True,
       explicit operator verb: hardware appearing alone starts nothing).
     * None: no change; one info line.
 
+    With --apply, a device that reads present also leaves sigmond's
+    sighting record (`drift.devices.record_sighting`), which
+    `seen_before` reads.
+
     A component any of whose units a live `unit:` drift exception covers,
     or that systemd reads masked, stays as it is; an exceptions file that cannot be read switches
     nothing.  Without ``start`` (--no-restart) nothing is stopped or
@@ -9310,6 +9314,11 @@ def _align_follow_devices(apply: bool, *, say=print, start: bool = True,
         if ready is None:
             say(f'  {name}: {label} presence unknown; left as it is')
             continue
+        if ready is True and apply:
+            # Final review M6: the record outlives the client's own output
+            # (mag-recorder's 7-day spool), so a device lost for longer
+            # still reads "seen before": a fault, never a switch-off.
+            devices.record_sighting(name)
         if ready is False and devices.seen_before(name):
             say(f'  {name}: {devices.missing_detail(name, label)}; left as it '
                 f'is (a fault in smd check)')

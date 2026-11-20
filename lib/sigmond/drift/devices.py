@@ -8,12 +8,21 @@ on another machine (B2, KFS-MAIN, SIGMA behind B4).
 
 "Seen before" means the client has produced output from the device at
 least once (docs/superpowers/specs/2026-11-19-run-with-purpose-design.md,
-"What each decision does").  v3.94 reads only the client's past output:
+"What each decision does").  Two sources, either one counts:
+
+* sigmond's own sighting record, ``/var/lib/sigmond/purpose/<client>.<input>``
+  (``record_sighting``), which `smd align --apply` writes, through
+  safe_write, each time it reads the device present.  It outlives the
+  client's output: mag-recorder keeps its spool 7 days, so without it a
+  magnetometer lost for a week read "never seen" and its clients
+  switched off (final review M6).
+* the client's past output:
 
 * mag-recorder: a ``samples-*.jsonl`` file under its ``[paths] spool_dir``
   (/etc/mag-recorder/mag-recorder-config.toml; default
-  /var/lib/mag-recorder).  A config or spool that cannot be read counts
-  as seen.
+  /var/lib/mag-recorder), or a packaged ``OBS*.zip`` held in its
+  ``[paths] upload_queue_dir`` (default /var/lib/mag-recorder/upload).  A
+  config or directory that cannot be read counts as seen.
 * gmag-webui: mag-recorder's evidence (the same magnetometer).
 * gpsdo-monitor: the station's location came from a GPSDO read here.
   Its own record of a fix, /run/gpsdo/<serial>.json, lives on tmpfs and
@@ -39,6 +48,8 @@ from sigmond.drift.model import Item
 
 MAG_CONFIG = Path("/etc/mag-recorder/mag-recorder-config.toml")
 MAG_SPOOL_DEFAULT = Path("/var/lib/mag-recorder")
+# sigmond's own record of each device read present (final review M6)
+PURPOSE_DIR = Path("/var/lib/sigmond/purpose")
 
 # Never gated on local USB, even if a catalog layer marks it.
 NEVER_GATED = frozenset({"hf-timestd"})
@@ -58,37 +69,92 @@ def gated_components(catalog) -> dict:
     return out
 
 
-def mag_spool_dir():
-    """mag-recorder's ``[paths] spool_dir``, or its default when the config
-    is absent or names none.  None when the config exists but cannot be
-    read or parsed: then the spool is unknown."""
+# The input each client's sighting record names.
+SIGHTING_INPUT = {"mag-recorder": "magnetometer", "gpsdo-monitor": "gpsdo"}
+
+
+def _mag_path(key: str, default: Path):
+    """A mag-recorder ``[paths]`` entry, or its default when the config is
+    absent or names none.  None when the config exists but cannot be read
+    or parsed: then the directory is unknown."""
     try:
         with open(MAG_CONFIG, "rb") as f:
             cfg = tomllib.load(f)
     except FileNotFoundError:
-        return MAG_SPOOL_DEFAULT
+        return default
     except (OSError, tomllib.TOMLDecodeError):
         return None
-    spool = (cfg.get("paths") or {}).get("spool_dir")
-    return Path(spool) if isinstance(spool, str) and spool else MAG_SPOOL_DEFAULT
+    value = (cfg.get("paths") or {}).get(key)
+    return Path(value) if isinstance(value, str) and value else default
+
+
+def mag_spool_dir():
+    """mag-recorder's ``[paths] spool_dir`` (``_mag_path``)."""
+    return _mag_path("spool_dir", MAG_SPOOL_DEFAULT)
+
+
+def mag_upload_queue_dir():
+    """mag-recorder's ``[paths] upload_queue_dir`` (``_mag_path``)."""
+    return _mag_path("upload_queue_dir", MAG_SPOOL_DEFAULT / "upload")
+
+
+def sighting_path(name: str) -> Optional[Path]:
+    """sigmond's sighting record for ``name``'s device, or None for a
+    client that has none."""
+    name = EVIDENCE_OF.get(name, name)
+    what = SIGHTING_INPUT.get(name)
+    return PURPOSE_DIR / f"{name}.{what}" if what else None
+
+
+def record_sighting(name: str, now=None) -> bool:
+    """Record that ``name``'s device read present now: one TOML line,
+    0644, written through safe_write (a link at the record is replaced,
+    never followed; a linked directory is refused).  Root only, under
+    `smd align --apply`.  Returns False when it could not be written."""
+    from datetime import datetime, timezone
+    from sigmond.safe_write import write_owned
+    path = sighting_path(name)
+    if path is None:
+        return False
+    at = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        if not os.path.lexists(path.parent):
+            os.mkdir(path.parent, 0o755)
+        write_owned(path, f'last_present = "{at}"\n', mode=0o644,
+                    owner_from_dir=False)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _has(dirpath, match) -> Optional[bool]:
+    """Whether ``dirpath`` holds a name ``match`` accepts; None when it
+    cannot be read (cannot rule it out), False when it is absent."""
+    if dirpath is None:
+        return None
+    try:
+        names = os.listdir(dirpath)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    return any(match(n) for n in names)
 
 
 def seen_before(name: str) -> bool:
     """True when ``name`` has recorded from its device here before, or
     when that cannot be ruled out (the module docstring)."""
     name = EVIDENCE_OF.get(name, name)
+    record = sighting_path(name)
+    if record is not None and os.path.isfile(record):
+        return True
     if name == "mag-recorder":
-        spool = mag_spool_dir()
-        if spool is None:
-            return True       # config unreadable: cannot rule it out
-        try:
-            names = os.listdir(spool)
-        except FileNotFoundError:
-            return False
-        except OSError:
-            return True       # unreadable: cannot rule it out
-        return any(n.startswith("samples-") and n.endswith(".jsonl")
-                   for n in names)
+        samples = _has(mag_spool_dir(), lambda n: n.startswith("samples-")
+                       and n.endswith(".jsonl"))
+        zips = _has(mag_upload_queue_dir(), lambda n: n.startswith("OBS")
+                    and n.endswith(".zip"))
+        # Unreadable (None) cannot rule it out, so it counts as seen.
+        return samples is not False or zips is not False
     if name == "gpsdo-monitor":
         return gpsdo_location_recorded()
     return True
