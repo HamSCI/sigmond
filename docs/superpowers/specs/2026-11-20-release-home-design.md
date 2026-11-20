@@ -114,7 +114,8 @@ the image.  Their URLs change to sigmond-proxmox.
 
 A rig script, `test-bare-metal.sh` (sigmond-proxmox, beside the nested tests), boots a fresh Debian 13 cloud
 VM on the rig, runs `docs/install-bare-metal.md`'s commands extracted from the doc itself (so the doc cannot
-drift from the test), at the sigmond tag under test, then `smd bringup dasi2 --non-interactive`, and passes
+drift from the test), at the sigmond tag under test, then the bring-up command that version ships (today `smd bringup dasi2
+--non-interactive`; from v3.95 the sensed bring-up, which Rob agreed 2026-11-20), and passes
 when every topology-enabled component without hardware reads dormant and the rest healthy (`smd check`
 exit 0 or only dormant lines).  It writes a record bless reads.
 
