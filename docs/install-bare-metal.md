@@ -10,7 +10,7 @@
 
 This guide installs sigmond from its repositories onto a Debian machine you already run: no USB
 image, no Proxmox.  You keep the machine and its operating system; sigmond adds a station to it.
-The README's [Quick start](../README.md#quick-start) holds the same commands with more detail on
+[install-step-by-step.md](install-step-by-step.md) holds the same commands with more detail on
 each; this page puts them in order and says what each one does to your machine.
 
 ## 1. Before you start
@@ -81,7 +81,7 @@ What bring-up does to your machine:
   bring-up again, and reboot.
 - **It sets up remote access** (`sigmond-rac activate`), so the machine can be reached for
   support.  `smd remote status` shows it; `smd remote off` turns it off.  See the README's
-  [remote access notes](../README.md#2-bring-up-the-station).
+  [remote access notes](install-step-by-step.md#2-bring-up-the-station).
 
 ## 4. Tell PSWS who you are
 
@@ -159,7 +159,7 @@ an existing station:
 smd admin sources bind ac0g-b1-a-status.local --reporter AC0G/B1A [--timing]
 ```
 
-The README's [Decode-only host](../README.md#decode-only-host) section covers the choices.
+[Decode-only host](install-step-by-step.md#decode-only-host) section covers the choices.
 
 ## 8. Keep the station current
 
@@ -198,7 +198,7 @@ packages.  After a kernel update, reboot as usual; radiod and the clients start 
   storage ledger (`sigmond-storage.timer`) asks clients to trim when a store fills.  To keep raw IQ
   longer, attach a USB archive drive with `smd archive add` (it erases the drive); hf-timestd's
   archiver then copies raw IQ to it.  `smd archive status` shows the result.
-- Day-to-day commands: the README's [Command reference](../README.md#command-reference).
-- Something wrong: `smd admin diag`, and the README's [Debugging](../README.md#debugging) section.
-- Adding a client later: the README's
-  [Adding a discretionary client later](../README.md#adding-a-discretionary-client-later).
+- Day-to-day commands: [the command reference](COMMANDS.md#command-reference).
+- Something wrong: `smd admin diag`, and [Debugging](COMMANDS.md#debugging).
+- Adding a client later: 
+  [Adding a discretionary client later](COMMANDS.md#adding-a-discretionary-client-later).
