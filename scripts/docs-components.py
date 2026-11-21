@@ -42,6 +42,10 @@ OWNED_ELSEWHERE = {"ft8_lib": "https://github.com/ka9q/ft8_lib"}
 # (tests/test_docs_components.py checks it).
 UPSTREAM = {"ka9q-radio", "ka9q-web", "onion", "ubersdr_wsprd", "wsjtx", "ft8_lib"}
 
+# Our components whose repository has no docs/INDEX.md yet (checked against
+# GitHub 2026-11-21).  Every other one of ours links its INDEX.
+NO_INDEX = {"gmag-webui"}
+
 GROUPS = ("core client", "additional client", "station infrastructure",
           "radio", "library", "native build", "image", "other")
 
@@ -112,17 +116,21 @@ def table() -> str:
     rs = rows()
     version = rs[0]["version"] if rs else ""
     lines = [BEGIN, "",
-             f"| Component | Group | What it does | Repository | In {version} |",
-             "|---|---|---|---|---|"]
+             f"| Component | Group | What it does | Repository | Docs | In {version} |",
+             "|---|---|---|---|---|---|"]
     for r in rs:
-        # The repository only, for now: a docs/INDEX.md link waits until every
-        # repo carries one (ledger docs-organization, step 3).
         where = (f"[{r['url'].split('github.com/')[-1]}]({r['url']})"
                  if r["url"] else "")
+        if not r["url"]:
+            docs = ""
+        elif r["name"] in UPSTREAM or r["name"] in NO_INDEX:
+            docs = f"[README]({r['url']}#readme)"
+        else:
+            docs = f"[INDEX]({r['url']}/blob/main/docs/INDEX.md)"
         pin = f"`{r['pin'][:8]}`" if r["pin"] else "not yet released"
         what = r["what"].replace("|", "\\|")
         group = r["group"] + (", upstream" if r["name"] in UPSTREAM else "")
-        lines.append(f"| **{r['name']}** | {group} | {what} | {where} | {pin} |")
+        lines.append(f"| **{r['name']}** | {group} | {what} | {where} | {docs} | {pin} |")
     lines += ["", END]
     return "\n".join(lines) + "\n"
 
