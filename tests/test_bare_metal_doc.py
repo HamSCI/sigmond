@@ -180,3 +180,37 @@ def test_main_cli(tmp_path, capsys):
     assert bmd.main(["judge", "--check-json", str(j)]) == 0
     j.write_text(json.dumps(_doc(PSK=("ok", "x"))))
     assert bmd.main(["judge", "--check-json", str(j)]) == 1
+
+
+# The judge over the real check lines of bare-metal v3.94 run 2 (no SDR):
+# GRAPE with no hf-timestd config and the first-install upload hold both
+# wait on the dormant radiod, so the run passes; a radiod that failed
+# instead makes them, and so the run, FAIL.
+
+def _run2_doc(radiod_state):
+    from sigmond.bringup import UPLOAD_HOLD_REASON
+    from sigmond.commands import check
+    from sigmond.coordination import Coordination, Uploads
+    from tests.check_fakes import make_env, svc
+
+    def service(pattern):
+        return svc(radiod_state if pattern == check.RADIOD_UNITS else 'inactive',
+                   None, enabled=False)
+    env = make_env(service=service, sdr_present=lambda: False,
+                   timestd_config=lambda: None,
+                   coordination=lambda: Coordination(
+                       uploads=Uploads(mode='hold', reason=UPLOAD_HOLD_REASON)))
+    lines = [check.psk_line(env), check.wspr_line(env), check.meteor_line(env),
+             check.grape_line(env), check.uploads_line(env)]
+    return {"lines": [check.json_line(ln) for ln in lines]}
+
+
+def test_judge_passes_run2_once_its_waits_read_dormant():
+    assert bmd.judge_check(_run2_doc('inactive')) == (True, [])
+
+
+def test_judge_still_fails_run2_when_radiod_failed():
+    ok, why = bmd.judge_check(_run2_doc('failed'))
+    assert not ok
+    assert any(w.startswith('GRAPE: FAIL') for w in why)
+    assert any(w.startswith('uploads: FAIL') for w in why)

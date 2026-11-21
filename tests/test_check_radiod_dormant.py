@@ -201,3 +201,66 @@ def test_real_hub_only_bus_is_dormant(monkeypatch):
     env = _env(service=lambda p: svc('inactive', None, enabled=False),
                sdr_present=check._sdr_present)
     assert check.psk_line(env).mark == check.WAIT
+
+
+# --------------------------------------------------------------------------
+# Bare-metal v3.94 run 2 (2026-11-21): a PARTIAL bring-up (no SDR) defers
+# hf-timestd's config, and the first install holds uploads until checks pass.
+# While radiod reads dormant both wait; otherwise both keep their FAIL.
+# --------------------------------------------------------------------------
+
+def test_grape_with_no_config_waits_on_dormant_radiod():
+    line = check.grape_line(_env(timestd_config=lambda: None, **DORMANT))
+    assert line.mark == check.WAIT
+    assert 'hf-timestd has no config at' in line.text
+    assert line.text.endswith(check.RADIOD_DORMANT)
+
+
+@pytest.mark.parametrize("kw", [
+    dict(service=_failed_radiod, sdr_present=lambda: False),
+    dict(service=lambda p: svc('inactive', None, enabled=False), sdr_present=lambda: True),
+    dict(service=lambda p: svc('inactive', None, enabled=False), sdr_present=lambda: None),
+])
+def test_grape_with_no_config_fails_unless_radiod_is_dormant(kw):
+    line = check.grape_line(_env(timestd_config=lambda: None, **kw))
+    assert line.mark == check.FAIL and 'dormant' not in line.text
+    assert 'hf-timestd has no config at' in line.text
+
+
+def _uploads(mode, reason, **kw):
+    from sigmond.coordination import Coordination, Uploads
+    env = make_env(coordination=lambda: Coordination(uploads=Uploads(mode=mode, reason=reason)),
+                   **kw)
+    return check.uploads_line(env)
+
+
+def test_the_first_install_hold_waits_on_dormant_radiod():
+    from sigmond.bringup import UPLOAD_HOLD_REASON
+    line = _uploads('hold', UPLOAD_HOLD_REASON, **DORMANT)
+    assert line.mark == check.WAIT
+    assert line.text.startswith(f'hold ({UPLOAD_HOLD_REASON})')
+    assert line.text.endswith(check.RADIOD_DORMANT)
+
+
+def test_the_first_install_hold_fails_while_radiod_is_not_dormant():
+    from sigmond.bringup import UPLOAD_HOLD_REASON
+    for kw in (dict(service=_failed_radiod, sdr_present=lambda: False),
+               dict(service=lambda p: svc('inactive', None, enabled=False),
+                    sdr_present=lambda: True)):
+        line = _uploads('hold', UPLOAD_HOLD_REASON, **kw)
+        assert line.mark == check.FAIL and 'dormant' not in line.text
+
+
+@pytest.mark.parametrize("mode,reason", [
+    ('hold', 'antenna work'),
+    ('hold', ''),
+    ('discard', 'operator turned it off'),
+])
+def test_any_other_hold_keeps_its_mark_beside_a_dormant_radiod(mode, reason):
+    line = _uploads(mode, reason, **DORMANT)
+    assert line.mark == check.FAIL and 'dormant' not in line.text
+
+
+def test_the_hold_reason_is_bringups_own():
+    from sigmond.bringup import UPLOAD_HOLD_REASON
+    assert check.FIRST_INSTALL_HOLD == UPLOAD_HOLD_REASON

@@ -1029,6 +1029,11 @@ def grape_line(env: Env) -> Line:
         return Line(ABSENT, label, 'not on this station')
     cfg = env.timestd_config()
     if cfg is None:
+        # A bring-up without the SDR defers hf-timestd's config with the rest
+        # of the radio half (bare-metal v3.94 run 2, 2026-11-21).
+        if radiod_dormant(env):
+            return Line(WAIT, label, f'hf-timestd has no config at {TIMESTD_CONFIG}; '
+                                     f'{RADIOD_DORMANT}')
         return Line(FAIL, label, f'hf-timestd has no config at {TIMESTD_CONFIG}.  '
                                  f'Tell the fleet admin.')
     channels = grape_channels(cfg)
@@ -1306,6 +1311,10 @@ def _parse_ts(ts) -> Optional[float]:
     return t.timestamp()
 
 
+# bringup.UPLOAD_HOLD_REASON: the hold a first install from the repos sets.
+FIRST_INSTALL_HOLD = 'first install from the repos: held until checks pass'
+
+
 def uploads_line(env: Env) -> Line:
     label = 'uploads'
     up = env.coordination().uploads
@@ -1317,6 +1326,11 @@ def uploads_line(env: Env) -> Line:
         return Line(FAIL, label, f'off ({reason or "no reason given"}).  '
                                  f'Ask the fleet admin.')
     if up.mode == 'hold':
+        # The first install's own hold waits while radiod sits dormant: the
+        # checks it waits on cannot pass before the SDR (controller's ruling,
+        # bare-metal v3.94 run 2).  Any other hold keeps its FAIL.
+        if reason == FIRST_INSTALL_HOLD and radiod_dormant(env):
+            return Line(WAIT, label, f'hold ({reason}); {RADIOD_DORMANT}')
         return Line(FAIL, label, f'hold ({reason or "no reason given"}).  Ask the fleet admin.')
     backlog = env.backlog()
     if not backlog.get('readable'):
