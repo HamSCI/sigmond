@@ -76,6 +76,7 @@ Front door for each audience: [docs/README.md](README.md).
 | [contributor/docs-gap-ledger.md](contributor/docs-gap-ledger.md) | Running ledger of software gaps discovered while documenting, feeding per-repo issues |
 | [COMPONENTS.md](COMPONENTS.md) ★ | The suite's components, each with its own repository and documentation: the top-level view (moved from the root README; to become a CI-checked table) |
 | [COMMANDS.md](COMMANDS.md) ★ | The `smd` command reference, monitoring and debugging (moved from the root README) |
+| [TUI.md](TUI.md) ★ | The operator's guide to `smd tui`: starting it, the layout, every key, how it runs a change, which screens only read and which change the station, each screen in turn with the `smd` command behind each action, and where its help panel has fallen behind the code |
 | [WHY-PROXMOX.md](WHY-PROXMOX.md) ★ | Why the appliance runs the station in a Proxmox VM, answered by the difference between a bare-metal station and one on a Proxmox host: the way in, the undo and the machine-level care the host adds, and what the second layer costs |
 | [WHY-SIGMOND.md](WHY-SIGMOND.md) ★ | Why sigmond exists, answered by the difference between a stand-alone client and a full sigmond station: what a client keeps on its own, and what it goes without: the station facts, timing, radio care, shared resources and station records sigmond adds around independent clients |
 | [CLIENT-CONTRACT.md](CLIENT-CONTRACT.md) ★ | The sigmond↔component interface contract — the authoritative statement of the integration surface every client implements |
@@ -114,7 +115,7 @@ Front door for each audience: [docs/README.md](README.md).
 | [superpowers/plans/](superpowers/plans/) | Implementation plans (task-by-task) for documentation-program-style work |
 | [METEOR-SCATTER-DESIGN.md](METEOR-SCATTER-DESIGN.md) (pointer) | Redirects to `archive/METEOR-SCATTER-DESIGN.md`; kept because `meteor-scatter/docs/REQUIREMENTS.md` cites its §3/§7 |
 | [PHASE-D-SERVER-MERGE-ENDPOINT.md](PHASE-D-SERVER-MERGE-ENDPOINT.md) (pointer) | Redirects to `archive/PHASE-D-SERVER-MERGE-ENDPOINT.md`; kept because `psk-recorder/docs/REQUIREMENTS.md` links here by URL |
-| [TUI-FUNCTION-INVENTORY.md](TUI-FUNCTION-INVENTORY.md) (pointer) | Redirects to `archive/TUI-FUNCTION-INVENTORY.md`; kept because it's named in `lib/sigmond/tui/widgets/component_tree.py` and a test |
+| [TUI-FUNCTION-INVENTORY.md](TUI-FUNCTION-INVENTORY.md) (pointer) | Stale 2026-08-11 inventory, archived; for the current TUI read [TUI.md](TUI.md).  The pointer file stays because `lib/sigmond/tui/widgets/component_tree.py` and a test name it |
 | [T6-BLOCK-SLIP-ROOT-CAUSE-2026-08-10.md](T6-BLOCK-SLIP-ROOT-CAUSE-2026-08-10.md) (pointer) | Redirects to the canonical hf-timestd analysis; keeps only the local record of the B4 layer-1 mitigations deployed 2026-08-10 |
 
 ## 4. Hardware
