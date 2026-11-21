@@ -1,9 +1,17 @@
-# A client without sigmond
+# Why sigmond: a client alone, and a full station
 
 > **Audience:** all
 > **Status:** draft
 > **Verified against:** sigmond 4006b0a on 2026-11-21 — code and docs (the contract, orchestration.md, the systemd units in `systemd/`)
-> **Canonical for:** what a client does on its own, and what sigmond adds when it runs a station
+> **Canonical for:** why sigmond exists: what a client does on its own, and what a full sigmond station adds
+
+Why sigmond? The answer lies in the difference between a stand-alone client
+and a full sigmond station. A client alone does its own work well. A
+station of several clients, one radio and one disk needs more than any
+client can give it: shared facts, timing everyone agrees on, a radio kept
+fit beneath them all, resources divided fairly, and a record of what the
+station holds and should hold. sigmond supplies exactly that difference,
+and nothing else.
 
 Every HamSCI client runs on its own. wspr-recorder, psk-recorder,
 codar-sounder (soon chirp-recorder), hf-timestd and the rest each install
@@ -18,8 +26,8 @@ and uploads nothing ([orchestration.md](contributor/orchestration.md)). What
 it adds lies between the clients and around them: the facts one client
 cannot know about the station, the arbitration of what they share, the
 care of the radio beneath them, and the record of what the station holds.
-This page says what a client keeps without sigmond, and what it goes
-without.
+The two halves below set the difference out: what a client keeps on its
+own, and what it goes without when no sigmond runs the station.
 
 ## What a client keeps
 
