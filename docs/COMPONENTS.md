@@ -29,17 +29,17 @@ test fails when the two disagree, so it lists exactly what sigmond installs.
 | **superdarn-sounder** | additional client | Passive SuperDARN coherent-radar monitor (detection / identification) | [HamSCI/superdarn-sounder](https://github.com/HamSCI/superdarn-sounder) | `9cefc698` |
 | **gpsdo-monitor** | station infrastructure | Leo Bodnar GPSDO health monitor + mDNS advertiser | [HamSCI/gpsdo-monitor](https://github.com/HamSCI/gpsdo-monitor) | `7f122290` |
 | **igmp-querier** | station infrastructure | Robust IGMP querier so radiod multicast survives on home-network switches | [HamSCI/igmp-querier](https://github.com/HamSCI/igmp-querier) | `95dfbb70` |
-| **ka9q-web** | station infrastructure | Web interface for ka9q-radio (radiod status UI) | [mijahauan/ka9q-web](https://github.com/mijahauan/ka9q-web) | `4084060a` |
+| **ka9q-web** | station infrastructure, upstream | Web interface for ka9q-radio (radiod status UI) | [mijahauan/ka9q-web](https://github.com/mijahauan/ka9q-web) | `4084060a` |
 | **sigmond-rac** | station infrastructure | Remote Access Channel — frpc reverse tunnel to gw2.wsprdaemon.org for admin SSH/web behind NAT | [HamSCI/sigmond-rac](https://github.com/HamSCI/sigmond-rac) | `a01c464f` |
-| **ka9q-radio** | radio | ka9q-radio SDR daemon — receives and multicasts RF channels | [ka9q/ka9q-radio](https://github.com/ka9q/ka9q-radio) | `aa52698c` |
+| **ka9q-radio** | radio, upstream | ka9q-radio SDR daemon — receives and multicasts RF channels | [ka9q/ka9q-radio](https://github.com/ka9q/ka9q-radio) | `aa52698c` |
 | **callhash** | library | WSPR/FST4W callsign-hash resolution library (wspr-recorder + psk-recorder dep) | [HamSCI/callhash](https://github.com/HamSCI/callhash) | `adc9d9de` |
 | **hamsci-dsp** | library | Shared DSP / timing utilities for the sigmond suite (superdarn-sounder dep) | [HamSCI/hamsci-dsp](https://github.com/HamSCI/hamsci-dsp) | `c82b6c2a` |
 | **hs-uploader** | library | HamSCI uploader: the sink writer (hs_uploader.sink), the upload library and the hs-uploader daemon | [HamSCI/hs-uploader](https://github.com/HamSCI/hs-uploader) | `f9698fd2` |
 | **ka9q-python** | library | Python library for ka9q-radio control and monitoring; every RF client receives through it (on PyPI) | [HamSCI/ka9q-python](https://github.com/HamSCI/ka9q-python) | `95098cfb` |
-| **ft8_lib** | native build | FT8/FT4 decoder library behind psk-recorder's `decode_ft8`, its low-CPU option (pinned by psk-recorder) | [ka9q/ft8_lib](https://github.com/ka9q/ft8_lib) | `0dfd14fd` |
-| **onion** | native build | HTTP library that ka9q-web links (built natively by sigmond) | [davidmoreno/onion](https://github.com/davidmoreno/onion) | `124c28c8` |
-| **ubersdr_wsprd** | native build | UberSDR's `wsprd` and `jt9`: the station's WSPR, FT8/FT4 and MSK144 decoders (built natively, checked against WSJT-X) | [madpsy/ubersdr_wsprd](https://github.com/madpsy/ubersdr_wsprd) | `5eeeb535` |
-| **wsjtx** | native build | WSJT-X's `wsprd` and `jt9`: the fallback decoders and the parity reference (built natively) | [WSJTX/wsjtx](https://github.com/WSJTX/wsjtx) | `ccdfaf3c` |
+| **ft8_lib** | native build, upstream | FT8/FT4 decoder library behind psk-recorder's `decode_ft8`, its low-CPU option (pinned by psk-recorder) | [ka9q/ft8_lib](https://github.com/ka9q/ft8_lib) | `0dfd14fd` |
+| **onion** | native build, upstream | HTTP library that ka9q-web links (built natively by sigmond) | [davidmoreno/onion](https://github.com/davidmoreno/onion) | `124c28c8` |
+| **ubersdr_wsprd** | native build, upstream | UberSDR's `wsprd` and `jt9`: the station's WSPR, FT8/FT4 and MSK144 decoders (built natively, checked against WSJT-X) | [madpsy/ubersdr_wsprd](https://github.com/madpsy/ubersdr_wsprd) | `5eeeb535` |
+| **wsjtx** | native build, upstream | WSJT-X's `wsprd` and `jt9`: the fallback decoders and the parity reference (built natively) | [WSJTX/wsjtx](https://github.com/WSJTX/wsjtx) | `ccdfaf3c` |
 | **sigmond-proxmox** | image | Build pipeline for the Proxmox USB image: a Proxmox host with the station in a VM | [HamSCI/sigmond-proxmox](https://github.com/HamSCI/sigmond-proxmox) | `45bc1612` |
 | **chirp-recorder** | other | CODAR chirp sounder: raw-IQ dechirp, sigmondb arrivals, ionospheric records | [HamSCI/chirp-recorder](https://github.com/HamSCI/chirp-recorder) | not yet released |
 
@@ -48,6 +48,27 @@ test fails when the two disagree, so it lists exactly what sigmond installs.
 Each repository's README opens its own documentation. A link to each
 repository's `docs/INDEX.md` joins this table once every repository
 carries one.
+
+## Upstream components
+
+Some components come from outside sigmond and its clients.  Their
+documentation belongs to their authors, and we point to it as it stands.
+What we own is how sigmond uses each one.
+
+| Component | Whose, and its documentation | How sigmond uses it |
+|---|---|---|
+| **ka9q-radio** | Phil Karn, KA9Q: [ka9q/ka9q-radio](https://github.com/ka9q/ka9q-radio), with its [docs folder](https://github.com/ka9q/ka9q-radio/tree/main/docs) | `radiod`, the station's receiver.  sigmond builds it on the station at the commit ka9q-python pins, writes its config from a template, pins its threads and interrupts, keeps its FFTW wisdom, and restarts it when it wedges.  A site may manage it by hand (`[components] locally_managed`, as W0WWV does).  Phil also publishes it as Debian packages, which the [packaging plan](https://claude.ai/artifact/R6GwR92hup97xiSJvuCuLZ) proposes to adopt |
+| **ka9q-web** | [wa2n-code/ka9q-web](https://github.com/wa2n-code/ka9q-web) | the station's radiod status page.  We build from the fork [mijahauan/ka9q-web](https://github.com/mijahauan/ka9q-web) until upstream merges its audio change (PR #12), linked against onion |
+| **onion** | David Moreno: [davidmoreno/onion](https://github.com/davidmoreno/onion) | the HTTP library ka9q-web links; sigmond pins it and builds it on the station |
+| **ubersdr_wsprd** | [madpsy/ubersdr_wsprd](https://github.com/madpsy/ubersdr_wsprd) and its README | the station's `wsprd` and `jt9`: wspr-recorder decodes WSPR with it, psk-recorder runs `jt9` resident for FT8 and FT4, meteor-scatter decodes MSK144.  sigmond builds it at a pinned commit and installs it only after it decodes WSJT-X's stored recordings exactly as WSJT-X does (the parity check) |
+| **wsjtx** | the WSJT-X authors: [WSJTX/wsjtx](https://github.com/WSJTX/wsjtx) | the reference the parity check compares against, and the fallback decoder build.  The fallback reads none of wspr-recorder's float32 recordings, so it gives no WSPR decodes |
+| **ft8_lib** | [ka9q/ft8_lib](https://github.com/ka9q/ft8_lib), a fork of Karlis Goba's original | psk-recorder's `decode_ft8`: the low-CPU FT8 decoder and the fallback when `jt9` is missing; psk-recorder pins and builds it |
+| **mag-usb** | Dave Witten: [HamSCI/mag-usb](https://github.com/HamSCI/mag-usb) | reads the RM3100 magnetometer over USB-I²C for mag-recorder, and serves the WebSocket feed gmag-webui draws.  mag-recorder carries a prebuilt binary and a script that rebuilds it |
+| **dumphfdl** | Tomasz Lemiech: [szpajder/dumphfdl](https://github.com/szpajder/dumphfdl) | hfdl-recorder's decoder, one process per band; hfdl-recorder builds it from source |
+| **PHaRLAP** and **PyLAP** | PHaRLAP from Australia's DST Group, under licence ([access](https://www.dst.defence.gov.au/partner-with-us/access-our-technology)); PyLAP its Python wrapper | optional HF ray tracing for hf-timestd and `hamsci_dsp.raytrace`.  An operator stages them; sigmond never redistributes PHaRLAP |
+
+mag-usb, dumphfdl, PHaRLAP and PyLAP live inside their clients and have
+no row of their own in the release list.
 
 ## The groups
 
@@ -74,7 +95,6 @@ compiled sources sigmond pins and builds on the station.
 - **mag-recorder** reads its magnetometer over USB-I²C, the one client that
   does not receive through radiod. Every RF client receives through
   ka9q-python.
-- **ka9q-web** comes from a fork until its audio change merges upstream.
 - **chirp-recorder** will take over from codar-sounder; it has not yet
   entered a release.
 

@@ -37,6 +37,11 @@ DESCRIBED = {
 # Repositories not in the catalog or release_list.EXTRA_URLS.
 OWNED_ELSEWHERE = {"ft8_lib": "https://github.com/ka9q/ft8_lib"}
 
+# Components whose source and documentation belong to someone else.  Each
+# also needs a row in COMPONENTS.md's "Upstream components" table
+# (tests/test_docs_components.py checks it).
+UPSTREAM = {"ka9q-radio", "ka9q-web", "onion", "ubersdr_wsprd", "wsjtx", "ft8_lib"}
+
 GROUPS = ("core client", "additional client", "station infrastructure",
           "radio", "library", "native build", "image", "other")
 
@@ -116,7 +121,8 @@ def table() -> str:
                  if r["url"] else "")
         pin = f"`{r['pin'][:8]}`" if r["pin"] else "not yet released"
         what = r["what"].replace("|", "\\|")
-        lines.append(f"| **{r['name']}** | {r['group']} | {what} | {where} | {pin} |")
+        group = r["group"] + (", upstream" if r["name"] in UPSTREAM else "")
+        lines.append(f"| **{r['name']}** | {group} | {what} | {where} | {pin} |")
     lines += ["", END]
     return "\n".join(lines) + "\n"
 
