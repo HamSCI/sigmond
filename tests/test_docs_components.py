@@ -22,3 +22,14 @@ def test_every_release_row_appears():
     page = (REPO / "docs" / "COMPONENTS.md").read_text()
     missing = [n for n in release_list.ROWS if f"| **{n}** |" not in page]
     assert not missing, f"release rows missing from COMPONENTS.md: {missing}"
+
+
+def test_every_upstream_component_is_explained():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("docs_components", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    page = (REPO / "docs" / "COMPONENTS.md").read_text()
+    section = page[page.index("## Upstream components"):]
+    missing = [n for n in sorted(mod.UPSTREAM) if f"| **{n}** |" not in section]
+    assert not missing, f"upstream components without a 'How sigmond uses it' row: {missing}"
