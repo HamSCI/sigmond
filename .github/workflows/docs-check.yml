@@ -23,6 +23,9 @@ jobs:
         with: { repository: HamSCI/sigmond, path: .sigmond-tools, fetch-depth: 1 }
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with: { python-version: "3.11" }
+      - name: docs/INDEX.md present (every suite repo keeps the map of its docs)
+        run: |
+          test -f docs/INDEX.md || { echo "::error file=docs/INDEX.md::missing: every suite repo keeps docs/INDEX.md (sigmond docs/contributor/docs-conventions.md §1)"; exit 1; }
       - name: Link check (relative links + anchors; external links skipped)
         env: { PATHS: "${{ inputs.paths || 'docs README.md' }}" }
         run: python3 .sigmond-tools/scripts/docs-linkcheck.py $PATHS
@@ -33,4 +36,4 @@ jobs:
         if: github.repository == 'HamSCI/sigmond'
         run: |
           pip install pytest
-          PYTHONPATH=lib python -m pytest tests/test_docs_links.py tests/test_docs_cli_table.py tests/test_docs_freshness.py -q
+          PYTHONPATH=lib python -m pytest tests/test_docs_links.py tests/test_docs_cli_table.py tests/test_docs_freshness.py tests/test_docs_components.py -q
