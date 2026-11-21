@@ -120,8 +120,9 @@ def test_script_head_line_stays_out_of_the_digest():
 
 
 def test_current_doc_installs_git_first():
+    # A fresh cloud image ships with no package lists: update, then git.
     steps = bmd.extract((ROOT / "docs" / "install-bare-metal.md").read_text())
-    assert steps.install[0] == "sudo apt-get install -y git"
+    assert list(steps.install[:2]) == ["sudo apt-get update", "sudo apt-get install -y git"]
     assert [c for c in steps.install if c.startswith("git clone")]
 
 

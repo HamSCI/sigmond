@@ -31,6 +31,7 @@ each; this page puts them in order and says what each one does to your machine.
 ## 2. Install sigmond
 
 ```bash
+sudo apt-get update
 sudo apt-get install -y git
 sudo mkdir -p /opt/git/sigmond
 sudo chown $USER /opt/git/sigmond
