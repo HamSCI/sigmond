@@ -36,4 +36,4 @@ jobs:
         if: github.repository == 'HamSCI/sigmond'
         run: |
           pip install pytest
-          PYTHONPATH=lib python -m pytest tests/test_docs_links.py tests/test_docs_cli_table.py tests/test_docs_freshness.py tests/test_docs_components.py -q
+          PYTHONPATH=lib python -m pytest tests/test_docs_links.py tests/test_docs_cli_table.py tests/test_docs_freshness.py tests/test_docs_components.py tests/test_docs_cli_reference.py -q

@@ -133,6 +133,13 @@ def build(out: Path, workspace: Path) -> int:
                 shutil.copy2(src / rel, dest)
             n += 1
         carried[name] = n
+    # The smd reference: rendered from the parser now, never committed
+    # (scripts/docs-cli.py; station-web renders its Commands page the same way).
+    if "sigmond" in carried:
+        spec = importlib.util.spec_from_file_location("docs_cli", workspace / "sigmond" / "scripts" / "docs-cli.py")
+        cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cli)
+        (docs_out / "sigmond" / "docs" / "commands" / "smd-reference.md").write_text(cli.render())
     _outlinks(docs_out, repos)
     # The site's home: sigmond's landing page, its links re-rooted under sigmond/.
     landing = (docs_out / "sigmond" / "README.md").read_text()
@@ -145,6 +152,9 @@ def build(out: Path, workspace: Path) -> int:
         {"Why sigmond": "sigmond/docs/WHY-SIGMOND.md"},
         {"Why Proxmox": "sigmond/docs/WHY-PROXMOX.md"},
         {"Components": "sigmond/docs/COMPONENTS.md"},
+        {"Commands": [{"Everyday commands": "sigmond/docs/COMMANDS.md"},
+                      {"smd reference": "sigmond/docs/commands/smd-reference.md"},
+                      {"Example output": "sigmond/docs/commands/smd.md"}]},
         {"Operators": "sigmond/docs/operator/README.md"},
         {"Scientists": "sigmond/docs/scientist/README.md"},
         {"Contributors": "sigmond/docs/contributor/README.md"},
