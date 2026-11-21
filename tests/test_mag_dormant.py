@@ -91,7 +91,12 @@ def test_present_magnetometer_enables_and_starts_as_before():
         assert ['smd', 'disable', comp] not in [s.argv for s in p.steps]
 
 
-def test_dormant_gpsdo_monitor_keeps_its_existing_treatment():
+def test_dormant_gpsdo_monitor_installs_dormant_like_the_magnetometer():
+    # v3.94 bare-metal run 2: the older treatment (enabled in topology,
+    # skipped by `smd start`) left topology on and the unit off, a state
+    # `smd check` fails.  No GPSDO now means off in topology, units off.
     p = build_plan(_prof(), local_radiod=True,
                    dormant=frozenset({'gpsdo-monitor'}))
-    assert ['smd', 'enable', 'gpsdo-monitor'] in [s.argv for s in p.steps]
+    argvs = [s.argv for s in p.steps]
+    assert ['smd', 'enable', 'gpsdo-monitor'] not in argvs
+    assert ['smd', 'disable', 'gpsdo-monitor'] in argvs

@@ -1616,6 +1616,18 @@
    ""
   ],
   [
+   "stop + disable the deferred radio half (its installs may have started it)",
+   [
+    "smd",
+    "disable",
+    "igmp-querier",
+    "ka9q-web",
+    "ka9q-radio",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
    "render site profile (PSWS ids into client configs)",
    [
     "smd",
@@ -1826,6 +1838,19 @@
     "start",
     "--components",
     "station-web"
+   ],
+   ""
+  ],
+  [
+   "stop + disable the deferred radio half (its installs may have started it)",
+   [
+    "smd",
+    "disable",
+    "igmp-querier",
+    "ka9q-web",
+    "ka9q-radio",
+    "gpsdo-monitor",
+    "hf-timestd"
    ],
    ""
   ],
@@ -4606,6 +4631,20 @@
    ""
   ],
   [
+   "stop + disable the deferred radio half (its installs may have started it)",
+   [
+    "smd",
+    "disable",
+    "ka9q-radio",
+    "hf-timestd",
+    "wspr-recorder",
+    "psk-recorder",
+    "hfdl-recorder",
+    "codar-sounder"
+   ],
+   ""
+  ],
+  [
    "render site profile (PSWS ids into client configs)",
    [
     "smd",
@@ -4868,6 +4907,23 @@
     "start",
     "--components",
     "station-web"
+   ],
+   ""
+  ],
+  [
+   "stop + disable the deferred radio half (its installs may have started it)",
+   [
+    "smd",
+    "disable",
+    "ka9q-radio",
+    "mag-recorder",
+    "hf-tec",
+    "superdarn-sounder",
+    "hf-timestd",
+    "wspr-recorder",
+    "psk-recorder",
+    "hfdl-recorder",
+    "codar-sounder"
    ],
    ""
   ],
@@ -9098,6 +9154,24 @@
    ""
   ],
   [
+   "stop + disable the deferred radio half (its installs may have started it)",
+   [
+    "smd",
+    "disable",
+    "igmp-querier",
+    "gpsdo-monitor",
+    "ka9q-web",
+    "ka9q-radio",
+    "hf-timestd",
+    "wspr-recorder",
+    "psk-recorder",
+    "meteor-scatter",
+    "hfdl-recorder",
+    "codar-sounder"
+   ],
+   ""
+  ],
+  [
    "render site profile (PSWS ids into client configs)",
    [
     "smd",
@@ -9540,6 +9614,26 @@
     "start",
     "--components",
     "station-web"
+   ],
+   ""
+  ],
+  [
+   "stop + disable the deferred radio half (its installs may have started it)",
+   [
+    "smd",
+    "disable",
+    "igmp-querier",
+    "gpsdo-monitor",
+    "ka9q-web",
+    "ka9q-radio",
+    "hf-tec",
+    "superdarn-sounder",
+    "hf-timestd",
+    "wspr-recorder",
+    "psk-recorder",
+    "meteor-scatter",
+    "hfdl-recorder",
+    "codar-sounder"
    ],
    ""
   ],
@@ -11206,6 +11300,18 @@
    ""
   ],
   [
+   "stop + disable the deferred radio half (its installs may have started it)",
+   [
+    "smd",
+    "disable",
+    "ka9q-web",
+    "ka9q-radio",
+    "wspr-recorder",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
    "render site profile (PSWS ids into client configs)",
    [
     "smd",
@@ -11398,6 +11504,22 @@
     "-g",
     "sigmond",
     "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "stop + disable the deferred radio half (its installs may have started it)",
+   [
+    "smd",
+    "disable",
+    "ka9q-web",
+    "ka9q-radio",
+    "hf-timestd",
+    "igmp-querier",
+    "gpsdo-monitor",
+    "station-web",
+    "wspr-recorder",
+    "psk-recorder"
    ],
    ""
   ],

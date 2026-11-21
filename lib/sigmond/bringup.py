@@ -75,11 +75,23 @@ _TIMING_AUTHORITY = 'hf-timestd'
 _INDEPENDENT = frozenset({'mag-recorder', 'station-web', 'hamsci-physics',
                           'gmag-webui'})
 
-# Components that exist only for a sensor.  With the sensor absent (named in
-# `dormant`) they install DORMANT: installed, enabled=false in topology, never
-# started -- the sensor decides, whatever the profile says.  gpsdo-monitor is
-# not here: it keeps its older treatment (enabled, skipped by `smd start`).
-_SENSOR_ONLY = frozenset({'mag-recorder', 'gmag-webui'})
+# Components that exist only for a device on this machine's USB.  With the
+# device absent (named in `dormant`) they install DORMANT: installed,
+# enabled=false in topology, units stopped and disabled -- the device
+# decides, whatever the profile says.
+#
+# gpsdo-monitor joined them for v3.94 (bare-metal run 2, 2026-11-21).  Its
+# older treatment -- enabled in topology, skipped by `smd start` -- left
+# topology ON with the units OFF, which `smd check` reads as "enabled in
+# topology but not running"; and with no SDR it rode the deferred radio half,
+# where its own install.sh started it with topology OFF ("runs but topology
+# does not enable it").  Either way not consistent.  The GPSDO arriving later
+# lights it the same way as a magnetometer: `smd adopt` (cmd_start enables a
+# named component), or the next bring-up, which finds the GPSDO and enables it.
+_SENSOR_ONLY = frozenset({'mag-recorder', 'gmag-webui', 'gpsdo-monitor'})
+
+# The plan label for a dormant component's disable step.
+_NO_DEVICE = {'gpsdo-monitor': 'no GPSDO'}
 
 # Clients that take a per-reporter instance (`<client>@<reporter-id>`).  When a
 # reporter id is supplied, bring-up creates + enables the instance instead of
@@ -222,11 +234,12 @@ def build_plan(profile, *, local_radiod: bool,
     none of that — nor the wisdom wait — applies.  ``mag-recorder`` is emitted
     on the independent 3b track regardless of locality.
 
-    ``dormant`` names hardware-gated components whose device is absent: they
-    still install + configure + enable (so they light up when the hardware is
-    later attached and `smd start` — which skips dormant components — runs
-    again), but their "configured" checkpoint is SOFT, so a config step that
-    can't fully complete without the device doesn't abort the whole bring-up
+    ``dormant`` names hardware-gated components whose device is absent.  The
+    device-only ones (_SENSOR_ONLY: mag-recorder, gmag-webui, gpsdo-monitor)
+    install DORMANT: off in topology, units stopped and disabled, never named
+    to a start.  Any other dormant component still installs + configures +
+    enables, with a SOFT "configured" checkpoint, so a config step that can't
+    fully complete without the device doesn't abort the whole bring-up
     (docs/install-redesign.md §3).  Distinct from ``skip`` (excluded entirely).
 
     ``no_config`` names components with NO config contract — a Deno app or a
@@ -355,7 +368,8 @@ def build_plan(profile, *, local_radiod: bool,
                               'install',
                               argv=[smd, 'install', '--components', comp, '--yes',
                                     '--no-enable', '--no-pull']))
-            steps.append(Step(stage, f'disable {comp} (DORMANT — no sensor)',
+            steps.append(Step(stage, f'disable {comp} (DORMANT — '
+                                     f'{_NO_DEVICE.get(comp, "no sensor")})',
                               'tune', argv=[smd, 'disable', comp]))
             return
         if not enable:
@@ -697,10 +711,24 @@ def build_plan(profile, *, local_radiod: bool,
                               'start',
                               argv=[smd, 'start', '--components', client]))
 
+    # ⛔ OFF IN TOPOLOGY MEANS STOPPED.  `--no-enable` only declines to enable
+    # the deferred radio half; several of those components' own install.sh
+    # enable and START their unit anyway (igmp-querier, gpsdo-monitor).  The
+    # bare-metal v3.94 run (2026-11-21, no SDR) ended with both running while
+    # topology had them off, and `smd check` failed it.  So stop and disable
+    # what was deferred, once every install is done and before the manifest
+    # renders.  The SDR's arrival re-runs bring-up (firstrun), whose full plan
+    # enables each one and starts it (`smd start` re-enables a disabled unit).
+    if deferring and deferred:
+        steps.append(Step(STAGE4,
+                          'stop + disable the deferred radio half (its '
+                          'installs may have started it)', 'tune',
+                          argv=[smd, 'disable', *dict.fromkeys(deferred)]))
+
     if radiod_only:
         return _with_release_list(release_list, _radiod_only_stage4(
             profile, steps, local_radiod=local_radiod,
-            deferring=deferring, skip=skip,
+            deferring=deferring, skip=skip | _dormant_off(dormant),
             with_optional=with_optional, smd=smd,
             remote_radiods=remote_radiods))
 
@@ -766,8 +794,11 @@ def build_plan(profile, *, local_radiod: bool,
     elif local_radiod:
         steps.append(Step(STAGE4, 'wait for FFT wisdom before starting radiod',
                           'wait-wisdom'))
+        # A dormant device client is left out: `smd start --components X`
+        # enables X in topology, which would undo its Stage-1 disable.
+        off = _dormant_off(dormant)
         radiod_stack = ['ka9q-radio'] + [i for i in profile.local_radiod_infra
-                                         if i not in skip]
+                                         if i not in skip and i not in off]
         steps.append(Step(STAGE4, 'start radiod + local-radiod infra', 'start',
                           argv=[smd, 'start', '--components', ','.join(radiod_stack)]))
         steps.append(Step(STAGE4,
@@ -856,6 +887,11 @@ def build_plan(profile, *, local_radiod: bool,
         profile=profile.name, local_radiod=local_radiod,
         remote_radiods=remote_radiods, steps=steps,
         sdr_absent=deferring, hold_uploads=hold_uploads))
+
+
+def _dormant_off(dormant) -> frozenset:
+    """The dormant components bring-up leaves off in topology (_SENSOR_ONLY)."""
+    return frozenset(c for c in dormant if c in _SENSOR_ONLY)
 
 
 def _with_release_list(release_list: Optional[str], plan: Plan) -> Plan:

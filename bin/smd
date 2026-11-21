@@ -13303,9 +13303,10 @@ def _bringup_dormant(prof) -> frozenset:
 
     The sensor decides, for every station, DASI or not (N8UR, 2026-11-12/14):
     no magnetometer => mag-recorder and gmag-webui install DORMANT -- installed,
-    enabled=false in topology, never started (bringup.build_plan).  A missing
-    GPSDO keeps its older treatment: gpsdo-monitor stays enabled and `smd start`
-    skips it.  Neither blocks the bring-up.
+    enabled=false in topology, never started (bringup.build_plan).  No GPSDO
+    => gpsdo-monitor installs DORMANT the same way (v3.94: its older treatment,
+    enabled and skipped by `smd start`, left topology on with the unit off,
+    which `smd check` fails).  Neither blocks the bring-up.
     """
     dormant: set = set()
     mag_absent = None
@@ -13467,12 +13468,12 @@ def cmd_bringup(args) -> int:
         return 1
 
     # Hardware-aware kit check (docs/install-redesign.md §3).  Hardware-gated
-    # components stay in the plan and install DORMANT (enabled, but `smd start`
-    # skips them while their device is absent — they light up when it is later
-    # attached).  The warnings here are about LOST FUNCTIONALITY and are
-    # dependency-aware: a missing GPSDO degrades the whole recorder chain, not
-    # just gpsdo-monitor.  Nothing is removed from the plan (`skip` stays empty);
-    # dormancy is enforced at start.
+    # components stay in the plan and install DORMANT (installed, off in
+    # topology, units stopped and disabled; `smd adopt` or a later bring-up
+    # lights them once the device is attached).  The warnings here are about
+    # LOST FUNCTIONALITY and are dependency-aware: a missing GPSDO degrades the
+    # whole recorder chain, not just gpsdo-monitor.  Nothing is removed from
+    # the plan (`skip` stays empty).
     skip: set = set()
     dormant: set = set(_bringup_dormant(prof))
 
