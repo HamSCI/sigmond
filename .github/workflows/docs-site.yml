@@ -3,13 +3,15 @@
 #
 # scripts/docs-site.py gathers every component repository's docs from main
 # (the list comes from docs/COMPONENTS.md's generator), and MkDocs renders
-# them into one searchable site.  Manual runs only until the public-content
-# review is done (ledger docs-organization, step 4); then add a push trigger
-# on main and a nightly schedule so other repositories' changes appear.
+# them into one searchable site.  It runs on every push to sigmond's main,
+# nightly at 05:30 UTC so other repositories' changes appear within a day,
+# and by hand.  Public since 2026-11-21 (ledger docs-organization, step 4).
 #
 # Third-party actions are pinned to full commit SHAs per repo convention.
 name: docs-site
 on:
+  push: { branches: [main] }
+  schedule: [{ cron: "30 5 * * *" }]
   workflow_dispatch:
 permissions:
   contents: read
