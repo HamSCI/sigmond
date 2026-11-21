@@ -1,0 +1,40 @@
+# docs-site — build the suite's public documentation site and publish it to
+# GitHub Pages (https://hamsci.github.io/sigmond/).
+#
+# scripts/docs-site.py gathers every component repository's docs from main
+# (the list comes from docs/COMPONENTS.md's generator), and MkDocs renders
+# them into one searchable site.  Manual runs only until the public-content
+# review is done (ledger docs-organization, step 4); then add a push trigger
+# on main and a nightly schedule so other repositories' changes appear.
+#
+# Third-party actions are pinned to full commit SHAs per repo convention.
+name: docs-site
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency: { group: docs-site, cancel-in-progress: true }
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+      - name: Gather every repository's docs
+        run: |
+          mkdir -p ws && cp -r "$GITHUB_WORKSPACE" /tmp/sigmond-self && mv /tmp/sigmond-self ws/sigmond
+          PYTHONPATH=lib python3 scripts/docs-site.py site-src --workspace ws
+      - name: Build the site
+        run: uvx --with mkdocs-material==9.5.39 mkdocs build -f site-src/mkdocs.yml -d "$GITHUB_WORKSPACE/site"
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+        with: { path: site }
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: { name: github-pages, url: "${{ steps.deployment.outputs.page_url }}" }
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
