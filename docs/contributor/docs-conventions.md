@@ -26,6 +26,24 @@ the operator's view, and shows only under "Show everything".  A repo with
 no INDEX.md shows every page outside `archive/` and `superpowers/`.
 `smd admin docs index` gathers these facts for station-web (`lib/sigmond/docs_index.py`).
 
+### 1a. Four kinds of writing, four homes
+
+Writing about the suite comes in four kinds.  Each has one home, and only
+the first is authoritative about how things work.
+
+| Kind | Home | Authority |
+|---|---|---|
+| Reference: how it works, how to run it | the owning repo's `docs/`, listed in its `docs/INDEX.md`; the suite's top-level view is sigmond's [`COMPONENTS.md`](../COMPONENTS.md) | authoritative; the ★ page settles a disagreement (§2) |
+| Design: what we intend to build and why | the repo whose code it designs (`docs/superpowers/specs`, `plans`) | authoritative for intent until it ships; then the reference page takes over and the design becomes `shipped` |
+| Work state: who is doing what, decisions, open problems | the ops ledger and the claude-bus | authoritative for status, never for how the software works |
+| Drafts and review copies (a Claude Doc, a shared artifact) | wherever the review happens | never authoritative: once accepted, the content lands in the repo and the draft points there |
+
+A sigmond root `README.md` stays a landing page: what sigmond is, the
+doors, and links.  Material that grows there moves into `docs/`
+(2026-11-21: the command reference, the step-by-step install and the
+client list moved to `COMMANDS.md`, `install-step-by-step.md` and
+`COMPONENTS.md`).
+
 ## 2. One canonical page per topic
 
 Every topic has exactly one ★-marked page in an `INDEX.md`. When two pages
