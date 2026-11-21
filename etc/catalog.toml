@@ -52,7 +52,7 @@ kind            = "client"
 description     = "WSPR/FST4W audio recorder (period-aligned WAVs)"
 repo            = "https://github.com/HamSCI/wspr-recorder"
 uses            = ["ka9q-python"]
-requires        = ["ka9q-python", "ka9q-radio"]
+requires        = ["ka9q-python", "ka9q-radio", "hamsci-dsp"]  # hamsci-dsp: sibling pkg for uv editable install
 contract        = "0.8"
 install_script  = "/opt/git/sigmond/wspr-recorder/install.sh"
 
@@ -61,7 +61,7 @@ kind            = "client"
 description     = "FT4/FT8 spot recorder for PSKReporter"
 repo            = "https://github.com/HamSCI/psk-recorder"
 uses            = ["ka9q-python"]
-requires        = ["ka9q-python", "ka9q-radio"]
+requires        = ["ka9q-python", "ka9q-radio", "hamsci-dsp"]  # hamsci-dsp: sibling pkg for uv editable install
 contract        = "0.8"
 install_script  = "/opt/git/sigmond/psk-recorder/scripts/install.sh"
 

@@ -112,6 +112,17 @@ import sys
 import urllib.request
 from pathlib import Path
 
+# tomllib is Python 3.11+.  These helpers run under the system python3 (they
+# are symlinked into /usr/local/sbin, not re-exec'd into the venv like smd),
+# which is 3.10 on Ubuntu 22.04: fall back to tomli (apt python3-tomli).
+try:
+    import tomllib
+except ModuleNotFoundError:  # py<3.11
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ModuleNotFoundError:
+        tomllib = None  # type: ignore[assignment]  # callers treat config as absent
+
 TOPOLOGY = Path("/etc/sigmond/topology.toml")
 SCHEDULE = Path("/var/lib/sigmond/link-schedule.json")
 HOST_CONF = Path("/etc/sigmond/link.toml")
@@ -180,7 +191,6 @@ def vm_link_schedule(vmid: int, run=subprocess.run, cache: Path = VM_CACHE,
     agent is down or answers with bad TOML; None when there is neither.  An
     absent table means disabled ({})."""
     import time
-    import tomllib
     now = time.time() if now is None else now
 
     def from_text(text):
@@ -244,7 +254,6 @@ def read_settings(path: Path | None = None, run=subprocess.run, cache: Path = VM
            "rac_suspend": True, "rac_units": list(DEFAULT_RAC_UNITS),
            "max_suspend_hours": 6.0, "rac_resume_hold_min": 30.0,
            "mode": "schedule", "probe_min": 5.0, "probe_targets": [], "probe_fail_count": 2.0}
-    import tomllib
     ls = None
     follow = None
     for p in ([path] if path else [TOPOLOGY, HOST_CONF]):
