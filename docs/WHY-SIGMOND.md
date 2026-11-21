@@ -129,6 +129,7 @@ by hand, or go without, everything in the second half of this page.
 
 ## Read next
 
+- [WHY-PROXMOX.md](WHY-PROXMOX.md): the same question one layer down, the station on bare metal or in a VM.
 - [CLIENT-CONTRACT.md](CLIENT-CONTRACT.md) ★: the seam, section by section.
 - [contributor/orchestration.md](contributor/orchestration.md) ★: how sigmond works, layer by layer.
 - [ADD-A-CLIENT.md](ADD-A-CLIENT.md): writing a client that does its half.
