@@ -278,6 +278,7 @@ same_antenna_as = "AC0G/B1A"
     monkeypatch.setattr(smd, '_detect_local_sdr', lambda: True)
     monkeypatch.setattr(smd, '_detect_magnetometer', lambda: True)
     monkeypatch.setattr(smd, '_detect_gpsdo', lambda: True)
+    monkeypatch.setattr(smd, '_gpsdo_ready', lambda: True)
     assert smd.cmd_bringup(_bringup_args(profile='dasi2')) == 0
     k = calls[0]
     assert k['receivers_declared'] is True
@@ -309,6 +310,7 @@ def _radiod_host(monkeypatch, smd):
     monkeypatch.setattr(smd, '_detect_local_sdr', lambda: True)
     monkeypatch.setattr(smd, '_detect_magnetometer', lambda: True)
     monkeypatch.setattr(smd, '_detect_gpsdo', lambda: True)
+    monkeypatch.setattr(smd, '_gpsdo_ready', lambda: True)
 
 
 def test_a_greenfield_radiod_host_plans_its_silent_receivers_as_local(

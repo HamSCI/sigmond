@@ -43,7 +43,7 @@ def _argv(plan, kind, comp):
 def test_no_magnetometer_makes_both_dormant_and_says_so(monkeypatch, capsys):
     smd = _load_smd()
     monkeypatch.setattr(smd, '_detect_magnetometer', lambda: False)
-    monkeypatch.setattr(smd, '_detect_gpsdo', lambda: True)
+    monkeypatch.setattr(smd, '_gpsdo_ready', lambda: True)
     dormant = smd._bringup_dormant(_prof())
     assert {'mag-recorder', 'gmag-webui'} <= dormant
     cap = capsys.readouterr()
@@ -56,7 +56,7 @@ def test_no_magnetometer_makes_both_dormant_and_says_so(monkeypatch, capsys):
 def test_magnetometer_found_is_unchanged(monkeypatch, capsys):
     smd = _load_smd()
     monkeypatch.setattr(smd, '_detect_magnetometer', lambda: True)
-    monkeypatch.setattr(smd, '_detect_gpsdo', lambda: True)
+    monkeypatch.setattr(smd, '_gpsdo_ready', lambda: True)
     assert smd._bringup_dormant(_prof()) == frozenset()
     cap = capsys.readouterr()
     assert 'DORMANT' not in cap.out + cap.err
@@ -100,3 +100,41 @@ def test_dormant_gpsdo_monitor_installs_dormant_like_the_magnetometer():
     argvs = [s.argv for s in p.steps]
     assert ['smd', 'enable', 'gpsdo-monitor'] not in argvs
     assert ['smd', 'disable', 'gpsdo-monitor'] in argvs
+
+
+# -- fix round 1, I2 + M1: gpsdo-monitor goes dormant only on a confident
+# absence of a GPSDO this station has never seen.  An unknown probe, or a
+# GPSDO seen before, keeps it enabled so the device gate's fault fires. ----
+
+def _gpsdo_case(monkeypatch, ready, seen, prof=None, **kw):
+    smd = _load_smd()
+    monkeypatch.setattr(smd, '_detect_magnetometer', lambda: True)
+    monkeypatch.setattr(smd, '_gpsdo_ready', lambda: ready)
+    monkeypatch.setattr(smd, '_gpsdo_seen_before', lambda: seen)
+    return smd._bringup_dormant(prof or _prof(), **kw)
+
+
+def test_a_fresh_station_with_no_gpsdo_makes_it_dormant(monkeypatch):
+    assert 'gpsdo-monitor' in _gpsdo_case(monkeypatch, False, False)
+
+
+def test_a_gpsdo_seen_before_stays_enabled(monkeypatch, capsys):
+    assert 'gpsdo-monitor' not in _gpsdo_case(monkeypatch, False, True)
+    assert 'reconnect' in (lambda c: c.out + c.err)(capsys.readouterr())
+
+
+def test_an_unknown_gpsdo_probe_stays_enabled(monkeypatch):
+    assert 'gpsdo-monitor' not in _gpsdo_case(monkeypatch, None, False)
+
+
+def test_a_present_gpsdo_stays_enabled(monkeypatch):
+    assert 'gpsdo-monitor' not in _gpsdo_case(monkeypatch, True, False)
+
+
+def test_an_optional_gpsdo_monitor_is_probed_with_with_optional(monkeypatch):
+    base = Profile(name='base', clients=('wspr-recorder',),
+                   local_radiod_infra=('igmp-querier', 'ka9q-web'),
+                   optional=('gpsdo-monitor',))
+    assert 'gpsdo-monitor' in _gpsdo_case(monkeypatch, False, False, base,
+                                          with_optional=True)
+    assert 'gpsdo-monitor' not in _gpsdo_case(monkeypatch, False, False, base)

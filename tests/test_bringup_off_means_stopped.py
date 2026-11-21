@@ -156,3 +156,36 @@ def test_radiod_only_no_sdr_disables_the_deferred_stack():
     for c in ('gpsdo-monitor', 'ka9q-radio', 'igmp-querier', 'ka9q-web'):
         assert c in off, c
     assert p.steps[off['igmp-querier']].stage == STAGE4
+
+
+# --------------------------------------------------------------------------
+# Fix round 1, I1: a hand re-run on an ESTABLISHED station whose RX888 is
+# off the bus must not switch its radio stack off.  Only what this run
+# installed, and topology did not already enable, is disabled.
+# --------------------------------------------------------------------------
+
+def test_a_rerun_disables_nothing_topology_already_enables():
+    on = frozenset(DEFERRED)
+    p = build_plan(_dasi2(), local_radiod=True, sdr_absent=True,
+                   already_enabled=on)
+    assert _disables(p) == {}
+
+
+def test_a_rerun_disables_only_what_was_not_on_before():
+    # run 2's case: igmp-querier newly installed beside an enabled stack.
+    on = frozenset(DEFERRED) - {'igmp-querier'}
+    p = build_plan(_dasi2(), local_radiod=True, sdr_absent=True,
+                   already_enabled=on)
+    assert set(_disables(p)) == {'igmp-querier'}
+
+
+def test_an_unknown_topology_disables_nothing():
+    p = build_plan(_dasi2(), local_radiod=True, sdr_absent=True,
+                   already_enabled=None)
+    assert _disables(p) == {}
+
+
+def test_a_remote_radiod_host_gets_no_disable_step():
+    p = build_plan(_dasi2(), local_radiod=False, sdr_absent=True,
+                   remote_radiods=[('x-status.local', 'AC0G/X')])
+    assert _disables(p) == {}

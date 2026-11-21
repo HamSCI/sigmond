@@ -226,7 +226,8 @@ def build_plan(profile, *, local_radiod: bool,
                receivers_declared: bool = False,
                local_receivers=(),
                local_only=frozenset(),
-               release_list: Optional[str] = None) -> Plan:
+               release_list: Optional[str] = None,
+               already_enabled=frozenset()) -> Plan:
     """Pure: a profile + radiod locality -> the ordered Step list.
 
     ``local_radiod`` gates the entire radiod stack (infra, ka9q-radio, tuning,
@@ -281,6 +282,12 @@ def build_plan(profile, *, local_radiod: bool,
     loops run over them instead of ``reporter``.  ``local_only`` names the
     reporter IDs whose instances get ``config upload ... --off`` (receivers
     that do not upload, such as one sharing another's antenna).
+
+    ``already_enabled`` names the components topology enabled before this
+    run (cmd_bringup reads it).  A deferred one of those is left as it is:
+    a hand re-run while an established station's RX888 is off the bus must
+    not switch its radio stack off, since nothing would switch it back on.
+    None means topology could not be read: then nothing is disabled.
 
     ``release_list`` (an absolute path, `smd bringup --release-list`) is
     appended as ``--release-list <path>`` to every ``smd install`` step, so
@@ -719,11 +726,19 @@ def build_plan(profile, *, local_radiod: bool,
     # what was deferred, once every install is done and before the manifest
     # renders.  The SDR's arrival re-runs bring-up (firstrun), whose full plan
     # enables each one and starts it (`smd start` re-enables a disabled unit).
-    if deferring and deferred:
+    #
+    # ⛔ ONLY WHAT THIS RUN BROUGHT.  A component topology already enabled is
+    # an established station's radio stack, and a hand `smd bringup` while
+    # its RX888 is off the bus (it drops off on ND and B4) must not switch it
+    # off: firstrun re-runs only on its own marker, so nothing would switch
+    # it back on (fix round 1, I1).  Unknown topology (None): disable nothing.
+    newly = ([c for c in dict.fromkeys(deferred) if c not in already_enabled]
+             if already_enabled is not None else [])
+    if deferring and newly:
         steps.append(Step(STAGE4,
                           'stop + disable the deferred radio half (its '
                           'installs may have started it)', 'tune',
-                          argv=[smd, 'disable', *dict.fromkeys(deferred)]))
+                          argv=[smd, 'disable', *newly]))
 
     if radiod_only:
         return _with_release_list(release_list, _radiod_only_stage4(

@@ -128,7 +128,7 @@ def _load_smd():
 
 class OperatorChoice(unittest.TestCase):
 
-    def _run(self, answer, *, tty=True, non_interactive=False):
+    def _run(self, answer, *, tty=True, non_interactive=False, topology=None):
         smd = _load_smd()
         prof = Profile(name='t', description='', clients=(),
                        local_radiod_infra=('igmp-querier',), optional=())
@@ -142,6 +142,8 @@ class OperatorChoice(unittest.TestCase):
         # Never read or write this host's topology or station role.
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, tmp, True)
+        if topology is not None:
+            (tmp / 'topology.toml').write_text(topology)
         with mock.patch.object(smd, 'TOPOLOGY_PATH', tmp / 'topology.toml'), \
              mock.patch('sigmond.station_role.ROLE_PATH', tmp / 'station-role'), \
              mock.patch.object(smd, '_detect_local_sdr', lambda: False), \
@@ -167,6 +169,17 @@ class OperatorChoice(unittest.TestCase):
         self.assertEqual(len(built), 1)
         self.assertTrue(built[0]['sdr_absent'])
 
+    def test_the_plan_learns_what_topology_already_enables(self):
+        # Fix round 1, I1: a hand re-run keeps an established radio stack on.
+        _, built, _ = self._run('', non_interactive=True, topology=(
+            '[component.radiod]\nenabled = true\n'
+            '[component.igmp-querier]\nenabled = true\n'
+            '[component.ka9q-web]\nenabled = false\n'))
+        got = built[0]['already_enabled']
+        self.assertIn('igmp-querier', got)
+        self.assertIn('ka9q-radio', got, 'the radiod alias names ka9q-radio')
+        self.assertNotIn('ka9q-web', got)
+
     def test_an_unattended_run_is_never_asked(self):
         rc, built, asked = self._run('a', non_interactive=True)
         asked.assert_not_called()
@@ -191,6 +204,21 @@ class Verdict(unittest.TestCase):
         smd = _load_smd()
         self.assertEqual(smd._bringup_finish(
             build_plan(_dasi2(), local_radiod=True), 'dasi2'), 0)
+
+    def test_a_partial_run_with_a_failed_step_is_incomplete(self):
+        # Fix round 1, C1: PARTIAL used to return before the failed-steps
+        # branch, so firstrun recorded awaiting-sdr (no retry budget spent)
+        # for a run whose steps had failed.
+        import io, contextlib
+        smd = _load_smd()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            rc = smd._bringup_finish(build_plan(_dasi2(), local_radiod=True,
+                                                sdr_absent=True), 'dasi2',
+                                     ['start igmp-querier (exit 1)'])
+        self.assertEqual(rc, smd.BRINGUP_INCOMPLETE_RC)
+        self.assertIn('PARTIAL', out.getvalue())
+        self.assertIn('INCOMPLETE', out.getvalue())
 
     def test_a_failed_step_is_never_complete(self):
         # AC0G-ND v3.67: three steps exited 1 and the run still said complete.

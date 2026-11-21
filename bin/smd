@@ -13298,7 +13298,40 @@ def _bringup_plan_receivers(receivers, *, profile_clients: frozenset,
     return remote, tuple(local), local_only, injector
 
 
-def _bringup_dormant(prof) -> frozenset:
+def _gpsdo_ready() -> 'Optional[bool]':
+    """True/False when the GPSDO probe is sure; None when it is not."""
+    from sigmond.hardware import hardware_ready
+    return hardware_ready('gpsdo-monitor')
+
+
+def _gpsdo_seen_before() -> bool:
+    """The device gate's own evidence (drift.devices.seen_before)."""
+    from sigmond.drift import devices
+    return devices.seen_before('gpsdo-monitor')
+
+
+def _bringup_enabled_before() -> 'Optional[frozenset]':
+    """The components topology enables before this run, by catalog name
+    (the `radiod` alias reads as ka9q-radio); None when topology or the
+    catalog cannot be read (then build_plan disables nothing)."""
+    try:
+        from sigmond.catalog import load_catalog, get_entry
+        catalog = load_catalog()
+        out = set()
+        for n in _enabled_components(_load_topology(TOPOLOGY_PATH)):
+            out.add(n)
+            entry = get_entry(n, catalog)
+            if entry is not None:
+                out.add(entry.name)
+        return frozenset(out)
+    except Exception as exc:                                     # noqa: BLE001
+        _warn(f'bringup: could not read which components topology enables '
+              f'({type(exc).__name__}: {exc}); a deferred radio half is left '
+              f'as its installs leave it')
+        return None
+
+
+def _bringup_dormant(prof, with_optional: bool = False) -> frozenset:
     """The hardware-gated components of `prof` whose device is absent.
 
     The sensor decides, for every station, DASI or not (N8UR, 2026-11-12/14):
@@ -13306,7 +13339,12 @@ def _bringup_dormant(prof) -> frozenset:
     enabled=false in topology, never started (bringup.build_plan).  No GPSDO
     => gpsdo-monitor installs DORMANT the same way (v3.94: its older treatment,
     enabled and skipped by `smd start`, left topology on with the unit off,
-    which `smd check` fails).  Neither blocks the bring-up.
+    which `smd check` fails) -- but only when the probe is SURE it is absent
+    and the station never had one.  An unknown probe, or a GPSDO seen before
+    (drift.devices.seen_before), keeps it enabled, so the device gate's
+    "reconnect the GPSDO" fault still fires.  It is probed when the profile
+    lists it in local_radiod_infra, or in optional with --with-optional.
+    Neither blocks the bring-up.
     """
     dormant: set = set()
     mag_absent = None
@@ -13323,11 +13361,24 @@ def _bringup_dormant(prof) -> frozenset:
     if 'gmag-webui' in dormant:
         _info('gmag-webui installs DORMANT too: the dashboard has nothing to '
               'show without the sensor.')
-    if 'gpsdo-monitor' in prof.local_radiod_infra and not _detect_gpsdo():
-        _warn('no GPSDO (Leo Bodnar or MVR) on the bus — gpsdo-monitor installs DORMANT, '
-              'and the RX888 runs UNDISCIPLINED: WSPR / PSK / GRAPE (hf-timestd) '
-              'frequency accuracy is degraded until a GPSDO is attached.')
-        dormant.add('gpsdo-monitor')
+    wants_gpsdo = ('gpsdo-monitor' in prof.local_radiod_infra
+                   or (with_optional and 'gpsdo-monitor' in prof.optional))
+    gpsdo = _gpsdo_ready() if wants_gpsdo else True
+    if gpsdo is not True:
+        unrecorded = ('and the RX888 runs UNDISCIPLINED: WSPR / PSK / GRAPE '
+                      '(hf-timestd) frequency accuracy is degraded until a GPSDO '
+                      'is attached.')
+        if gpsdo is None:
+            _warn('GPSDO (Leo Bodnar or MVR) presence unknown — gpsdo-monitor '
+                  'stays enabled; if there is none, ' + unrecorded)
+        elif _gpsdo_seen_before():
+            _warn('no GPSDO (Leo Bodnar or MVR) on the bus, but this station '
+                  'had one — gpsdo-monitor stays enabled and smd check faults '
+                  'until you reconnect the GPSDO, ' + unrecorded)
+        else:
+            _warn('no GPSDO (Leo Bodnar or MVR) on the bus — gpsdo-monitor '
+                  'installs DORMANT, ' + unrecorded)
+            dormant.add('gpsdo-monitor')
     return frozenset(dormant)
 
 
@@ -13475,7 +13526,8 @@ def cmd_bringup(args) -> int:
     # whole recorder chain, not just gpsdo-monitor.  Nothing is removed from
     # the plan (`skip` stays empty).
     skip: set = set()
-    dormant: set = set(_bringup_dormant(prof))
+    dormant: set = set(_bringup_dormant(
+        prof, with_optional=bool(getattr(args, 'with_optional', False))))
 
     # Components with NO config contract get no config interview and no
     # `configured:` checkpoint.  Neither can succeed: there is nothing to
@@ -13792,7 +13844,8 @@ def cmd_bringup(args) -> int:
                       receivers_declared=receivers_declared,
                       local_receivers=local_receivers,
                       local_only=local_only,
-                      release_list=release_list)
+                      release_list=release_list,
+                      already_enabled=_bringup_enabled_before())
 
     _heading(f'bringup: {prof.name}  ({"LOCAL" if local else "REMOTE"} radiod)')
     if prof.description:
@@ -14105,7 +14158,11 @@ def _bringup_finish(plan, name: str, failed_steps=(), smd: str = 'smd',
               "radiod-bound clients are installed but not configured or started.")
         _info('plug in the SDR: first-run bring-up completes on its own; '
               f'by hand, run `smd bringup {name}` again')
-        return BRINGUP_PARTIAL_RC
+        # ⛔ A failed step outranks the missing SDR: PARTIAL (rc 3) makes
+        # firstrun record awaiting-sdr, which spends no retry budget and hides
+        # the failure.  Fall through to INCOMPLETE (fix round 1, C1).
+        if not failed_steps:
+            return BRINGUP_PARTIAL_RC
     if failed_steps:
         _err(f"bringup '{name}' INCOMPLETE — {len(failed_steps)} step(s) failed "
              "(listed above).  Fix the cause, then: "

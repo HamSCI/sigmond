@@ -389,6 +389,7 @@ def test_a_local_radiod_plan_is_unchanged(monkeypatch):
     monkeypatch.setattr(smd, '_detect_local_sdr', lambda: True)
     monkeypatch.setattr(smd, '_detect_magnetometer', lambda: True)
     monkeypatch.setattr(smd, '_detect_gpsdo', lambda: True)
+    monkeypatch.setattr(smd, '_gpsdo_ready', lambda: True)
     rc = smd.cmd_bringup(_bringup_args(profile='dasi2', reporter='AC0G/S'))
     assert rc == 0
     assert calls[0]['remote_radiods'] == []
