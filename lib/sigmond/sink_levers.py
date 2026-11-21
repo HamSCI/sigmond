@@ -82,6 +82,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+from . import systemd_ts
 from . import inprocess_senders as ips
 from .safe_write import read_nofollow, write_owned, write_toml_bool
 from .upload import env_path_for, set_env_flag
@@ -178,13 +179,17 @@ def _show_props(systemctl, names, props) -> list:
     for p in props:
         argv += ["-p", p]
     try:
-        r = _systemctl(systemctl, "show", *argv, "--timestamp=unix", *names)
+        r = _systemctl(systemctl, "show", *argv, systemd_ts.UNIX, *names)
+        stdout = r.stdout
+        if systemd_ts.unix_unsupported(r):      # systemd < 251 (Ubuntu 22.04: 249)
+            r = _systemctl(systemctl, "show", *argv, systemd_ts.UTC, *names)
+            stdout = systemd_ts.utc_to_unix_output(r.stdout)
     except subprocess.SubprocessError as exc:
         raise OSError(f"systemctl show {' '.join(names)}: {exc}") from exc
     if r.returncode != 0:
         raise OSError(f"systemctl show {' '.join(names)} exited {r.returncode}")
     blocks, cur = [], {}
-    for line in (r.stdout or "").splitlines():
+    for line in (stdout or "").splitlines():
         if not line.strip():
             if cur:
                 blocks.append(cur)
