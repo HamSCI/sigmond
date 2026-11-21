@@ -10,7 +10,47 @@ what has run on real hardware.  A release that no station has yet installed says
 
 ---
 
-## sigmond v3.94 (draft)
+## sigmond v3.94 — blessed 2026-11-21
+
+### A release now lives in sigmond
+
+- **sigmond holds the version.**  `release/components.toml` in sigmond lists the commit
+  of every component a release ships.  The Proxmox image builds from that list, and a
+  bare-metal install checks out the same release and installs the same commits.  The
+  tag `v3.94` on HamSCI/sigmond marks it, and the bless step cuts that tag.
+- **The image repo has a new name: sigmond-proxmox.**  It builds the Proxmox image,
+  the host's first boot and networking, and the test rig.  GitHub forwards the old name,
+  so old links and old clones keep working.  Image files now read
+  `sigmond-<version>-<date>-release.img`.
+- **`smd align` and `pm-align` look for releases on HamSCI/sigmond first.**  They turn
+  to the image repo only when HamSCI/sigmond holds no such release, as for v3.93 and
+  older.  A network fault stops them rather than send a station back to an older
+  release.  Until every station runs v3.94, each release appears in both places.
+- **Every release passes a bare-metal install test.**  A fresh Debian VM on the rig
+  follows `docs/install-bare-metal.md` word for word.  With no SDR attached, the radio
+  clients wait for one, and `smd check` says so.  The bless step refuses a release
+  without that test's pass.
+
+### Bring-up and checks
+
+- A bring-up with no SDR leaves stopped and disabled whatever it installs but leaves
+  off, igmp-querier included.  It never touches what the station already ran.  When
+  the SDR arrives, first-run bring-up finishes the job.
+- gpsdo-monitor stays off only where the probe finds no GPSDO and none ever reported
+  here.  A GPSDO that comes loose still raises its fault.
+- With radiod waiting for its SDR, `smd check` reads hf-timestd's missing config and a
+  new station's held uploads as waiting, not failed.
+- A bring-up whose steps failed now reports INCOMPLETE, even with no SDR attached.
+- `docs/install-bare-metal.md` now runs `apt-get update` and installs git first, and
+  checks out the release it names.
+
+### Timing and science
+
+- hf-timestd's HPPS watchdog now runs only where T6 runs.  Elsewhere it guarded
+  nothing, and align would have started it on every station.
+- GRAPE's daily processing (hamsci-physics `grape-daily`) runs at idle CPU and I/O
+  priority, so it no longer crowds the recorders.
+
 
 ### Each station reports how it differs from its release
 
@@ -86,22 +126,39 @@ than it did before.
   restarts.  It enables no service, and no hf-timestd timer that hf-timestd's service
   profile leaves off.  Before a station with
   hand-disabled timers runs align, record `smd align --accept unit:<timer>` for each
-  one.  B4's A/B experiments need this.  Otherwise align enables them again.
+  one.  Otherwise align enables them again.
 - **Magnetometers.**  A station without a magnetometer sees its magnetometer clients
   switched off.  A magnetometer that is missing but recorded before raises a fault in
   `smd check`, and align leaves the client alone.
 - **Deploy order.**  wd30 must apply the `station_drift` `sender` column before the
   fleet board export runs.  The export selects that column and fails without it.
+- **hf-timestd hotfix builds.**  B4 and SIGMA ran a hotfix build of the judge fix
+  (branches `hotfix/*-judge-age`).  The same fix now sits on main in this release.  A
+  station on such a build shows hf-timestd as diverged, and align leaves it.  Move its
+  checkout to the release commit as the checkout's owner, then restart the timestd units.
+- **Known: align may exit 1 on one step.**  Where `sigmond-site-timing` wrote a
+  meteor-scatter instance file named `<CALL>=<SUFFIX>.toml` beside the live
+  `<CALL>-<SUFFIX>` instance, the uploader routing step fails on that phantom instance.
+  Everything else completes, and no data goes missing.  v3.95 fixes the naming.  Until
+  then, align leaves `sigmond-location-check.timer` stopped on such a station; start it
+  with `systemctl start sigmond-location-check.timer`.
 
 ### How it was proven
 
-The sigmond suite (8,527 tests), hs-uploader's suite and the new location-check lock
-test pass.  A final whole-branch review found three faults the per-task tests had
-missed (the daily report crashed, hs-uploader dropped its row, and stock settings read
-as overrides); one fix wave closed them, and a second review confirmed it.  On
-2026-11-19 wd30 took the server half: sigmondb holds the new table, and spot and CODAR
-ingest kept flowing.  No station has installed this release yet; B4 and SIGMA run it
-first as canaries.
+The sigmond suite (8,926 tests on the merged main), hs-uploader's suite and the
+image repo's rig tests pass.  Reviews ran after every task and over the whole branch;
+they caught, among others, four ways root could run another account's git or follow
+its links, and the image-repo name that would have broken every station before the
+rename.  On 2026-11-19 wd30 took the server half; on 2026-11-20 it added the drift
+row's `sender` column.
+
+On the rig, candidate 2 (`sigmond-v3.94-20261121-release.img`) passed the nested
+image test, the update test from v3.93 forward and back, and the first bare-metal
+install test.  Candidate 1 had passed the image and update tests; the bare-metal test
+then found the bring-up and check faults listed above, and candidate 2 carries their
+fixes.  On 2026-11-21 B4 (Proxmox) and SIGMA (bare metal) ran candidate 2 as
+canaries: both aligned, their units stayed up and their timing authority stayed
+fresh.  Both aligns exited 1 on the known meteor-scatter routing step above.
 
 ---
 

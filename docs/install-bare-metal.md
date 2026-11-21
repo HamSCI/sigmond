@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond f3b0c6e on 2026-11-18
+> **Verified against:** sigmond v3.94 (blessed 2026-11-21): the rig's bare-metal install test follows this page word for word on a fresh Debian 13 machine for every release.
 > **Canonical for:** installing sigmond on a machine you already run (no Proxmox)
 > **The other way:** to turn a dedicated mini-PC into a station from the Proxmox USB image (Proxmox
 > host plus a decoder VM), follow the appliance guide,
