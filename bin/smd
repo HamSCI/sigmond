@@ -2711,6 +2711,26 @@ def _decoder_parity_check(build: Path, src: Path) -> bool:
     return ok
 
 
+def _system_fftw3f(root: Path = Path('/')) -> Optional[tuple]:
+    """The distribution's FFTW for the decoder build: (PKG_CONFIG_LIBDIR,
+    path of its static libfftw3f.a), or None when libfftw3-dev's static
+    library is not where Debian puts it.
+
+    UberSDR's CMakeLists asks pkg-config for fftw3f, and pkg-config searches
+    /usr/local first.  KPH1 and KPH2 carry FFTW 3.3.11 there for their radiod,
+    so the 8719788 rebuild linked 3.3.11 and failed parity (wsprd 19 of 175
+    cases, jt9 3 of 589; 2026-11-21): WSJT-X's stored outputs came from the
+    system's 3.3.10, and N8UR, with only that, passed.  Naming the system
+    library keeps whatever sits in /usr/local out of the decoders."""
+    found = sorted((root / 'usr' / 'lib').glob('*-linux-gnu*/libfftw3f.a'))
+    if len(found) != 1:
+        return None
+    lib = found[0]
+    libdir = ':'.join([str(lib.parent / 'pkgconfig'),
+                       str(root / 'usr' / 'share' / 'pkgconfig')])
+    return libdir, str(lib)
+
+
 def _build_ubersdr_decoders(*, check: bool = True) -> bool:
     """Build UberSDR's wsprd and jt9 from pinned source into
     /usr/local/libexec/sigmond/decoders/ubersdr/, verify they decode exactly
@@ -2786,10 +2806,21 @@ def _build_ubersdr_decoders(*, check: bool = True) -> bool:
     version = f'sigmond-{pin[:9]}'
     _info(f'ubersdr-decoders: configure (Release, '
           f'-march={arch or "<baseline>"}) ...')
-    r = _run(['cmake', '-S', str(src), '-B', str(build),
-              '-DCMAKE_BUILD_TYPE=Release',
-              f'-DWSPRD_X86_ARCH={arch}',
-              f'-DWSPRD_VERSION={version}'], sudo=True)
+    configure = ['cmake', '-S', str(src), '-B', str(build),
+                 '-DCMAKE_BUILD_TYPE=Release',
+                 f'-DWSPRD_X86_ARCH={arch}',
+                 f'-DWSPRD_VERSION={version}']
+    system_fftw = _system_fftw3f()
+    if system_fftw:
+        pkgconfig_libdir, fftw_static = system_fftw
+        # On the argv, not in env=: sudo resets the environment.
+        configure = (['env', f'PKG_CONFIG_LIBDIR={pkgconfig_libdir}']
+                     + configure + [f'-DFFTW3F_STATIC_LIBRARY={fftw_static}'])
+        _info(f'ubersdr-decoders: FFTW from the system ({fftw_static})')
+    else:
+        _warn('ubersdr-decoders: no system libfftw3f.a found; the build '
+              'takes whatever FFTW pkg-config finds first')
+    r = _run(configure, sudo=True)
     if r.returncode != 0:
         _err(f'ubersdr-decoders: cmake failed: {r.stderr[-400:]}')
         return False
