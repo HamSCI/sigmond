@@ -1,0 +1,19 @@
+model=Intel(R) Core(TM) i5-6500T CPU @ 2.50GHz
+fftw=3.3.8
+fftw_build=fftw-3.3.8-sse2-avx
+samprate=129600000
+codelets=522
+bytes=50644
+# Measured 2026-10-19 on W7WKR-1 (Lenovo ThinkCentre M910, i5-6500T: 4 cores, no SMT, no L3 cache
+# allocation, Ubuntu 22.04 jammy, libfftw3 3.3.8-2ubuntu8) from scratch on its fft core with WD and
+# radiod stopped: fftwf-wisdom -v -n -T 1 over WsprDaemon's 91-spec list, rof3240000 (129.6 Msps)
+# first, 2 h 47 min.  Copied from rrobinett/wsprdaemon bb3c949
+# (wisdom/fftw-3.3.8-sse2-avx/intel-r-core-tm-i5-6500t-cpu-2-50ghz.wisdom).
+#
+# It covers WD's list, not all of sigmond's: the cdb sizes and anything else WD never asked for are
+# not in it, so the planner still measures those on the host (minutes, not the hours rof3240000
+# takes).  Re-harvest from a sigmond i5-6500T once its fft.log stays empty.
+#
+# FFTW 3.3.8 ONLY.  find_bundle matches on the CPU model alone, so an i5-6500T on Ubuntu 24.04+ /
+# Debian 13 (FFTW 3.3.10) would also be seeded with it.  FFTW then rejects the import and plans
+# everything, as it would have anyway (HamSCI/sigmond#114 adds the version check).

@@ -33,3 +33,4 @@ planned, copy `/etc/fftw/wisdomf` here as `wisdomf-<slug>` and write its
 Entries:
 - `wisdomf-amd-ryzen-7-5825u` — AMD Ryzen 7 5825U (B4, 2026-07-23)
 - `wisdomf-amd-ryzen-7-6800u` — AMD Ryzen 7 6800U (G3ZIL, bare metal, 2026-11-19)
+- `wisdomf-intel-core-i5-6500t-2-50ghz` — Intel Core i5-6500T, FFTW 3.3.8 / Ubuntu 22.04 only (W7WKR-1 via WsprDaemon, 2026-10-19; covers WD's spec list, not sigmond's cdb sizes)
