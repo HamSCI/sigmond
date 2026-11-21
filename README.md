@@ -15,7 +15,9 @@ beacon TEC, meteor scatter), and sigmond handles what they share.
 
 ## Start here
 
-All documentation opens from one front door, **[docs/README.md](docs/README.md)**.
+All documentation opens from one front door, **[docs/README.md](docs/README.md)**,
+also published with every component's docs as one searchable site:
+**[hamsci.github.io/sigmond](https://hamsci.github.io/sigmond/)**.
 Pick the door that matches you:
 
 | You | Start at |
