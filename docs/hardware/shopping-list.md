@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
+> **Verified against:** sigmond v3.94 on 2026-11-21 (bill of materials; parts and prices from the makers' pages that day)
 > **Canonical for:** the station parts list
 
 Words in *italics* the first time they appear are explained in the
@@ -30,6 +30,69 @@ figures approximate, as of 2026-08, check current prices).
 How the hardware *behaves* — dynamic range, AGC, loss modes, timing
 roles, failure modes: [character.md](character.md).
 
+## Bill of materials
+
+One line per part, grouped by what the part does.  Prices come from the makers' pages on 2026-11-21; check
+before you buy.  "DASI2" marks a part a grant station carries; "optional" names the product the part adds.
+
+### Receive chain
+
+| # | Part | Model | Where | Price | Needed for |
+|---|---|---|---|---|---|
+| 1 | Active receive antenna | DX Engineering **DXE-RSEAV-1** (short active vertical with the DXE-AVA-3 matching unit) | [dxengineering.com](https://www.dxengineering.com/part/dx-engineering/dxe-rseav-1/7264263) | $250 | DASI2 |
+| 2 | Antenna power | **DXE-FVI-1** feedline voltage injector (in the **DXE-RSEAV-1FVI** package, $350) | [dxengineering.com](https://www.dxengineering.com/part/dx-engineering/dxe-fvi-1/2092010) | $100 | DASI2 |
+| 3 | Preamp and 60 MHz low-pass filter | Turn Island Systems **60 MHz Filter-Preamp** (about +20 dB; the filter removes 88-108 MHz FM) | [turnislandsystems.com](https://turnislandsystems.com/product/60-mhz-filter-preamp/) | $80 | DASI2 |
+| 4 | Coax | 75 Ω RG6 with F connectors for the antenna run; short 50 Ω SMA jumpers at the radio | any | — | DASI2 |
+| 5 | Surge protection and ground | coax surge protector where the cable enters; ground rod and bonding | any | — | DASI2 |
+| 6 | SDR receiver | **RX888 Mk II** (`04b4:00f1`) | — | $150-250 | DASI2 |
+
+The RSEAV-1 powered through the feedline covers 100 kHz to 30 MHz.  WWVB at 60 kHz lies below that: it needs the
+antenna's Direct DC input, fed over a second, DC-only coax.  The 60 MHz filter still passes all of HF and 6 m.
+
+### Timing
+
+| # | Part | Model | Where | Price | Needed for |
+|---|---|---|---|---|---|
+| 7 | GPSDO | Leo Bodnar **LBE-1421** (validated; GPS antenna included), or John Ackerman's MVR GPSDO | leobodnar.com | $200-320 | DASI2 |
+| 8 | RX888 external clock adaptor | Turn Island Systems **RX888 Clock Kit and Thermal Pad**, sold by TAPR | [tapr.org](https://tapr.org/product/rx888-clock-kit-and-thermal-pad/) | $30 | DASI2 |
+| 9 | Time injector | Turn Island Systems **TIS-TS1 TimeSync** (`239a:801e`) | [turnislandsystems.com](https://turnislandsystems.com/product/tis-ts1-timesync/) | $170 | optional: T6 timing |
+| 10 | Injector splitter | Turn Island Systems **TIS-MP4 TimeSync MP4**: puts the TS-1's signal into the antenna-to-receiver line, up to four receivers, >65 dB port isolation | [turnislandsystems.com](https://turnislandsystems.com/product/timesync-mp4/) | $105 | optional: T6 timing |
+| 11 | GPS antenna for the TS-1 | L1 GPS antenna and cable (the Bodnar's comes in its box) | any | — | optional: T6 timing |
+
+⚠ Once fitted with the clock kit, the RX888 will not run without the external 27 MHz reference (TAPR's page says
+so).  Set the Bodnar's OUT2 to 27 MHz and keep its drive above the floor: at 8 mA an LBE-Mini failed to take over
+AC0G-ND's RX888 clock.
+
+### Science sensors
+
+| # | Part | Model | Where | Price | Needed for |
+|---|---|---|---|---|---|
+| 12 | Magnetometer | **PNI RM3100** on the HamSCI board, with an MCP9808 temperature sensor | HamSCI | $50-120 | DASI2: geomagnetic data |
+| 13 | Magnetometer link | **Pololu 5397** isolated USB-to-I²C adapter with isolated power (`1ffb:2503`) | [pololu.com](https://www.pololu.com/) | $35-50 | DASI2: geomagnetic data |
+| 14 | Magnetometer cable | CAT 5 or better, sensor to adapter, so the sensor sits away from steel and the shack | any | — | DASI2: geomagnetic data |
+| 15 | GNSS receiver | u-blox **ZED-F9P** or **LG290P** | — | $200-350 | optional: local TEC |
+| 16 | GNSS antenna | a multi-band GNSS antenna (L1/L2/L5); an L1 GPS puck will not do | any | — | optional: local TEC |
+
+### Computer, USB and power
+
+| # | Part | Model | Where | Price | Needed for |
+|---|---|---|---|---|---|
+| 17 | Station computer | Beelink mini-PC with an AMD Ryzen 7 5825U, 16 GB RAM or more, 500 GB NVMe or more | — | $350-650 | DASI2 |
+| 18 | External drive | 1-2 TB USB drive (six timing channels fill about 1 TB in 10 days) | any | — | optional: weeks of raw IQ |
+| 19 | USB hub with per-port power switching | **StarTech HB31C3A1CPD3** (proven); a Lenovo hub also works, no longer made, a few left online | — | — | DASI2 |
+| 20 | A clean supply for the hub | a low-noise supply; ferrite on its lead | — | — | DASI2 |
+| 21 | Ferrites and common-mode chokes | on USB and coax near the computer | any | — | DASI2 |
+| 22 | UPS | small UPS, or Turn Island's TIS-1250 SuperCap UPS for the computer | — | — | optional |
+| 23 | Network | wired Ethernet to a router with DHCP | — | — | DASI2 |
+| 24 | Install kit | USB stick 16-32 GB; a monitor and keyboard for the first boot | — | $10 | install only |
+
+The hub on line 19 lets sigmond power-cycle a wedged RX888 from afar (`sigmond-sdr-recover`).  ⚠ A hub that
+*reports* per-port power switching may not cut power at all: AC0G-B4's VIA and Anker hubs both reported it and
+held 4.98 V through every cut on a USB meter; the StarTech does cut.  Prove any other hub with a meter before it
+goes into service.  John Ackerman has built a USB power control device for this job; it is not yet in production.
+⚠ Mind the hub's own supply: a wall-wart on AC0G-ND's hub raised the noise floor enough to kill weak-signal
+reception.
+
 ## Required
 
 | Part | Exact model we run | Why | Notes / alternatives |
@@ -37,7 +100,7 @@ roles, failure modes: [character.md](character.md).
 | Station computer | x86-64 mini-PC, **16 GB RAM or more for the whole machine**, internal NVMe/SSD (source: `sigmond-appliance/INSTALL.md` §1). The Proxmox reference system is a KAMRUI mini-PC with an AMD Ryzen 5 5560U — 6 cores / 12 threads (source: `sigmond/docs/proxmox/CLAUDE.md` §Hardware context); Beelink-class boxes are also in service (source: `mag-recorder/docs/PROVENANCE.md`, `gpsdo-monitor/README.md` §Status). On AC0G/B4 the **decoder VM's share** is 14 vCPUs, ~9 GB RAM and a 252 GB disk 52 % used (source: `nproc; free -g; df -h` run inside the VM on b4, 2026-08-23) — the 16 GB floor is for the host, which also runs Proxmox. | The radio streams more than 2 Gbit/s in real time and the host has to keep up with it; `radiod` works to a ~20 ms internal latency budget (source: `ka9q-radio/docs/SDR/rx888.md`). Fall behind and you lose samples silently rather than loudly (source: `sigmond/docs/PACKET-LOSS-DIAGNOSTICS.md`). | ⚠ **The whole internal drive is erased** by the appliance installer (source: `sigmond-appliance/INSTALL.md` §1). ⚠ **Buy more disk than the old sizing suggests.** Measured on AC0G/B4, 2026-08-23: about **15 GB per timing channel per day** — one complete UTC day (2026-08-22, all 288 five-minute files) of one channel's compressed raw IQ came to 15,073,610,352 bytes in `/var/lib/timestd/raw_buffer/WWV_25000/20260822` — so that station's **six** channels write roughly **90 GB a day**. That is **raw IQ only**. On top of it the station keeps a cumulative analysis database — `/var/lib/timestd/phase2/timestd.db`, 9,233,326,080 of the 9,244,733,098 bytes in `phase2` on b4 (measured 2026-08-23) — which **grows continuously instead of rolling**, plus a few megabytes of per-channel products. Amortised over what b4 is currently holding that is roughly **1 GB per channel per day**, so budget **≈16 GB per channel per day, ≈96 GB a day** for a six-channel station, and treat the database as a slow permanent addition rather than part of the daily churn. The written sizing "3 channels want 60 GB minimum, 6 channels 120 GB, 9 channels 180 GB" (source: `hf-timestd/INSTALLATION.md` §Storage Requirements) is barely more than **one day** of recording at the measured rate; it is a floor for aggressive retention, not a comfortable disk. b4 runs a **252 GB** disk for six channels and holds about a day and a half of raw IQ before its own eviction reclaims the space. Buy 500 GB or more and you will not think about it again. To keep weeks of raw IQ for looking back at flares and other events, add an external drive: six channels fill about 1 TB in 10 days (see [day-2.md §3, "Keeping more days"](../operator/day-2.md#keeping-more-days-a-rule-of-thumb-for-an-external-drive)). (The two written sources disagree by ~2.7× — [docs-gap ledger row 20](../contributor/docs-gap-ledger.md); the measurement above is the tie-break and neither source has been corrected yet.) Not a laptop — see [Things that look right but aren't](#things-that-look-right-but-arent). |
 | GPSDO (GPS-disciplined oscillator) | **Leo Bodnar LBE-1421**, USB ID `1dd2:2444`, serial `0C7BB80D10EF` on b4 — PLL locked, 3D GPS fix, OUT1 = 10 MHz, OUT2 = 27 MHz, PPS enabled (source: `lsusb` and `/run/gpsdo/0C7BB80D10EF.json` on b4, 2026-08-23). | A sampling clock disciplined to GPS instead of drifting with room temperature — the ruler every timing measurement is made against. `smd bringup dasi2` provisions `gpsdo-monitor` as part of the station's core infrastructure (source: `sigmond/etc/catalog.toml` `[profile.dasi2]`). | Other Leo Bodnar models work, with different feature sets — see the notes under this table. Without a GPSDO the appliance still installs and still records WSPR and FT8/FT4, but the sample clock drifts, the higher timing tiers are unavailable, and it is not a DASI2 station. (`sigmond-appliance/INSTALL.md` §1 used to list the GPSDO among "optional extras"; it was corrected to the required list on 2026-08-23, so the two pages now agree.) |
 | SDR receiver | **RX888 Mk II** (enumerates as `04b4:00f1 Cypress Semiconductor Corp. RX888mk2`) (source: `lsusb` on b4, 2026-08-23) | It samples the whole HF spectrum at once, which is what lets one box run WSPR, FT8, time standards, HFDL and meteor scatter from a single antenna (source: `ka9q-radio/docs/SDR/rx888.md`). | Any SDR ka9q-radio supports will work for a first light (Airspy HF+, SDRplay) (source: `hf-timestd/INSTALLATION.md` §Prerequisites → Hardware), but the RX888 Mk II is the one the appliance image, the timing chain and every recipe here assume. **One per host** — the upstream author recommends against two (source: `ka9q-radio/docs/SDR/rx888.md`). |
-| USB 3 port and cable for it | On b4 the RX888 sits on `Bus 004 Device 003`, directly on a `1d6b:0003 Linux Foundation 3.0 root hub` — nothing between it and the machine (source: `lsusb` on b4, 2026-08-23). | USB 2 is nowhere near fast enough for 2 Gbit/s, and a hub in the path starves the transfer; the symptom is silent sample loss, not an error message (source: `ka9q-radio/docs/SDR/rx888.md`; `sigmond/docs/PACKET-LOSS-DIAGNOSTICS.md`). | Use the blue port, use the cable that came with the radio, plug it straight in. |
+| USB 3 path for it | The RX888 goes on a USB 3 port of a hub with per-port power switching (line 19 above), so sigmond can cut and restore its power when its firmware wedges. | USB 2 cannot carry 2 Gbit/s; the symptom is silent sample loss, not an error message (source: `ka9q-radio/docs/SDR/rx888.md`; `sigmond/docs/PACKET-LOSS-DIAGNOSTICS.md`). A hub *without* power switching only adds a place to fail. | Use the cable that came with the radio. Never a hub that cannot prove its power cut on a meter. |
 | HF antenna | AC0G/B4 records `description = "T3FD"` — a terminated tilted folded dipole (source: `/etc/sigmond/site-profile.toml` on b4, 2026-08-23); the DASI2 kit reference antenna is a DX Engineering (DXE) model (source: `sigmond/README.md` §Architecture at a glance). | The receiver hears everything at once, so a broadband antenna beats a monoband one — a resonant 20 m dipole gives you 20 m and little else. | Any broadband HF antenna that hears WSPR on 20 m will do for a first light. Coverage of 2.5–25 MHz is what the timing client wants (source: `hf-timestd/INSTALLATION.md` §Prerequisites → Hardware). Add coax, plus a small GPS puck antenna with sky view for the GPSDO (and a second one for the TS-1, if you add it). |
 | Wired Ethernet | b4 reports `lan-capable` with a working *multicast* querier on `ens18` (source: `smd status` on b4, 2026-08-23). | `radiod` publishes each channel as a *multicast* RTP stream and every client subscribes to it; Wi-Fi handles multicast badly and the appliance does not configure it at all (source: `sigmond-appliance/INSTALL.md` §1; `sigmond/docs/networking.md`). | An ordinary home router with DHCP and internet is enough — "if other devices just work when plugged in, you're fine" (source: `sigmond-appliance/INSTALL.md` §1). |
 | USB stick for the install | 8 GB minimum; 16–32 GB ideal (source: `sigmond-appliance/INSTALL.md` §1). | The appliance image is written to a stick, booted once, and then removed. | ⚠ Everything on the stick is erased. You also need any second computer — Mac, Windows or Linux — to write it. |
@@ -84,7 +147,7 @@ One thing worth knowing before you buy the optional parts:
 Read this as a wiring list, not a picture:
 
 - **Antenna → RX888 HF/RF input** (coax).
-- **RX888 → station computer**: USB 3 cable into a blue USB-3 port, **no hub in between**. On b4 the radio is the only thing on its USB 3 root hub (source: `lsusb`, 2026-08-23).
+- **RX888 → power-switching hub → station computer**: USB 3 all the way, through a hub that really cuts power per port (line 19 of the bill of materials). B4 runs its RX888 on port 2 of a StarTech HB31C3A1CPD3, and `uhubctl -n 14b0 -p 2 -a cycle` cured a wedged card there without a trip to the box.
 - **GPSDO → RX888 reference input**: the LBE-1421 has two outputs and b4 runs both — OUT1 at 10 MHz and OUT2 at 27 MHz, both enabled (source: `/run/gpsdo/0C7BB80D10EF.json` on b4, 2026-08-23). The RX888's own sampling clock is 27 MHz, and ka9q-radio's guidance for a precise sampling clock is to feed an external 27 MHz reference to the connector inside the unit (source: `ka9q-radio/docs/SDR/rx888.md` §calibrate). Sigmond's own docs describe the GPSDO generically as "10 MHz + PPS" (source: `sigmond/README.md` §What you need). ⚠ **Which jack each output is physically patched into is not recorded in any file on the station** — check your own radio's manual and label your cables. Tracked as a gap in [`../contributor/docs-gap-ledger.md`](../contributor/docs-gap-ledger.md).
 - **GPSDO → station computer** over USB: **health monitoring, plus the fallback timing tier.** The link reports lock state, GPS fix, satellite count and output frequencies, and hf-timestd uses the GPSDO's USB-delivered GPS/PPS as tier T5 (microsecond-to-millisecond class) when the TS-1 path is unavailable (source: `hf-timestd/docs/ARCHITECTURE-FIRST-PRINCIPLES.md`; `hf-timestd/docs/METROLOGY.md`). What this link does **not** give you is metrology: the PPS edge statistics `gpsdo-monitor` publishes are OS-millisecond bound and are a liveness/health indicator only (source: `gpsdo-monitor/README.md` §"What it does *not* do").
 - **GPS puck antenna → GPSDO.** The GPSDO needs sky view to hold lock; b4 shows a 3D fix on 7 satellites with `antenna_ok` (source: `/run/gpsdo/<serial>.json` on b4, 2026-08-23).
@@ -93,7 +156,7 @@ Read this as a wiring list, not a picture:
 - **RM3100 → Pololu adapter** over I²C (addresses 0x23 and 0x1F), then **Pololu 5397 → station computer** over USB, appearing as `/dev/ttyMAG0` (source: `mag-recorder/README.md` §Data flow).
 - **Station computer → router**: ordinary wired Ethernet.
 
-A powered USB **hub is fine** for the slow devices — `lsusb -t` on b4 shows the magnetometer adapter one VIA Labs hub deep and the GPSDO two hubs deep, both on the same 480 Mbit/s USB 2 bus, while the RX888 sits by itself on a 5 Gbit/s port of its own root hub (source: `lsusb -t` on b4, 2026-08-23). It is only the RX888 that must go straight to the machine.
+The same hub carries the slow devices — `lsusb -t` on b4 shows the magnetometer adapter one VIA Labs hub deep and the GPSDO two hubs deep, both on the same 480 Mbit/s USB 2 bus, while the RX888 sits by itself on a 5 Gbit/s port of its own root hub (source: `lsusb -t` on b4, 2026-08-23). The RX888 needs a USB 3 port on it; the slow devices can share the USB 2 side.
 
 ## Approximate cost
 
@@ -149,7 +212,7 @@ of [`../contributor/docs-gap-ledger.md`](../contributor/docs-gap-ledger.md).
 | Looks fine | What actually happens |
 |---|---|
 | Plugging the RX888 into a USB 2 port | USB 2 cannot carry 2 Gbit/s. You get sample loss, which shows up as gaps in recordings rather than as an error (source: `ka9q-radio/docs/SDR/rx888.md`; `sigmond/docs/PACKET-LOSS-DIAGNOSTICS.md`). |
-| Putting a USB hub between the RX888 and the computer | Same outcome — starved transfers and silent loss. Hubs are fine for the GPSDO and the magnetometer, never for the radio. |
+| Any USB hub between the RX888 and the computer | Only a hub that really switches power per port earns its place, and only after a USB meter proves it: two hubs on B4 reported the feature and never cut power. A plain hub just adds a place to fail. |
 | Using Wi-Fi | The station's clients talk to `radiod` over *multicast*, which Wi-Fi handles badly; the appliance does not configure Wi-Fi at all (source: `sigmond-appliance/INSTALL.md` §1; `sigmond/docs/networking.md`). |
 | Using a laptop as the station computer | The install hands the machine's USB controllers to the station VM, so the built-in keyboard and any monitor console stop working — **by design** (source: `sigmond-appliance/INSTALL.md` §8; `sigmond/docs/proxmox/wsprdaemon-proxmox-vm-setup.md`). The monitor still shows a login panel with the station's addresses — it is only the keyboard that dies (source: `sigmond-appliance/INSTALL.md` §8). On a mini-PC you shrug and use SSH. On a laptop you have bricked your keyboard. |
 | Rebooting to make an unseen RX888 appear | A warm reboot never drops USB power, and the radio's FX3 chip stays latched as long as VBUS is held. **Power the whole box off**, then on — or physically unplug the radio (source: `sigmond/scripts/proxmox/sigmond-wizard.sh`). |
