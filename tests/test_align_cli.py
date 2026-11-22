@@ -1594,6 +1594,15 @@ class AlignBringupTests(unittest.TestCase):
         broken = NS(enabled_components=lambda: (_ for _ in ()).throw(OSError("unreadable")))
         self.assertTrue(smd._align_host_uploads(topology=broken, catalog=cat))
 
+    def test_host_without_upload_clients_leaves_routing(self):
+        # B1 again: routing re-runs the manifest step, which fails the same way.
+        with mock.patch.object(smd, "_align_host_uploads", return_value=False), \
+             mock.patch.object(smd, "_update_routing", side_effect=AssertionError("routed")):
+            step = smd._align_routing()
+        self.assertEqual(step.outcome, "left")
+        self.assertNotIn(step.outcome, smd._ALIGN_BLOCKING)
+        self.assertIn("no client", step.detail)
+
     def test_host_uploads_without_a_topology_file_keeps_the_step(self):
         with mock.patch.object(smd, "_ALIGN_TOPOLOGY_PATH", Path("/nonexistent/topology.toml")):
             self.assertTrue(smd._align_host_uploads())

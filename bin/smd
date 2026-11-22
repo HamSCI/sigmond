@@ -2113,8 +2113,13 @@ def _update_route_step() -> bool:
 
 def _align_routing():
     """`smd align --apply`'s routing step, after its bring-up re-run: the
-    same child as `smd update --apply`'s."""
+    same child as `smd update --apply`'s.  A host whose topology enables no
+    client is left: routing re-runs the uploader manifest step, which fails
+    there (B1, v3.94 roll)."""
     from sigmond import align_apply
+    if not _align_host_uploads():
+        return align_apply.Step('admin uploader routing --apply', 'left',
+                                'topology enables no client, so nothing on this host uploads')
     rc = _update_routing()
     if rc:
         return align_apply.Step(
