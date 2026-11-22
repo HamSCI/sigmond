@@ -7,7 +7,9 @@ for `/`.
 """
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -38,16 +40,23 @@ def codar_instance(root: Path, key: str, rid: str, radiod: str, *,
     return p
 
 
+GRID_WARNING = ("WARNING chirp_recorder.config: instance AC0G-B4: only "
+                "grid_square given; timing uses its centre")
+
+
 class FakeRun:
     """Every command convert runs, recorded.  `config init` writes the file
-    the real one would; `validate --json` answers `validate_json`."""
+    the real one would; `validate --json` answers `validate_json` on stdout
+    and, as on a station located by grid, a WARNING on stderr.  Returns
+    (rc, stdout, stderr)."""
 
     def __init__(self, root: Path, capsys):
         self.root = root
         self.capsys = capsys
         self.calls: list = []
         self.validate_json = None
-        self.fail = set()          # argv[0:2] tuples that exit 1
+        self.fail = set()          # argv[0:2] or argv[0:3] tuples that exit 1
+        self.after = {}            # argv prefix tuple -> callable, run after
         self._out = ""
 
     @property
@@ -58,22 +67,38 @@ class FakeRun:
     def __call__(self, argv, env=None):
         argv = list(argv)
         self.calls.append(argv)
+        try:
+            return self._answer(argv)
+        finally:
+            for prefix, fn in self.after.items():
+                if tuple(argv[:len(prefix)]) == prefix:
+                    fn()
+
+    def _answer(self, argv):
         if tuple(argv[:2]) in self.fail or tuple(argv[:3]) in self.fail:
-            return 1, f"{argv[0]}: refused"
+            return 1, "", f"{argv[0]}: refused"
         if argv[:3] == ["chirp-recorder", "config", "init"]:
             key = argv[argv.index("--instance") + 1]
             d = self.root / "etc" / "chirp-recorder"
             d.mkdir(parents=True, exist_ok=True)
+            os.chmod(d, 0o755)             # as install.sh's mkdir -p as root
             (d / f"{key}.toml").write_text("# chirp\n")
-            return 0, f"chirp-recorder: wrote {d / key}.toml"
+            return 0, f"chirp-recorder: wrote {d / key}.toml\n", ""
         if argv[:2] == ["chirp-recorder", "validate"]:
             doc = self.validate_json or {
                 "ok": True, "issues": [],
                 "capacity": {"admitted": ["4.4630MHz"], "refused": [],
                              "estimated": False}}
             doc = {"ok": True, "issues": [], **doc}
-            return (0 if doc["ok"] else 1), json.dumps(doc)
-        return 0, ""
+            return (0 if doc["ok"] else 1), json.dumps(doc), GRID_WARNING + "\n"
+        return 0, "", ""
+
+
+@pytest.fixture(autouse=True)
+def trusted_is_me(monkeypatch):
+    """Root owns the state directory on a station; here the test user does."""
+    from sigmond import instance_move as IM
+    monkeypatch.setattr(IM, "_trusted_uid", lambda: os.getuid())
 
 
 @pytest.fixture
@@ -145,11 +170,13 @@ def test_steps_run_in_the_briefs_order(tmp_root, fake_run):
     assert argv[2] == ["hs-uploader", "sink", "set", "chirp-recorder", "fill",
                        "--reason", "side by side with codar-sounder",
                        "--by", "smd admin chirp convert"]
-    assert argv[3] == ["smd", "enable", "chirp-recorder"]
+    assert argv[3] == []                           # topology, in process
     assert argv[4] == ["smd", "admin", "uploader", "manifest", "--write"]
     assert argv[5] == ["systemctl", "enable", "--now",
                        "chirp-recorder@AC0G-B4.service"]
     assert len(argv) == 7 and argv[6] == []        # the state file
+    assert [s.phase for s in convert_steps(t)] == [
+        "config", "validate", "sink", "topology", "manifest", "start", "state"]
 
 
 def test_convert_writes_the_state_file_and_leaves_codar_alone(tmp_root, fake_run):
@@ -164,9 +191,13 @@ def test_convert_writes_the_state_file_and_leaves_codar_alone(tmp_root, fake_run
     assert doc["started_at"].endswith("Z")
     assert state_path(tmp_root / "etc", "AC0G-B4") == \
         tmp_root / "var/lib/sigmond/chirp-migrate/AC0G-B4.json"
-    # codar-sounder: no command names it, and its file stays.
-    assert not any("codar-sounder" in " ".join(c[:4]) for c in fake_run.calls
-                   if c[0] == "systemctl")
+    # codar-sounder: no argv names it except the --from-codar path and the
+    # brief's sink reason.
+    for c in fake_run.calls:
+        rest = [a for a in c if a not in (
+            str(tmp_root / "etc/codar-sounder/AC0G-B4.toml"),
+            "side by side with codar-sounder")]
+        assert not any("codar-sounder" in a for a in rest), c
     assert (tmp_root / "etc/codar-sounder/AC0G-B4.toml").exists()
 
 
@@ -184,6 +215,7 @@ def test_a_refused_config_init_stops_before_anything_else(tmp_root, fake_run):
     fake_run.fail.add(("chirp-recorder", "config", "init"))
     assert apply_convert(tmp_root, run=fake_run) == 1
     assert len(fake_run.calls) == 1
+    assert "nothing changed" in fake_run.output
     assert not state_path(tmp_root / "etc", "AC0G-B4").exists()
 
 
@@ -317,3 +349,223 @@ def test_verb_reports_a_capacity_refusal(tmp_root, fake_run):
     assert smd.cmd_chirp_convert(_args(smd, 'convert'), run=fake_run,
                                  root=tmp_root) == 1
     assert "31.0" in fake_run.output
+
+
+
+# -- round 1: root-safe state, stderr apart, full rollback --------------------
+
+STATE = "var/lib/sigmond/chirp-migrate"
+
+
+def _topology(root):
+    return root / "etc/sigmond/topology.toml"
+
+
+def _chirp_enabled(root) -> bool:
+    from sigmond.topology import load_topology
+    return load_topology(_topology(root)).is_enabled("chirp-recorder")
+
+
+def test_validate_stderr_stays_out_of_the_json(tmp_root, fake_run):          # I1
+    _b4(tmp_root)
+    assert apply_convert(tmp_root, run=fake_run) == 0
+    out = fake_run.output
+    assert "only grid_square" in out              # logged, not parsed
+
+
+def test_a_symlink_at_the_part_name_is_never_followed(tmp_root, fake_run):   # C1
+    _b4(tmp_root)
+    d = tmp_root / STATE
+    d.mkdir(parents=True, mode=0o700)
+    victim = tmp_root / "precious"
+    victim.write_text("precious\n")
+    (d / "AC0G-B4.json.part").symlink_to(victim)
+    assert apply_convert(tmp_root, run=fake_run) == 0
+    assert victim.read_text() == "precious\n"
+    p = d / "AC0G-B4.json"
+    assert p.is_file() and not p.is_symlink()
+    assert json.loads(p.read_text())["key"] == "AC0G-B4"
+
+
+def test_a_symlink_at_the_state_file_refuses(tmp_root, fake_run):           # C1
+    _b4(tmp_root)
+    d = tmp_root / STATE
+    d.mkdir(parents=True, mode=0o700)
+    victim = tmp_root / "precious"
+    victim.write_text(json.dumps({"key": "AC0G-B4"}))
+    (d / "AC0G-B4.json").symlink_to(victim)
+    targets, refused = convert_targets(tmp_root / "etc", run=fake_run)
+    assert targets == [] and "AC0G-B4.json" in refused[0]
+    assert apply_convert(tmp_root, run=fake_run) == 1
+    assert fake_run.calls == [] and "converted already" not in fake_run.output
+
+
+def test_a_group_writable_state_file_refuses(tmp_root, fake_run):           # C1
+    _b4(tmp_root)
+    d = tmp_root / STATE
+    d.mkdir(parents=True, mode=0o700)
+    (d / "AC0G-B4.json").write_text(json.dumps({"key": "AC0G-B4"}))
+    os.chmod(d / "AC0G-B4.json", 0o664)
+    assert apply_convert(tmp_root, run=fake_run) == 1
+    assert fake_run.calls == []
+
+
+def test_a_group_writable_state_directory_refuses(tmp_root, fake_run):      # C1
+    _b4(tmp_root)
+    d = tmp_root / STATE
+    d.mkdir(parents=True)
+    os.chmod(d, 0o770)
+    assert apply_convert(tmp_root, run=fake_run) == 1
+    assert fake_run.calls == []
+    assert not (d / "AC0G-B4.json").exists()
+
+
+def test_a_symlinked_state_directory_refuses(tmp_root, fake_run):           # C1
+    _b4(tmp_root)
+    elsewhere = tmp_root / "elsewhere"
+    elsewhere.mkdir(mode=0o700)
+    (tmp_root / "var/lib/sigmond").mkdir(parents=True)
+    (tmp_root / STATE).symlink_to(elsewhere)
+    assert apply_convert(tmp_root, run=fake_run) == 1
+    assert fake_run.calls == [] and list(elsewhere.iterdir()) == []
+
+
+def test_a_failed_manifest_reverts_topology_and_enables_no_unit(tmp_root, fake_run):  # I2
+    _b4(tmp_root)
+    fake_run.fail.add(("smd", "admin"))
+    assert apply_convert(tmp_root, run=fake_run) == 1
+    assert not (tmp_root / "etc/chirp-recorder/AC0G-B4.toml").exists()
+    assert not _chirp_enabled(tmp_root)
+    assert not any(c[0] == "systemctl" for c in fake_run.calls)
+    out = fake_run.output
+    assert "chirp-recorder disabled in topology again" in out
+    assert "sink switch stays at fill" in out
+
+
+def test_a_topology_flag_set_before_stays_set(tmp_root, fake_run):          # I2
+    _b4(tmp_root)
+    from sigmond.topology import set_component_enabled
+    _topology(tmp_root).parent.mkdir(parents=True, exist_ok=True)
+    set_component_enabled("chirp-recorder", True, _topology(tmp_root))
+    fake_run.fail.add(("smd", "admin"))
+    assert apply_convert(tmp_root, run=fake_run) == 1
+    assert _chirp_enabled(tmp_root)
+    assert "disabled in topology again" not in fake_run.output
+
+
+def test_a_converted_station_enables_chirp_in_topology(tmp_root, fake_run):
+    _b4(tmp_root)
+    assert apply_convert(tmp_root, run=fake_run) == 0
+    assert _chirp_enabled(tmp_root)
+
+
+def test_a_failed_start_rolls_back_and_a_second_run_finishes(tmp_root, fake_run):  # I3
+    _b4(tmp_root)
+    fake_run.fail.add(("systemctl", "enable"))
+    assert apply_convert(tmp_root, run=fake_run) == 1
+    assert ["systemctl", "disable", "--now",
+            "chirp-recorder@AC0G-B4.service"] in fake_run.calls
+    assert not (tmp_root / "etc/chirp-recorder/AC0G-B4.toml").exists()
+    assert not state_path(tmp_root / "etc", "AC0G-B4").exists()
+    assert not _chirp_enabled(tmp_root)
+    assert "disabled and stopped chirp-recorder@AC0G-B4.service" in fake_run.output
+    fake_run.fail.clear()
+    assert apply_convert(tmp_root, run=fake_run) == 0
+    assert state_path(tmp_root / "etc", "AC0G-B4").exists()
+
+
+def test_a_failed_state_write_rolls_back_and_a_second_run_finishes(tmp_root, fake_run):  # I3
+    _b4(tmp_root)
+    d = tmp_root / STATE
+    fake_run.after[("systemctl", "enable")] = lambda: os.chmod(d, 0o770)
+    assert apply_convert(tmp_root, run=fake_run) == 1
+    assert ["systemctl", "disable", "--now",
+            "chirp-recorder@AC0G-B4.service"] in fake_run.calls
+    assert not (tmp_root / "etc/chirp-recorder/AC0G-B4.toml").exists()
+    assert not (d / "AC0G-B4.json").exists()
+    fake_run.after.clear()
+    os.chmod(d, 0o700)
+    assert apply_convert(tmp_root, run=fake_run) == 0
+    assert state_path(tmp_root / "etc", "AC0G-B4").exists()
+
+
+def test_a_failed_disable_keeps_the_config_and_says_so(tmp_root, fake_run):  # I3
+    _b4(tmp_root)
+    fake_run.fail.add(("systemctl", "enable"))
+    fake_run.fail.add(("systemctl", "disable"))
+    assert apply_convert(tmp_root, run=fake_run) == 1
+    assert (tmp_root / "etc/chirp-recorder/AC0G-B4.toml").exists()
+    assert "kept" in fake_run.output
+
+
+def test_config_removal_refuses_a_writable_directory(tmp_root, fake_run):   # M5
+    _b4(tmp_root)
+    d = tmp_root / "etc/chirp-recorder"
+    fake_run.after[("chirp-recorder", "config", "init")] = lambda: os.chmod(d, 0o777)
+    fake_run.validate_json = {"capacity": {"admitted": [], "refused": [
+        ["4.4630MHz", "cpu pressure 22.0 %"]], "estimated": False}}
+    assert apply_convert(tmp_root, run=fake_run) == 1
+    assert (d / "AC0G-B4.toml").exists()
+    assert "remove it by hand" in fake_run.output
+
+
+def test_a_broken_neighbour_does_not_block_the_named_receiver(tmp_root, fake_run):  # M1
+    _b4(tmp_root)
+    codar_instance(tmp_root, "AC0G-B41", "", "b41-status.local", centres=[4_463_000])
+    assert apply_convert(tmp_root, key="AC0G-B4", run=fake_run) == 0
+    assert apply_convert(tmp_root, key="AC0G-B41", run=fake_run) == 1
+
+
+def test_a_station_wide_refusal_holds_for_a_named_receiver(tmp_root, fake_run):  # M1
+    _b4(tmp_root)
+    (tmp_root / "etc/codar-sounder/codar-sounder-config.toml").write_text(
+        '[[radiod]]\nstatus = "b4-status.local"\n')
+    assert apply_convert(tmp_root, key="AC0G-B4", run=fake_run) == 1
+    assert fake_run.calls == []
+
+
+def test_dry_run_numbers_steps_as_the_brief_does(tmp_root, fake_run):       # M2
+    _b4(tmp_root)
+    apply_convert(tmp_root, run=fake_run, dry_run=True)
+    out = fake_run.output
+    for n in ("1.", "2.", "3.", "4.", "5.", "6."):
+        assert f"  {n} " in out
+    assert "  7. " not in out
+
+
+def test_a_held_lock_refuses(tmp_root, fake_run):                           # M3
+    _b4(tmp_root)
+    d = tmp_root / STATE
+    d.mkdir(parents=True, mode=0o700)
+    fd = os.open(d / ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        assert apply_convert(tmp_root, run=fake_run) == 1
+        assert fake_run.calls == [] and "another" in fake_run.output
+    finally:
+        os.close(fd)
+
+
+def test_a_radiod_only_host_refuses(tmp_root, fake_run):
+    _b4(tmp_root)
+    role = tmp_root / "etc/sigmond/station-role"
+    role.parent.mkdir(parents=True, exist_ok=True)
+    role.write_text("radiod-only\n")
+    assert apply_convert(tmp_root, run=fake_run) == 1
+    assert fake_run.calls == []
+
+
+def test_main_dispatches_admin_chirp_convert(monkeypatch):                  # M6
+    import sys
+    from sigmond import chirp_migrate as CM
+    smd = _load_smd()
+    seen = {}
+
+    def fake(root, **kw):
+        seen.update(kw, root=root)
+        return 0
+    monkeypatch.setattr(CM, "apply_convert", fake)
+    monkeypatch.setattr(sys, "argv", ["smd", "admin", "chirp", "convert",
+                                      "AC0G-B4", "--dry-run"])
+    assert smd.main() == 0
+    assert seen["key"] == "AC0G-B4" and seen["dry_run"] is True
