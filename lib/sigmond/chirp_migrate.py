@@ -704,7 +704,7 @@ def _convert(etc_root, want, run, dry_run, say) -> int:
 # and later), never from the sink queue its uploader empties.
 #
 # retire: once the last N stored verdicts pass on consecutive covered
-# nights, codar-sounder goes for that receiver.  First a pre-flight that
+# nights, all within the last 14 days, codar-sounder goes for that receiver.  First a pre-flight that
 # changes nothing:
 #   0. `hs-uploader sink status --json` must list chirp-recorder's switch,
 #      and not at `off` (an operator's choice the raise to upload would
@@ -770,6 +770,10 @@ def _key(key: str) -> str:
         return instance_key(key)
     except (InvalidReporterId, ValueError) as exc:
         raise MigrateRefused(f"{key!r}: {exc}") from None
+
+
+def _utc_date() -> date:
+    return datetime.now(timezone.utc).date()
 
 
 def _today() -> str:
@@ -927,9 +931,19 @@ def codar_rows_dir(etc_root: Path, key: str) -> Path:
 
 # ---- verdicts -----------------------------------------------------------
 
-def _passing_run(verdicts) -> int:
+#: Only passes from nights this recent count toward a retire (Michael,
+#: 2026-11-22, decision 3): an antenna, radiod or either recorder may have
+#: changed since an older night.
+VERDICT_MAX_AGE_DAYS = 14
+
+
+def _passing_run(verdicts, max_age_days: Optional[int] = VERDICT_MAX_AGE_DAYS
+                 ) -> int:
     """How many passing verdicts end the list, on consecutive covered
-    nights."""
+    nights no more than ``max_age_days`` before the host's UTC date (None
+    counts them at any age)."""
+    oldest = None if max_age_days is None \
+        else _utc_date() - timedelta(days=max_age_days)
     n = 0
     prev = None
     for v in reversed(verdicts if isinstance(verdicts, list) else []):
@@ -941,6 +955,8 @@ def _passing_run(verdicts) -> int:
         except ValueError:
             break
         if prev is not None and night != prev - timedelta(days=1):
+            break
+        if oldest is not None and night < oldest:
             break
         prev = night
         n += 1
@@ -1123,15 +1139,18 @@ def _gate(etc_root: Path, key: str, st: dict, nights: int,
     Raises MigrateRefused with the rule that fails."""
     verdicts = st.get("verdicts") or []
     have = _passing_run(verdicts)
+    stale = (f" (passes older than {VERDICT_MAX_AGE_DAYS} days no longer "
+             f"count)" if _passing_run(verdicts, None) > have else "")
     if force_reason is None:
         if have == 0:
             raise MigrateRefused(
-                f"{key}: no passing check ends its record; run `smd admin "
-                f"chirp check {key}` after a covered night ({_NIGHT}, 12 h)")
+                f"{key}: no passing check ends its record{stale}; run `smd "
+                f"admin chirp check {key}` after a covered night ({_NIGHT}, "
+                f"12 h)")
         if have < nights:
             raise MigrateRefused(
                 f"{key} holds {have} passing night{'s' if have != 1 else ''} "
-                f"in a row; retire wants {nights}")
+                f"in a row{stale}; retire wants {nights}")
         return None
     rule = (f"--force serves one case only: {key}'s own latest check "
             f"reads \"insufficient\" (hf-timestd ties another radiod on "
@@ -1158,7 +1177,7 @@ def retire_steps(key: str, *, nights: int = 1,
                  record: bool = True) -> list:
     """Retire's steps for one receiver, in order; raises MigrateRefused
     unless its last ``nights`` stored verdicts pass on consecutive covered
-    nights.  Once a retire has begun (``sink_before_retire`` stands) the
+    nights, each within VERDICT_MAX_AGE_DAYS of today (UTC).  Once a retire has begun (``sink_before_retire`` stands) the
     gate no longer applies: the steps resume.
 
     ``force_reason`` serves one case (Michael, 2026-11-19, decision 6):

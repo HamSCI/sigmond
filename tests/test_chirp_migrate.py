@@ -586,6 +586,16 @@ LON = -90.0
 _ROOT: dict = {}
 
 
+#: The host's UTC date for the verdict age rule: the fixtures' nights run
+#: 2026-11-21 onward, so every stored pass stays inside 14 days of it.
+TODAY = datetime(2026, 11, 28).date()
+
+
+@pytest.fixture(autouse=True)
+def _fixed_today(monkeypatch):
+    monkeypatch.setattr(CM, "_utc_date", lambda: TODAY)
+
+
 def STATE(key: str) -> Path:
     return _ROOT["root"] / STATE_REL / f"{key}.json"
 
@@ -727,6 +737,24 @@ def test_seven_nights_needs_seven_passes(state_with_passes):
         retire_steps("AC0G-B4", nights=7)
     state_with_passes("AC0G-B4", ["pass"] * 7)
     assert retire_steps("AC0G-B4", nights=7)
+
+
+def test_a_pass_older_than_14_days_no_longer_counts(state_with_passes, monkeypatch):
+    # Michael, 2026-11-22, decision 3: only passes from the last 14 days count
+    state_with_passes("AC0G-B4", ["pass"])                    # night 2026-11-21
+    monkeypatch.setattr(CM, "_utc_date", lambda: datetime(2026, 12, 5).date())
+    assert retire_steps("AC0G-B4")
+    monkeypatch.setattr(CM, "_utc_date", lambda: datetime(2026, 12, 6).date())
+    with pytest.raises(MigrateRefused, match="14 days"):
+        retire_steps("AC0G-B4")
+
+
+def test_a_run_counts_only_its_nights_inside_14_days(state_with_passes, monkeypatch):
+    state_with_passes("AC0G-B4", ["pass", "pass"])            # 2026-11-21, -22
+    monkeypatch.setattr(CM, "_utc_date", lambda: datetime(2026, 12, 6).date())
+    assert retire_steps("AC0G-B4")
+    with pytest.raises(MigrateRefused, match="holds 1 passing night in a row"):
+        retire_steps("AC0G-B4", nights=2)
 
 
 def test_force_retires_untied_receiver_once_partner_passes(b2_states):

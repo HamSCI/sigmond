@@ -33698,7 +33698,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_ch_retire.add_argument('key', help='the receiver (AC0G-B4 or AC0G/B4)')
     p_ch_retire.add_argument(
         '--nights', type=int, default=1,
-        help='passing nights in a row required (default 1; 7 at B4 and B2)')
+        help='passing nights in a row required, each within the last 14 days (default 1; 7 at B4 and B2)')
     p_ch_retire.add_argument(
         '--force', action='store_true',
         help='retire a receiver whose check reads "insufficient" because '
