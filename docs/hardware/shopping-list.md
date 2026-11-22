@@ -79,7 +79,7 @@ AC0G-ND's RX888 clock.
 |---|---|---|---|---|---|
 | 17 | Station computer | Beelink mini-PC with an AMD Ryzen 7 5825U, 16 GB RAM or more, 500 GB NVMe or more | — | $350-650 | DASI2 |
 | 18 | External drive | 1-2 TB USB drive (six timing channels fill about 1 TB in 10 days) | any | — | optional: weeks of raw IQ |
-| 19 | USB hub with per-port power switching | **StarTech HB31C3A1CPD3** (proven); a Lenovo hub also works, no longer made, a few left online | — | — | DASI2 |
+| 19 | USB hub with per-port power switching | **StarTech HB31C3A1CPD3** (proven); a Lenovo hub also works, no longer made, a few left online | — | about $70 (StarTech) | DASI2 |
 | 20 | A clean supply for the hub | a low-noise supply; ferrite on its lead | — | — | DASI2 |
 | 21 | Ferrites and common-mode chokes | on USB and coax near the computer | any | — | DASI2 |
 | 22 | UPS | small UPS, or Turn Island's TIS-1250 SuperCap UPS for the computer | — | — | optional |
