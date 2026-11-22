@@ -160,23 +160,15 @@ The same hub carries the slow devices — `lsusb -t` on b4 shows the magnetomete
 
 ## Approximate cost
 
-Nothing in this table comes from a price list we maintain — these are
-order-of-magnitude figures **as of 2026-08, check current prices**
-before you buy anything.
+Sums of the bill of materials above, as of 2026-11-22; check current prices.  Coax, connectors, surge protection,
+cables and ferrites come on top and vary by site.
 
-| Item | Approximate | Required? |
+| Build | Lines | Approximate |
 |---|---|---|
-| x86-64 mini-PC, 16 GB RAM, ~500 GB NVMe | $350–650 | yes |
-| RX888 Mk II | $150–250 | yes |
-| Broadband HF antenna + coax | $150–400 | yes |
-| USB stick, 16–32 GB | $10 | yes |
-| Leo Bodnar LBE-1421 GPSDO + GPS antenna | $200–320 | yes |
-| **Required subtotal** | **~$860–1,630** | |
-| TS-1 time injector (Turn Island Systems) + GPS antenna | $250–400 | optional |
-| PNI RM3100 magnetometer board | $50–120 | optional |
-| Pololu Isolated USB-to-I²C adapter (5397) | $35–50 | optional |
-| u-blox ZED-F9P GNSS board + antenna | $200–350 | optional |
-| **Full build (what B4 runs, minus the F9P)** | **~$1,195–2,200** | |
+| DASI2 station: antenna and injector, filter-preamp, RX888, GPSDO, clock kit, mini-PC, StarTech hub, magnetometer and adapter, USB stick | 1-3, 6-8, 12-13, 17, 19, 24 | **$1,325-1,930** |
+| add T6 timing: TS-1 and MP4 | 9-10 | +$275 |
+| add local TEC: ZED-F9P or LG290P, plus a multi-band antenna | 15-16 | +$200-350, plus the antenna |
+| **Full build** | all | **~$1,800-2,550**, plus the GNSS antenna and site items |
 
 ## What AC0G/B4 actually runs
 
