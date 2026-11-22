@@ -1,0 +1,319 @@
+"""`smd admin chirp convert`: a receiver's codar-sounder instance gains a
+chirp-recorder beside it, carrying the same channels.
+
+Plan Task 21 (tasks/chirp-registry/2026-11-19-chirp-recorder-plan.md).
+Nothing here touches a real system: `run` is a fake, and `tmp_path` stands
+for `/`.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from sigmond.chirp_migrate import (ConvertTarget, apply, apply_convert,
+                                   convert_steps, convert_targets,
+                                   state_path)
+
+
+def codar_instance(root: Path, key: str, rid: str, radiod: str, *,
+                   centres) -> Path:
+    """codar-sounder's per-instance file and the sources file sigmond
+    writes beside it, as `instance split` and `receiver apply` leave them."""
+    d = root / "etc" / "codar-sounder"
+    d.mkdir(parents=True, exist_ok=True)
+    body = f'[instance]\nreporter_id = "{rid}"\n\n' if rid else ""
+    for i, c in enumerate(centres):
+        body += (f'[[radiod]]\nstatus = "{radiod}"\n'
+                 f'channel_name = "c{c // 1000}"\n\n'
+                 f'[[radiod.transmitter]]\nid = "TX{i}"\n'
+                 f'center_freq_hz = {c}\n\n')
+    p = d / f"{key}.toml"
+    p.write_text(body)
+    src = root / "etc" / "sigmond" / "clients"
+    src.mkdir(parents=True, exist_ok=True)
+    (src / f"codar-sounder@{key}.sources.toml").write_text(
+        f'selected = ["radiod:{radiod}"]\n')
+    return p
+
+
+class FakeRun:
+    """Every command convert runs, recorded.  `config init` writes the file
+    the real one would; `validate --json` answers `validate_json`."""
+
+    def __init__(self, root: Path, capsys):
+        self.root = root
+        self.capsys = capsys
+        self.calls: list = []
+        self.validate_json = None
+        self.fail = set()          # argv[0:2] tuples that exit 1
+        self._out = ""
+
+    @property
+    def output(self) -> str:
+        self._out += "".join(self.capsys.readouterr())
+        return self._out
+
+    def __call__(self, argv, env=None):
+        argv = list(argv)
+        self.calls.append(argv)
+        if tuple(argv[:2]) in self.fail or tuple(argv[:3]) in self.fail:
+            return 1, f"{argv[0]}: refused"
+        if argv[:3] == ["chirp-recorder", "config", "init"]:
+            key = argv[argv.index("--instance") + 1]
+            d = self.root / "etc" / "chirp-recorder"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / f"{key}.toml").write_text("# chirp\n")
+            return 0, f"chirp-recorder: wrote {d / key}.toml"
+        if argv[:2] == ["chirp-recorder", "validate"]:
+            doc = self.validate_json or {
+                "ok": True, "issues": [],
+                "capacity": {"admitted": ["4.4630MHz"], "refused": [],
+                             "estimated": False}}
+            doc = {"ok": True, "issues": [], **doc}
+            return (0 if doc["ok"] else 1), json.dumps(doc)
+        return 0, ""
+
+
+@pytest.fixture
+def tmp_root(tmp_path):
+    return tmp_path
+
+
+@pytest.fixture
+def fake_run(tmp_root, capsys):
+    return FakeRun(tmp_root, capsys)
+
+
+# -- the brief's five ------------------------------------------------------
+
+def test_convert_carries_the_codar_channels(tmp_root, fake_run):
+    codar_instance(tmp_root, "AC0G-B4", "AC0G/B4", "b4-status.local", centres=[4_463_000, 13_475_000])
+    (t,), _ = convert_targets(tmp_root / "etc", run=fake_run)
+    argv = [list(s.argv) for s in convert_steps(t)]                      # pre-flight C9
+    assert ["--from-codar", str(tmp_root / "etc/codar-sounder/AC0G-B4.toml")] == argv[0][-2:]
+    assert argv[1][:3] == ["chirp-recorder", "validate", "--json"]
+    assert ["hs-uploader", "sink", "set", "chirp-recorder", "fill"] == argv[2][:5]
+
+
+def test_convert_refuses_when_capacity_short(tmp_root, fake_run):          # Review Focus 3
+    codar_instance(tmp_root, "AC0G-B4", "AC0G/B4", "b4-status.local", centres=[4_463_000, 13_475_000])
+    fake_run.validate_json = {"capacity": {"admitted": ["c4463"], "refused": [["c13475", "cpu pressure 22.0 %"]],
+                                           "estimated": False}}
+    rc = apply_convert(tmp_root, run=fake_run)
+    assert rc != 0 and not (tmp_root / "etc/chirp-recorder/AC0G-B4.toml").exists()
+    assert not any("systemctl" in c[0] for c in fake_run.calls) and "22.0" in fake_run.output
+
+
+def test_legacy_radiod_keyed_codar_refuses(tmp_root, fake_run):
+    codar_instance(tmp_root, "b4-status.local", "", "b4-status.local", centres=[4_463_000])
+    targets, refused = convert_targets(tmp_root / "etc", run=fake_run)
+    assert targets == [] and "instance split codar-sounder" in refused[0]
+
+
+def test_convert_follows_moved_instance(tmp_root, fake_run):               # Review Focus 5
+    codar_instance(tmp_root, "N8UR-SIGMOND", "N8UR-SIGMOND", "n8ur-status.local", centres=[4_463_000])
+    (t,), _ = convert_targets(tmp_root / "etc", run=fake_run)
+    assert (t.key, t.radiod) == ("N8UR-SIGMOND", "n8ur-status.local")
+
+
+def test_second_run_does_nothing(tmp_root, fake_run):
+    codar_instance(tmp_root, "AC0G-B4", "AC0G/B4", "b4-status.local", centres=[4_463_000])
+    apply_convert(tmp_root, run=fake_run); n = len(fake_run.calls)
+    apply_convert(tmp_root, run=fake_run)
+    assert len(fake_run.calls) == n
+
+
+# -- the rest of the contract ----------------------------------------------
+
+def _b4(root):
+    codar_instance(root, "AC0G-B4", "AC0G/B4", "b4-status.local",
+                   centres=[4_463_000])
+
+
+def test_steps_run_in_the_briefs_order(tmp_root, fake_run):
+    _b4(tmp_root)
+    (t,), _ = convert_targets(tmp_root / "etc", run=fake_run)
+    argv = [list(s.argv) for s in convert_steps(t)]
+    assert argv[0] == ["chirp-recorder", "config", "init", "--non-interactive",
+                       "--instance", "AC0G-B4", "--reporter-id", "AC0G/B4",
+                       "--radiod-status", "b4-status.local", "--from-codar",
+                       str(tmp_root / "etc/codar-sounder/AC0G-B4.toml")]
+    assert argv[1] == ["chirp-recorder", "validate", "--json",
+                       "--instance", "AC0G-B4"]
+    assert argv[2] == ["hs-uploader", "sink", "set", "chirp-recorder", "fill",
+                       "--reason", "side by side with codar-sounder",
+                       "--by", "smd admin chirp convert"]
+    assert argv[3] == ["smd", "enable", "chirp-recorder"]
+    assert argv[4] == ["smd", "admin", "uploader", "manifest", "--write"]
+    assert argv[5] == ["systemctl", "enable", "--now",
+                       "chirp-recorder@AC0G-B4.service"]
+    assert len(argv) == 7 and argv[6] == []        # the state file
+
+
+def test_convert_writes_the_state_file_and_leaves_codar_alone(tmp_root, fake_run):
+    _b4(tmp_root)
+    assert apply_convert(tmp_root, run=fake_run) == 0
+    doc = json.loads(state_path(tmp_root / "etc", "AC0G-B4").read_text())
+    assert doc["key"] == "AC0G-B4" and doc["reporter_id"] == "AC0G/B4"
+    assert doc["radiod"] == "b4-status.local"
+    assert doc["codar_unit"] == "codar-sounder@AC0G-B4.service"
+    assert doc["channels"] == ["4.4630MHz"]
+    assert doc["verdict"] is None and doc["retired_at"] is None
+    assert doc["started_at"].endswith("Z")
+    assert state_path(tmp_root / "etc", "AC0G-B4") == \
+        tmp_root / "var/lib/sigmond/chirp-migrate/AC0G-B4.json"
+    # codar-sounder: no command names it, and its file stays.
+    assert not any("codar-sounder" in " ".join(c[:4]) for c in fake_run.calls
+                   if c[0] == "systemctl")
+    assert (tmp_root / "etc/codar-sounder/AC0G-B4.toml").exists()
+
+
+def test_dry_run_runs_nothing_and_writes_nothing(tmp_root, fake_run):
+    _b4(tmp_root)
+    rc = apply_convert(tmp_root, run=fake_run, dry_run=True)
+    assert rc == 0 and fake_run.calls == []
+    assert not (tmp_root / "var").exists()
+    out = fake_run.output
+    assert "--from-codar" in out and "chirp-recorder@AC0G-B4.service" in out
+
+
+def test_a_refused_config_init_stops_before_anything_else(tmp_root, fake_run):
+    _b4(tmp_root)
+    fake_run.fail.add(("chirp-recorder", "config", "init"))
+    assert apply_convert(tmp_root, run=fake_run) == 1
+    assert len(fake_run.calls) == 1
+    assert not state_path(tmp_root / "etc", "AC0G-B4").exists()
+
+
+def test_validate_that_fails_removes_the_file(tmp_root, fake_run):
+    _b4(tmp_root)
+    fake_run.validate_json = {"ok": False, "capacity": None, "issues": [
+        {"severity": "fail", "instance": "AC0G-B4", "message": "bad channel"}]}
+    assert apply_convert(tmp_root, run=fake_run) == 1
+    assert not (tmp_root / "etc/chirp-recorder/AC0G-B4.toml").exists()
+    assert "bad channel" in fake_run.output
+    assert not any(c[0] in ("hs-uploader", "systemctl") for c in fake_run.calls)
+
+
+def test_a_failure_before_the_unit_starts_removes_the_file(tmp_root, fake_run):
+    _b4(tmp_root)
+    fake_run.fail.add(("hs-uploader", "sink"))
+    assert apply_convert(tmp_root, run=fake_run) == 1
+    assert not (tmp_root / "etc/chirp-recorder/AC0G-B4.toml").exists()
+    assert not any(c[0] == "systemctl" for c in fake_run.calls)
+    assert not state_path(tmp_root / "etc", "AC0G-B4").exists()
+
+
+def test_a_failed_start_writes_no_state(tmp_root, fake_run):
+    _b4(tmp_root)
+    fake_run.fail.add(("systemctl", "enable"))
+    assert apply_convert(tmp_root, run=fake_run) == 1
+    assert not state_path(tmp_root / "etc", "AC0G-B4").exists()
+
+
+def test_an_existing_chirp_config_refuses(tmp_root, fake_run):
+    _b4(tmp_root)
+    d = tmp_root / "etc/chirp-recorder"
+    d.mkdir(parents=True)
+    (d / "AC0G-B4.toml").write_text("# measuring\n")
+    targets, refused = convert_targets(tmp_root / "etc", run=fake_run)
+    assert targets == [] and "AC0G-B4.toml" in refused[0]
+    assert apply_convert(tmp_root, run=fake_run) == 1
+    assert (d / "AC0G-B4.toml").read_text() == "# measuring\n"
+    assert fake_run.calls == []
+
+
+def test_an_unsplit_shared_config_refuses(tmp_root, fake_run):
+    d = tmp_root / "etc/codar-sounder"
+    d.mkdir(parents=True)
+    (d / "codar-sounder-config.toml").write_text(
+        '[[radiod]]\nstatus = "b4-status.local"\n')
+    targets, refused = convert_targets(tmp_root / "etc", run=fake_run)
+    assert targets == []
+    assert any("instance split codar-sounder" in r for r in refused)
+
+
+def test_a_key_converts_one_receiver(tmp_root, fake_run):
+    _b4(tmp_root)
+    codar_instance(tmp_root, "AC0G-B1A", "AC0G/B1A", "b1a-status.local",
+                   centres=[4_463_000])
+    assert apply_convert(tmp_root, key="AC0G/B1A", run=fake_run) == 0
+    assert state_path(tmp_root / "etc", "AC0G-B1A").exists()
+    assert not state_path(tmp_root / "etc", "AC0G-B4").exists()
+
+
+def test_a_key_with_no_instance_refuses(tmp_root, fake_run):
+    _b4(tmp_root)
+    assert apply_convert(tmp_root, key="AC0G-B9", run=fake_run) == 1
+    assert fake_run.calls == []
+
+
+def test_a_mismatched_reporter_waits_for_the_move(tmp_root, fake_run):
+    codar_instance(tmp_root, "N8UR", "N8UR-SIGMOND", "n8ur-status.local",
+                   centres=[4_463_000])
+    targets, refused = convert_targets(tmp_root / "etc", run=fake_run)
+    assert targets == [] and "receiver apply" in refused[0]
+
+
+def test_apply_takes_the_steps_alone(tmp_root, fake_run):
+    _b4(tmp_root)
+    (t,), _ = convert_targets(tmp_root / "etc", run=fake_run)
+    assert isinstance(t, ConvertTarget)
+    assert apply(convert_steps(t), run=fake_run) == 0
+    assert state_path(tmp_root / "etc", "AC0G-B4").exists()
+
+
+# -- the verb ----------------------------------------------------------------
+
+def _load_smd():
+    import importlib.util
+    import os
+    from unittest import mock
+    spec = importlib.util.spec_from_loader('smd_mod_chirp_migrate', loader=None)
+    smd = importlib.util.module_from_spec(spec)
+    smd.__dict__['__file__'] = 'bin/smd'
+    src = Path(__file__).resolve().parent.parent / 'bin' / 'smd'
+    with mock.patch.dict(os.environ, {'SIGMOND_NO_VENV_REEXEC': '1'}):
+        exec(compile(src.read_text(), str(src), 'exec'), smd.__dict__)
+    return smd
+
+
+def _args(smd, *argv):
+    return smd._build_parser().parse_args(['admin', 'chirp', *argv])
+
+
+def test_verb_parses_convert_key_and_dry_run():
+    smd = _load_smd()
+    a = _args(smd, 'convert', 'AC0G-B4', '--dry-run')
+    assert (a.admin_command, a.chirp_command, a.key, a.dry_run) == \
+        ('chirp', 'convert', 'AC0G-B4', True)
+    assert _args(smd, 'convert').key is None
+
+
+def test_verb_dry_run_changes_nothing(tmp_root, fake_run):
+    _b4(tmp_root)
+    smd = _load_smd()
+    a = _args(smd, 'convert', '--dry-run')
+    assert smd.cmd_chirp_convert(a, run=fake_run, root=tmp_root) == 0
+    assert fake_run.calls == []
+    assert 'chirp-recorder@AC0G-B4.service' in fake_run.output
+
+
+def test_verb_converts(tmp_root, fake_run):
+    _b4(tmp_root)
+    smd = _load_smd()
+    a = _args(smd, 'convert', 'AC0G/B4')
+    assert smd.cmd_chirp_convert(a, run=fake_run, root=tmp_root) == 0
+    assert state_path(tmp_root / 'etc', 'AC0G-B4').exists()
+
+
+def test_verb_reports_a_capacity_refusal(tmp_root, fake_run):
+    _b4(tmp_root)
+    fake_run.validate_json = {"capacity": {"admitted": [], "refused": [
+        ["4.4630MHz", "memory pressure 31.0 %"]], "estimated": False}}
+    smd = _load_smd()
+    assert smd.cmd_chirp_convert(_args(smd, 'convert'), run=fake_run,
+                                 root=tmp_root) == 1
+    assert "31.0" in fake_run.output

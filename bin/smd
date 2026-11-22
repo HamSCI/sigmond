@@ -31084,6 +31084,32 @@ def cmd_instance_split(args, *, run=None, manifest=None, etc_root=None) -> int:
     return rc
 
 
+def cmd_chirp_convert(args, *, run=None, root=None) -> int:
+    """`smd admin chirp convert [KEY] [--dry-run]`: start chirp-recorder
+    beside each receiver's codar-sounder instance, on the channels
+    codar-sounder records (plan Task 21; `chirp_migrate.py`).  codar-sounder
+    keeps running; `smd admin chirp retire` stops it after the comparison
+    passes.  ``run`` and ``root`` are for tests."""
+    from sigmond import chirp_migrate as _cm
+    dry = bool(getattr(args, 'dry_run', False))
+    if not dry and run is None and _need_root('admin chirp convert'):
+        return 1
+    key = getattr(args, 'key', None)
+    _heading('chirp convert' + (f' {key}' if key else '')
+             + (' (dry run)' if dry else ''))
+    try:
+        rc = _cm.apply_convert(Path(root) if root else Path('/'), key=key,
+                               run=run or _cm.default_run, dry_run=dry,
+                               say=lambda m: (_err(m) if m.startswith('FAILED')
+                                              else _info(m)))
+    except _cm.MigrateRefused as exc:
+        _err(f'chirp convert: {exc}')
+        return 1
+    if rc == 0 and not dry:
+        _ok('chirp convert: done; codar-sounder still runs beside it')
+    return rc
+
+
 def cmd_instance_canonical(args) -> int:
     """`smd admin instance canonical <text> [--systemd]`: read-only.
 
@@ -33549,6 +33575,25 @@ def _build_parser() -> argparse.ArgumentParser:
         '--systemd', action='store_true',
         help='print the form a unit name carries (AC0G/B4 -> AC0G\\x3dB4)')
 
+    # smd admin chirp — move a receiver from codar-sounder to chirp-recorder
+    # (tasks/chirp-registry/2026-11-19-chirp-recorder-plan.md, Task 21)
+    p_chirp = admin_sub.add_parser(
+        'chirp',
+        help='move a receiver from codar-sounder to chirp-recorder: '
+             'convert starts chirp-recorder beside codar-sounder')
+    chirp_sub = p_chirp.add_subparsers(dest='chirp_command')
+    p_ch_convert = chirp_sub.add_parser(
+        'convert',
+        help="start chirp-recorder beside a receiver's codar-sounder "
+             "instance, on the same channels; capacity first, rows held "
+             "on the station (sink fill) for the side-by-side night")
+    p_ch_convert.add_argument(
+        'key', nargs='?', default=None,
+        help='the receiver (AC0G-B4 or AC0G/B4); default every '
+             'codar-sounder instance not yet converted')
+    p_ch_convert.add_argument('--dry-run', action='store_true',
+                              help='print the steps; run and write nothing')
+
     # smd admin radiod — RADIOD-IDENTIFICATION.md §6 Phase 5
     p_radiod = admin_sub.add_parser(
         'radiod',
@@ -35179,6 +35224,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser._smd_parts = {
         'p_admin': p_admin,
         'p_c_list': p_c_list,
+        'p_chirp': p_chirp,
         'p_component': p_component,
         'p_config': p_config,
         'p_docs': p_docs,
@@ -35246,6 +35292,7 @@ def main() -> int:
     parser = _build_parser()
     p_admin = parser._smd_parts['p_admin']
     p_c_list = parser._smd_parts['p_c_list']
+    p_chirp = parser._smd_parts['p_chirp']
     p_component = parser._smd_parts['p_component']
     p_config = parser._smd_parts['p_config']
     p_docs = parser._smd_parts['p_docs']
@@ -35939,6 +35986,12 @@ def main() -> int:
                 args.apply = False
             return cmd_instance_split(args)
         p_instance.print_help()
+        return 0
+
+    if args.command == 'chirp':
+        if getattr(args, 'chirp_command', None) == 'convert':
+            return cmd_chirp_convert(args)
+        p_chirp.print_help()
         return 0
 
     # `smd admin radiod <verb>` — radiod-identification canonical naming
