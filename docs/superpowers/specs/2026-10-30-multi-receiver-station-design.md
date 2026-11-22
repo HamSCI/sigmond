@@ -435,7 +435,7 @@ What changes:
    sharing an RX888's reporter even on the same antenna. KFS's four Kiwis
    would be `KFS-KIWI-NW` etc. and merge into `KFS` on the server with the
    RX888 receivers. The first test rig is the Kiwi on AI6VN's LAN,
-   decoded by AI6VN-PM.
+   decoded by AI6VN-2 (RAC 527; Rob, 2026-11-22).
 4. **Timing tier.** No hf-timestd, no chain delay. The Kiwi's own GPS
    timestamp is what wsprdaemon uses; the adapter labels rows with the tier
    the Kiwi reports (`/gps` says whether it has a fix), and never claims an
@@ -631,7 +631,7 @@ stations:
 | 3b | §7 timing: `hf-timestd@<reporter>` per-instance (hf-timestd repo), sigmond `timing` commands and station-web timing pages learn N instances, bring-up accepts `injector = true` on all of them | AI6VN-PM with the lab TS-1 split two ways |
 | 4 | §8 station side: tar identity from `[station].reporter_id`, `pskreporter_proxy` with its two halves (server-merge + drop the daemon pipeline), `WD_MERGE_REPORTERS` render error on merged groups | same rig, tars inspected on wd30 |
 | 4b | §7c: `merge_into` in the receiver list, the either/or rule, render into hs-uploader, `smd admin merge`, the `receivers` and `merge` snapshots, the command-request path unit, and the Status and Command tabs in station-web (with Michael) | same rig as AI6VN-* merging to AI6VN; command seen in the tar on wd30 |
-| 4c | §7b: Kiwi source adapter in wspr-recorder, Kiwi receivers in bring-up and `smd check` | the Kiwi at 10.20.23.73:8073 on AI6VN's LAN, from AI6VN-PM; then ON5KQ |
+| 4c | §7b: Kiwi source adapter in wspr-recorder, Kiwi receivers in bring-up and `smd check` | the Kiwi at 10.20.23.73:8073 on AI6VN's LAN, from AI6VN-2 (fixed bands; Rob 2026-11-22); then ON5KQ, after band scheduling (§7b.7, schedule in each Kiwi's `[[receiver]]`) and a spot/noise parity run vs wsprdaemon |
 | 5a | §8 server side, deployment only: routing.json ingest + replication fix live on wd10/20/30; KFS merge declared from the station and seen in `psk.reporter` / `wsprnet_reporter` | wd30 against the Phase 4 rig, then wd10/wd20 |
 | 5b | §8 item 5: WSPR to pskreporter, the new server data path (posted-set table + second forwarder source). In this plan (Rob); server stream | wd30, then the fleet |
 | 6 | KFS cutover runbook: build the KFS host and Beelink, run in parallel with the wsprdaemon KFS servers under `AI6VN-*` test reporter IDs, compare spot counts per receiver, then switch to `KFS-*` merging into `KFS` and retire the wsprdaemon path for those four antennas | KFS |
