@@ -12,8 +12,8 @@ station.  Each change still goes through `smd` or `systemctl`.  The TUI
 gathers your choices, asks you to confirm, and then runs the command.
 
 [COMMANDS.md](COMMANDS.md) covers the `smd` commands themselves, and
-the generated [smd reference](commands/smd-reference.md) on the docs
-site lists every option.  This page names the command behind each TUI
+the [smd reference](commands/smd.md), generated in full on the docs
+site, lists every option.  This page names the command behind each TUI
 action, so you can run the same thing from a shell.
 
 ## 1. Starting it
