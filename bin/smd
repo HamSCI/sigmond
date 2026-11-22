@@ -31084,6 +31084,27 @@ def cmd_instance_split(args, *, run=None, manifest=None, etc_root=None) -> int:
     return rc
 
 
+def _chirp_say(m: str) -> None:
+    (_err if m.startswith('FAILED') else _info)(m)
+
+
+def _chirp_locked(verb: str, dry: bool, root, fn) -> int:
+    """Run ``fn()`` under `lifecycle_lock(wait_s=0)`, as every mutating
+    `smd admin chirp` verb does (Task 21 review R2): convert and retire
+    write topology, and the lock keeps `smd install|apply|start` out of the
+    same window.  No child command these verbs run takes that lock (see
+    `chirp_migrate.py`, Task 22), so it cannot deadlock.  A dry run, and a
+    test's scratch ``root``, take none."""
+    if dry or root is not None or not _HAS_SIGMOND_LIB:
+        return fn()
+    try:
+        with lifecycle_lock(reason=f'chirp {verb}', wait_s=0):
+            return fn()
+    except SystemExit as exc:
+        _err(f'chirp {verb}: {exc}')
+        return 1
+
+
 def cmd_chirp_convert(args, *, run=None, root=None) -> int:
     """`smd admin chirp convert [KEY] [--dry-run]`: start chirp-recorder
     beside each receiver's codar-sounder instance, on the channels
@@ -31097,16 +31118,80 @@ def cmd_chirp_convert(args, *, run=None, root=None) -> int:
     key = getattr(args, 'key', None)
     _heading('chirp convert' + (f' {key}' if key else '')
              + (' (dry run)' if dry else ''))
+
+    def go() -> int:
+        return _cm.apply_convert(Path(root) if root else Path('/'), key=key,
+                                 run=run or _cm.default_run, dry_run=dry,
+                                 say=_chirp_say)
     try:
-        rc = _cm.apply_convert(Path(root) if root else Path('/'), key=key,
-                               run=run or _cm.default_run, dry_run=dry,
-                               say=lambda m: (_err(m) if m.startswith('FAILED')
-                                              else _info(m)))
+        rc = _chirp_locked('convert', dry, root, go)
     except _cm.MigrateRefused as exc:
         _err(f'chirp convert: {exc}')
         return 1
     if rc == 0 and not dry:
-        _ok('chirp convert: done; codar-sounder still runs beside it')
+        _ok('chirp convert: done; codar-sounder still runs beside it, and '
+            'chirp-recorder holds its rows (sink fill).  After a night, '
+            '`smd admin chirp check KEY`; `smd admin chirp retire KEY` then '
+            'lifts the sink to upload')
+    return rc
+
+
+def cmd_chirp_check(args, *, run=None, root=None) -> int:
+    """`smd admin chirp check KEY`: compare chirp-recorder with
+    codar-sounder over the latest covered night and store the verdict in
+    the receiver's state file (plan Task 22).  0 on a pass, and while the
+    night is still running; 1 otherwise."""
+    from sigmond import chirp_migrate as _cm
+    if run is None and _need_root('admin chirp check'):
+        return 1
+    key = args.key
+    _heading(f'chirp check {key}')
+
+    def go() -> int:
+        out = _cm.check(key, run=run or _cm.default_run,
+                        root=Path(root) if root else None, say=_chirp_say)
+        return 0 if out.get('status') in ('pass', 'window') else 1
+    try:
+        return _chirp_locked('check', False, root, go)
+    except _cm.MigrateRefused as exc:
+        _err(f'chirp check: {exc}')
+        return 1
+
+
+def cmd_chirp_retire(args, *, run=None, root=None) -> int:
+    """`smd admin chirp retire KEY [--nights N] [--force --reason TEXT]
+    [--dry-run]`: once the receiver's last N checks pass, stop and disable
+    its codar-sounder instance, move its config aside, and let
+    chirp-recorder's held rows ship (plan Task 22)."""
+    from sigmond import chirp_migrate as _cm
+    dry = bool(getattr(args, 'dry_run', False))
+    force = bool(getattr(args, 'force', False))
+    reason = getattr(args, 'reason', None)
+    if force and not (reason or '').strip():
+        _err('chirp retire: --force needs --reason TEXT')
+        return 1
+    if reason is not None and not force:
+        _err('chirp retire: --reason goes with --force')
+        return 1
+    if not dry and run is None and _need_root('admin chirp retire'):
+        return 1
+    key = args.key
+    nights = getattr(args, 'nights', 1)
+    _heading(f'chirp retire {key}' + (' (dry run)' if dry else ''))
+
+    def go() -> int:
+        return _cm.apply_retire(Path(root) if root else Path('/'), key=key,
+                                nights=nights,
+                                force_reason=reason if force else None,
+                                run=run or _cm.default_run, dry_run=dry,
+                                say=_chirp_say)
+    try:
+        rc = _chirp_locked('retire', dry, root, go)
+    except _cm.MigrateRefused as exc:
+        _err(f'chirp retire: {exc}')
+        return 1
+    if rc == 0 and not dry:
+        _ok(f'chirp retire: {key} records with chirp-recorder alone')
     return rc
 
 
@@ -33580,7 +33665,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_chirp = admin_sub.add_parser(
         'chirp',
         help='move a receiver from codar-sounder to chirp-recorder: '
-             'convert starts chirp-recorder beside codar-sounder')
+             'convert starts chirp-recorder beside codar-sounder, check '
+             'compares a night, retire stops codar-sounder')
     chirp_sub = p_chirp.add_subparsers(dest='chirp_command')
     p_ch_convert = chirp_sub.add_parser(
         'convert',
@@ -33593,6 +33679,29 @@ def _build_parser() -> argparse.ArgumentParser:
              'codar-sounder instance not yet converted')
     p_ch_convert.add_argument('--dry-run', action='store_true',
                               help='print the steps; run and write nothing')
+    p_ch_check = chirp_sub.add_parser(
+        'check',
+        help="compare chirp-recorder with codar-sounder over the latest "
+             "night that holds 00:00-06:00 local solar time, and store the "
+             "verdict")
+    p_ch_check.add_argument('key', help='the receiver (AC0G-B4 or AC0G/B4)')
+    p_ch_retire = chirp_sub.add_parser(
+        'retire',
+        help="after passing checks, stop the receiver's codar-sounder, move "
+             "its config aside, and let chirp-recorder's rows ship")
+    p_ch_retire.add_argument('key', help='the receiver (AC0G-B4 or AC0G/B4)')
+    p_ch_retire.add_argument(
+        '--nights', type=int, default=1,
+        help='passing nights in a row required (default 1; 7 at B4 and B2)')
+    p_ch_retire.add_argument(
+        '--force', action='store_true',
+        help='retire a receiver whose check reads "insufficient" because '
+             'hf-timestd ties another radiod here, once a partner receiver '
+             'on this host passed; needs --reason')
+    p_ch_retire.add_argument('--reason', default=None,
+                             help='why --force; kept in the state file')
+    p_ch_retire.add_argument('--dry-run', action='store_true',
+                             help='print the steps; run and write nothing')
 
     # smd admin radiod — RADIOD-IDENTIFICATION.md §6 Phase 5
     p_radiod = admin_sub.add_parser(
@@ -35989,8 +36098,13 @@ def main() -> int:
         return 0
 
     if args.command == 'chirp':
-        if getattr(args, 'chirp_command', None) == 'convert':
+        chirp_cmd = getattr(args, 'chirp_command', None)
+        if chirp_cmd == 'convert':
             return cmd_chirp_convert(args)
+        if chirp_cmd == 'check':
+            return cmd_chirp_check(args)
+        if chirp_cmd == 'retire':
+            return cmd_chirp_retire(args)
         p_chirp.print_help()
         return 0
 

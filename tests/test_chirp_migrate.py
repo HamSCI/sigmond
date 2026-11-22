@@ -354,7 +354,7 @@ def test_verb_reports_a_capacity_refusal(tmp_root, fake_run):
 
 # -- round 1: root-safe state, stderr apart, full rollback --------------------
 
-STATE = "var/lib/sigmond/chirp-migrate"
+STATE_REL = "var/lib/sigmond/chirp-migrate"
 
 
 def _topology(root):
@@ -375,7 +375,7 @@ def test_validate_stderr_stays_out_of_the_json(tmp_root, fake_run):          # I
 
 def test_a_symlink_at_the_part_name_is_never_followed(tmp_root, fake_run):   # C1
     _b4(tmp_root)
-    d = tmp_root / STATE
+    d = tmp_root / STATE_REL
     d.mkdir(parents=True, mode=0o700)
     victim = tmp_root / "precious"
     victim.write_text("precious\n")
@@ -389,7 +389,7 @@ def test_a_symlink_at_the_part_name_is_never_followed(tmp_root, fake_run):   # C
 
 def test_a_symlink_at_the_state_file_refuses(tmp_root, fake_run):           # C1
     _b4(tmp_root)
-    d = tmp_root / STATE
+    d = tmp_root / STATE_REL
     d.mkdir(parents=True, mode=0o700)
     victim = tmp_root / "precious"
     victim.write_text(json.dumps({"key": "AC0G-B4"}))
@@ -402,7 +402,7 @@ def test_a_symlink_at_the_state_file_refuses(tmp_root, fake_run):           # C1
 
 def test_a_group_writable_state_file_refuses(tmp_root, fake_run):           # C1
     _b4(tmp_root)
-    d = tmp_root / STATE
+    d = tmp_root / STATE_REL
     d.mkdir(parents=True, mode=0o700)
     (d / "AC0G-B4.json").write_text(json.dumps({"key": "AC0G-B4"}))
     os.chmod(d / "AC0G-B4.json", 0o664)
@@ -412,7 +412,7 @@ def test_a_group_writable_state_file_refuses(tmp_root, fake_run):           # C1
 
 def test_a_group_writable_state_directory_refuses(tmp_root, fake_run):      # C1
     _b4(tmp_root)
-    d = tmp_root / STATE
+    d = tmp_root / STATE_REL
     d.mkdir(parents=True)
     os.chmod(d, 0o770)
     assert apply_convert(tmp_root, run=fake_run) == 1
@@ -425,7 +425,7 @@ def test_a_symlinked_state_directory_refuses(tmp_root, fake_run):           # C1
     elsewhere = tmp_root / "elsewhere"
     elsewhere.mkdir(mode=0o700)
     (tmp_root / "var/lib/sigmond").mkdir(parents=True)
-    (tmp_root / STATE).symlink_to(elsewhere)
+    (tmp_root / STATE_REL).symlink_to(elsewhere)
     assert apply_convert(tmp_root, run=fake_run) == 1
     assert fake_run.calls == [] and list(elsewhere.iterdir()) == []
 
@@ -476,7 +476,7 @@ def test_a_failed_start_rolls_back_and_a_second_run_finishes(tmp_root, fake_run)
 
 def test_a_failed_state_write_rolls_back_and_a_second_run_finishes(tmp_root, fake_run):  # I3
     _b4(tmp_root)
-    d = tmp_root / STATE
+    d = tmp_root / STATE_REL
     fake_run.after[("systemctl", "enable")] = lambda: os.chmod(d, 0o770)
     assert apply_convert(tmp_root, run=fake_run) == 1
     assert ["systemctl", "disable", "--now",
@@ -535,7 +535,7 @@ def test_dry_run_numbers_steps_as_the_brief_does(tmp_root, fake_run):       # M2
 
 def test_a_held_lock_refuses(tmp_root, fake_run):                           # M3
     _b4(tmp_root)
-    d = tmp_root / STATE
+    d = tmp_root / STATE_REL
     d.mkdir(parents=True, mode=0o700)
     fd = os.open(d / ".lock", os.O_CREAT | os.O_RDWR, 0o600)
     try:
@@ -569,3 +569,503 @@ def test_main_dispatches_admin_chirp_convert(monkeypatch):                  # M6
                                       "AC0G-B4", "--dry-run"])
     assert smd.main() == 0
     assert seen["key"] == "AC0G-B4" and seen["dry_run"] is True
+
+
+# == Task 22: check and retire ==============================================
+
+from datetime import datetime, timedelta, timezone
+
+from sigmond import chirp_migrate as CM
+from sigmond.chirp_migrate import (MigrateRefused, apply_retire, check,
+                                   night_covered, retire_steps)
+
+# 18:00Z; at longitude -90 local solar midnight falls at 06:00Z, so the
+# first night (dated 2026-11-21) closes at 12:00Z.
+STARTED = datetime(2026, 11, 20, 18, 0, tzinfo=timezone.utc)
+LON = -90.0
+_ROOT: dict = {}
+
+
+def STATE(key: str) -> Path:
+    return _ROOT["root"] / STATE_REL / f"{key}.json"
+
+
+def _converted(root: Path, key: str, rid: str, *, verdicts=None,
+               started=STARTED) -> None:
+    codar_instance(root, key, rid, f"{key.lower()}-status.local",
+                   centres=[4_463_000])
+    env = root / "etc/codar-sounder/env"
+    env.mkdir(parents=True, exist_ok=True)
+    (env / f"{key}.env").write_text("CODAR_X=1\n")
+    for d in (env.parent, env):        # root's 0755, as install.sh leaves it
+        os.chmod(d, 0o755)
+    ch = root / "etc/chirp-recorder"
+    ch.mkdir(parents=True, exist_ok=True)
+    (ch / f"{key}.toml").write_text(
+        f'[station]\nreceiver_lat = 40.0\nreceiver_lon = {LON}\n')
+    d = root / STATE_REL
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(d, 0o700)
+    doc = {"key": key, "reporter_id": rid, "radiod": "x",
+           "started_at": started.strftime("%Y-%m-%dT%H:%M:%SZ"),
+           "codar_unit": f"codar-sounder@{key}.service",
+           "channels": ["4.4630MHz"], "verdict": None, "verdicts": [],
+           "retired_at": None}
+    if verdicts:
+        doc["verdicts"] = [
+            {"night": (STARTED.date() + timedelta(days=1 + i)).isoformat(),
+             "status": s, "rows": [], "covered": True}
+            for i, s in enumerate(verdicts)]
+    p = d / f"{key}.json"
+    p.write_text(json.dumps(doc))
+    os.chmod(p, 0o644)
+
+
+@pytest.fixture
+def chirp_root(tmp_root, monkeypatch):
+    monkeypatch.setattr(CM, "ROOT", tmp_root)
+    _ROOT["root"] = tmp_root
+    return tmp_root
+
+
+@pytest.fixture
+def state_after_convert(chirp_root):
+    _converted(chirp_root, "AC0G-B4", "AC0G/B4")
+    return chirp_root
+
+
+@pytest.fixture
+def state_with_pass(chirp_root):
+    _converted(chirp_root, "AC0G-B4", "AC0G/B4", verdicts=["pass"])
+    return chirp_root
+
+
+@pytest.fixture
+def state_with_passes(chirp_root):
+    def make(key, statuses):
+        _converted(chirp_root, key, key.replace("-", "/", 1),
+                   verdicts=statuses)
+    return make
+
+
+@pytest.fixture
+def b2_states(chirp_root):
+    _converted(chirp_root, "AC0G-B1A", "AC0G/B1A", verdicts=["pass"])
+    _converted(chirp_root, "AC0G-B1B", "AC0G/B1B", verdicts=["insufficient"])
+    return chirp_root
+
+
+VERDICT = {
+    "status": "pass", "match": "bin", "mode": "bin", "codar_bin_ns": {},
+    "rows": [
+        {"name": "matched", "value": 4, "limit": 3, "gating": True, "passed": True},
+        {"name": "coverage", "value": 1.0, "limit": 0.9, "gating": True, "passed": True},
+        {"name": "doppler", "value": 1.0, "limit": 0.9, "gating": True, "passed": True},
+        {"name": "s4", "value": 0.05, "limit": None, "gating": False, "passed": True},
+        {"name": "sigma_phi", "value": 0.01, "limit": None, "gating": False, "passed": True}],
+    "matched": [[4_120_000, 4_121_500, -1500, "G"]],
+    "explained": [[20_000_000, "rung 1"]],
+    "codar_unmatched": [61_000_000], "chirp_only": [70_000_000]}
+
+
+class CheckRun(FakeRun):
+    """FakeRun that answers `chirp-recorder compare` with ``verdict`` and
+    `hs-uploader sink status --json` with ``sink``."""
+
+    def __init__(self, root, capsys):
+        super().__init__(root, capsys)
+        self.verdict = dict(VERDICT)
+        self.compare_rc = 0
+        self.sink = {"schema": 1, "clients": [
+            {"client": "chirp-recorder", "file_state": "fill",
+             "effective": "fill"}], "errors": []}
+
+    def _answer(self, argv):
+        if argv[:2] == ["chirp-recorder", "compare"]:
+            if tuple(argv[:2]) in self.fail:
+                return 2, "", "chirp-recorder: no sink to read"
+            return (self.compare_rc if self.verdict.get("status") == "pass"
+                    else 1), json.dumps(self.verdict), ""
+        if argv[:3] == ["hs-uploader", "sink", "status"]:
+            if tuple(argv[:3]) in self.fail:
+                return 2, "", "hs-uploader: cannot read the manifest"
+            return 0, json.dumps(self.sink), ""
+        return super()._answer(argv)
+
+
+@pytest.fixture
+def check_run(tmp_root, capsys):
+    return CheckRun(tmp_root, capsys)
+
+
+# -- the brief's six -----------------------------------------------------------
+
+def test_retire_refuses_without_a_passing_night(state_after_convert):
+    with pytest.raises(MigrateRefused, match="no passing check"):
+        retire_steps("AC0G-B4")
+
+
+def test_check_waits_for_a_whole_night(state_after_convert, fake_run):
+    out = check("AC0G-B4", run=fake_run, now=STARTED + timedelta(hours=8))
+    assert out["status"] == "window" and "00:00-06:00" in out["message"]
+
+
+def test_retire_order_after_pass(state_with_pass):
+    argv = [list(s.argv) for s in retire_steps("AC0G-B4")]                # pre-flight C9
+    assert argv[0] == ["systemctl", "disable", "--now", "codar-sounder@AC0G-B4.service"]
+    assert argv[-2][:5] == ["hs-uploader", "sink", "set", "chirp-recorder", "upload"]
+
+
+def test_seven_nights_needs_seven_passes(state_with_passes):
+    state_with_passes("AC0G-B4", ["pass"] * 6)
+    with pytest.raises(MigrateRefused, match="7"):
+        retire_steps("AC0G-B4", nights=7)
+    state_with_passes("AC0G-B4", ["pass"] * 7)
+    assert retire_steps("AC0G-B4", nights=7)
+
+
+def test_force_retires_untied_receiver_once_partner_passes(b2_states):
+    # AC0G-B1A passed; AC0G-B1B reads "insufficient" (hf-timestd ties B1A's radiod)
+    retire_steps("AC0G-B1B", force_reason="no T6 tie on B1B; partner B1A passed")
+    st = json.loads(STATE("AC0G-B1B").read_text())
+    assert st["forced"] == "no T6 tie on B1B; partner B1A passed" and st["forced_partner"] == "AC0G-B1A"
+
+
+def test_force_refused_without_a_passing_partner(state_after_convert):
+    with pytest.raises(MigrateRefused, match="partner"):
+        retire_steps("AC0G-B4", force_reason="codar-sounder down since 11-18")
+
+
+# -- night_covered -------------------------------------------------------------
+
+def test_night_covered_needs_the_whole_local_night_and_12_hours():
+    # local solar midnight at -90 = 06:00Z, so 00:00-06:00 local = 06-12Z
+    assert not night_covered(STARTED, STARTED + timedelta(hours=17), LON)   # 11:00Z
+    assert night_covered(STARTED, STARTED + timedelta(hours=18), LON)       # 12:00Z
+    late = datetime(2026, 11, 21, 5, 0, tzinfo=timezone.utc)   # 23:00 local
+    assert not night_covered(late, late + timedelta(hours=7), LON)          # 7 h only
+    assert night_covered(late, late + timedelta(hours=12), LON)
+    after = datetime(2026, 11, 21, 7, 0, tzinfo=timezone.utc)  # 01:00 local
+    assert not night_covered(after, after + timedelta(hours=20), LON)
+    assert night_covered(after, after + timedelta(hours=29), LON)          # next night
+    # east of Greenwich: +135 -> local midnight at 15:00Z
+    s = datetime(2026, 11, 20, 12, 0, tzinfo=timezone.utc)
+    assert not night_covered(s, s + timedelta(hours=8, minutes=59), 135.0)
+    assert night_covered(s, s + timedelta(hours=12), 135.0)
+
+
+# -- check ---------------------------------------------------------------------
+
+def test_check_runs_compare_over_the_night_and_stores_the_verdict(state_after_convert, check_run):
+    out = check("AC0G-B4", run=check_run, now=STARTED + timedelta(hours=20))
+    (c,) = [c for c in check_run.calls if c[:2] == ["chirp-recorder", "compare"]]
+    assert c == ["chirp-recorder", "compare", "--instance", "AC0G-B4",
+                 "--since", "2026-11-20T18:00:00Z",
+                 "--until", "2026-11-21T14:00:00Z", "--json"]
+    assert out["status"] == "pass" and out["night"] == "2026-11-21"
+    st = json.loads(STATE("AC0G-B4").read_text())
+    (v,) = st["verdicts"]
+    assert v["night"] == "2026-11-21" and v["status"] == "pass"
+    assert v["rows"] == VERDICT["rows"] and v["mode"] == "bin"
+    text = check_run.output
+    for word in ("matched", "coverage", "doppler", "s4", "sigma_phi",
+                 "gates", "reported", "explained", "unmatched", "61000000"):
+        assert word in text, word
+
+
+def test_check_tolerates_a_verdict_without_mode(state_after_convert, check_run):
+    del check_run.verdict["mode"]
+    check("AC0G-B4", run=check_run, now=STARTED + timedelta(hours=20))
+    (v,) = json.loads(STATE("AC0G-B4").read_text())["verdicts"]
+    assert "mode" not in v and v["status"] == "pass"
+
+
+def test_check_keeps_one_verdict_per_night(state_after_convert, check_run):
+    check_run.verdict["status"] = "fail"
+    check("AC0G-B4", run=check_run, now=STARTED + timedelta(hours=19))
+    check_run.verdict["status"] = "pass"
+    check("AC0G-B4", run=check_run, now=STARTED + timedelta(hours=22))
+    check("AC0G-B4", run=check_run, now=STARTED + timedelta(hours=44))
+    vs = json.loads(STATE("AC0G-B4").read_text())["verdicts"]
+    assert [(v["night"], v["status"]) for v in vs] == [
+        ("2026-11-21", "pass"), ("2026-11-22", "pass")]
+
+
+def test_check_stores_nothing_when_compare_breaks(state_after_convert, check_run):
+    check_run.fail.add(("chirp-recorder", "compare"))
+    out = check("AC0G-B4", run=check_run, now=STARTED + timedelta(hours=20))
+    assert out["status"] == "error" and "no sink to read" in check_run.output
+    assert json.loads(STATE("AC0G-B4").read_text())["verdicts"] == []
+
+
+def test_check_refuses_an_unknown_status(state_after_convert, check_run):
+    check_run.verdict["status"] = "maybe"
+    out = check("AC0G-B4", run=check_run, now=STARTED + timedelta(hours=20))
+    assert out["status"] == "error"
+    assert json.loads(STATE("AC0G-B4").read_text())["verdicts"] == []
+
+
+def test_check_refuses_an_unconverted_receiver(chirp_root, check_run):
+    with pytest.raises(MigrateRefused, match="convert"):
+        check("AC0G-B4", run=check_run, now=STARTED + timedelta(hours=20))
+
+
+# -- retire_steps ----------------------------------------------------------------
+
+def test_retire_steps_in_order(state_with_pass):
+    steps = retire_steps("AC0G-B4")
+    assert [s.phase for s in steps] == ["disable", "aside", "topology",
+                                        "manifest", "sink", "state"]
+    argv = [list(s.argv) for s in steps]
+    assert argv[3] == ["smd", "admin", "uploader", "manifest", "--write"]
+    assert argv[4] == ["hs-uploader", "sink", "set", "chirp-recorder", "upload",
+                       "--reason", "codar-sounder retired",
+                       "--by", "smd admin chirp retire"]
+
+
+def test_a_failed_latest_night_refuses(state_with_passes):
+    state_with_passes("AC0G-B4", ["pass", "fail"])
+    with pytest.raises(MigrateRefused, match="no passing check"):
+        retire_steps("AC0G-B4")
+
+
+def test_passes_with_a_gap_are_not_consecutive(state_with_passes):
+    state_with_passes("AC0G-B4", ["pass", "pass"])
+    p = STATE("AC0G-B4")
+    doc = json.loads(p.read_text())
+    doc["verdicts"][0]["night"] = "2026-11-19"
+    p.write_text(json.dumps(doc))
+    with pytest.raises(MigrateRefused, match="2"):
+        retire_steps("AC0G-B4", nights=2)
+
+
+def test_force_refuses_when_own_check_did_not_read_insufficient(state_with_passes):
+    state_with_passes("AC0G-B1A", ["pass"])
+    state_with_passes("AC0G-B1B", ["fail"])
+    with pytest.raises(MigrateRefused, match="insufficient"):
+        retire_steps("AC0G-B1B", force_reason="x")
+
+
+def test_force_needs_a_reason(b2_states):
+    with pytest.raises(MigrateRefused, match="reason"):
+        retire_steps("AC0G-B1B", force_reason="  ")
+
+
+def test_force_partner_needs_as_many_nights(b2_states):
+    with pytest.raises(MigrateRefused, match="partner"):
+        retire_steps("AC0G-B1B", nights=7, force_reason="no T6 tie")
+
+
+# -- apply_retire ----------------------------------------------------------------
+
+def _topo_enable(root, name):
+    from sigmond.topology import set_component_enabled
+    _topology(root).parent.mkdir(parents=True, exist_ok=True)
+    set_component_enabled(name, True, _topology(root))
+
+
+def _enabled(root, name):
+    from sigmond.topology import load_topology
+    return load_topology(_topology(root)).is_enabled(name)
+
+
+def test_retire_runs_every_step(state_with_pass, check_run):
+    root = state_with_pass
+    _topo_enable(root, "codar-sounder")
+    assert apply_retire(root, key="AC0G-B4", run=check_run) == 0
+    calls = check_run.calls
+    assert calls[0] == ["hs-uploader", "sink", "status", "--json"]
+    assert calls[1] == ["systemctl", "disable", "--now",
+                        "codar-sounder@AC0G-B4.service"]
+    assert ["smd", "admin", "uploader", "manifest", "--write"] in calls
+    assert calls[-1][:5] == ["hs-uploader", "sink", "set", "chirp-recorder", "upload"]
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+    etc = root / "etc/codar-sounder"
+    assert not (etc / "AC0G-B4.toml").exists()
+    assert (etc / f"AC0G-B4.toml.retired-{stamp}").exists()
+    assert (etc / f"env/AC0G-B4.env.retired-{stamp}").exists()
+    backups = list((root / "var/lib/sigmond/instance-rekey-backup").rglob("AC0G-B4.toml"))
+    assert backups, "the /etc side is backed up first"
+    assert not _enabled(root, "codar-sounder")
+    st = json.loads(STATE("AC0G-B4").read_text())
+    assert st["retired_at"].endswith("Z")
+    assert st["sink_before_retire"]["file_state"] == "fill"
+
+
+def test_retire_keeps_codar_in_topology_while_another_instance_remains(state_with_pass, check_run):
+    root = state_with_pass
+    codar_instance(root, "AC0G-B1A", "AC0G/B1A", "b1a-status.local", centres=[4_463_000])
+    _topo_enable(root, "codar-sounder")
+    assert apply_retire(root, key="AC0G-B4", run=check_run) == 0
+    assert _enabled(root, "codar-sounder")
+    assert "AC0G-B1A" in check_run.output
+
+
+def test_retire_refuses_before_anything_when_sink_status_fails(state_with_pass, check_run):
+    check_run.fail.add(("hs-uploader", "sink", "status"))
+    assert apply_retire(state_with_pass, key="AC0G-B4", run=check_run) == 1
+    assert not any(c[0] == "systemctl" for c in check_run.calls)
+    assert (state_with_pass / "etc/codar-sounder/AC0G-B4.toml").exists()
+
+
+def test_retire_refuses_a_switch_an_operator_set_off(state_with_pass, check_run):
+    check_run.sink["clients"][0]["file_state"] = "off"
+    assert apply_retire(state_with_pass, key="AC0G-B4", run=check_run) == 1
+    assert not any(c[0] == "systemctl" for c in check_run.calls)
+    assert "off" in check_run.output
+
+
+def test_retire_dry_run_runs_and_writes_nothing(state_with_pass, check_run):
+    before = STATE("AC0G-B4").read_text()
+    assert apply_retire(state_with_pass, key="AC0G-B4", run=check_run,
+                        dry_run=True) == 0
+    assert check_run.calls == []
+    assert STATE("AC0G-B4").read_text() == before
+    out = check_run.output
+    assert "codar-sounder@AC0G-B4.service" in out and "sink set chirp-recorder upload" in out
+
+
+def test_retire_refusal_runs_nothing(state_after_convert, check_run):
+    assert apply_retire(state_after_convert, key="AC0G-B4", run=check_run) == 1
+    assert check_run.calls == [] and "no passing check" in check_run.output
+
+
+def test_a_failed_step_stops_and_a_second_run_finishes(state_with_pass, check_run):
+    root = state_with_pass
+    check_run.fail.add(("smd", "admin"))
+    assert apply_retire(root, key="AC0G-B4", run=check_run) == 1
+    assert not any(c[:3] == ["hs-uploader", "sink", "set"] for c in check_run.calls)
+    assert json.loads(STATE("AC0G-B4").read_text())["retired_at"] is None
+    assert "again" in check_run.output
+    check_run.fail.clear()
+    check_run.sink["clients"][0]["file_state"] = "upload"   # must not overwrite
+    assert apply_retire(root, key="AC0G-B4", run=check_run) == 0
+    st = json.loads(STATE("AC0G-B4").read_text())
+    assert st["retired_at"] and st["sink_before_retire"]["file_state"] == "fill"
+
+
+def test_a_retired_receiver_retires_once(state_with_pass, check_run):
+    assert apply_retire(state_with_pass, key="AC0G-B4", run=check_run) == 0
+    n = len(check_run.calls)
+    assert apply_retire(state_with_pass, key="AC0G-B4", run=check_run) == 0
+    assert len(check_run.calls) == n and "retired already" in check_run.output
+
+
+def test_retire_refuses_a_writable_codar_directory(state_with_pass, check_run):
+    os.chmod(state_with_pass / "etc/codar-sounder", 0o777)
+    assert apply_retire(state_with_pass, key="AC0G-B4", run=check_run) == 1
+    assert (state_with_pass / "etc/codar-sounder/AC0G-B4.toml").exists()
+    assert "by hand" in check_run.output
+
+
+def test_retire_holds_the_chirp_lock(state_with_pass, check_run):
+    d = state_with_pass / STATE_REL
+    fd = os.open(d / ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        assert apply_retire(state_with_pass, key="AC0G-B4", run=check_run) == 1
+        assert check_run.calls == []
+    finally:
+        os.close(fd)
+
+
+# -- Task 21's deferred minors -------------------------------------------------
+
+def test_rollback_names_the_command_that_lifts_fill(tmp_root, fake_run):    # R4/M4
+    _b4(tmp_root)
+    fake_run.fail.add(("smd", "admin"))
+    assert apply_convert(tmp_root, run=fake_run) == 1
+    out = fake_run.output
+    assert "smd admin chirp retire" in out
+    assert "hs-uploader sink set chirp-recorder upload" in out
+
+
+def test_non_root_dry_run_reads_what_it_can(tmp_root, fake_run):            # R1
+    _b4(tmp_root)
+    d = tmp_root / STATE_REL
+    d.mkdir(parents=True, mode=0o700)
+    os.chmod(d, 0o000)                 # as root's 0700 looks to anyone else
+    try:
+        rc = apply_convert(tmp_root, run=fake_run, dry_run=True)
+    finally:
+        os.chmod(d, 0o700)
+    out = fake_run.output
+    assert rc == 0 and fake_run.calls == []
+    assert "not a plain directory" not in out
+    assert "as root" in out and "chirp-recorder@AC0G-B4.service" in out
+
+
+def test_non_root_retire_dry_run_says_why(state_with_pass, check_run):      # R1
+    d = state_with_pass / STATE_REL
+    os.chmod(d, 0o000)
+    try:
+        rc = apply_retire(state_with_pass, key="AC0G-B4", run=check_run,
+                          dry_run=True)
+    finally:
+        os.chmod(d, 0o700)
+    out = check_run.output
+    assert rc == 1 and "not a plain directory" not in out and "as root" in out
+
+
+# -- the verbs -------------------------------------------------------------------
+
+def test_verb_parses_check_and_retire():
+    smd = _load_smd()
+    a = _args(smd, 'check', 'AC0G-B4')
+    assert (a.chirp_command, a.key) == ('check', 'AC0G-B4')
+    a = _args(smd, 'retire', 'AC0G-B1B', '--nights', '7', '--force',
+              '--reason', 'no T6 tie', '--dry-run')
+    assert (a.chirp_command, a.key, a.nights, a.force, a.reason, a.dry_run) == \
+        ('retire', 'AC0G-B1B', 7, True, 'no T6 tie', True)
+    assert _args(smd, 'retire', 'AC0G-B4').nights == 1
+
+
+def test_verb_force_without_reason_refuses(state_with_pass, check_run):
+    smd = _load_smd()
+    a = _args(smd, 'retire', 'AC0G-B4', '--force')
+    assert smd.cmd_chirp_retire(a, run=check_run, root=state_with_pass) == 1
+    assert check_run.calls == []
+
+
+@pytest.mark.parametrize("argv,fn", [
+    (["convert", "AC0G-B4"], "apply_convert"),
+    (["check", "AC0G-B4"], "check"),
+    (["retire", "AC0G-B4"], "apply_retire")])
+def test_each_verb_holds_the_lifecycle_lock(monkeypatch, argv, fn):        # ruling 4
+    import contextlib
+    import sys
+    smd = _load_smd()
+    held = []
+
+    @contextlib.contextmanager
+    def fake_lock(reason="", *, wait_s=None, **kw):
+        held.append((reason, wait_s))
+        yield
+        held.append("released")
+
+    def fake(*a, **kw):
+        assert held and held[-1] != "released", "called outside the lock"
+        return {"status": "pass"} if fn == "check" else 0
+    monkeypatch.setattr(smd, "lifecycle_lock", fake_lock)
+    monkeypatch.setattr(smd, "_need_root", lambda *a: False)
+    monkeypatch.setattr(CM, fn, fake)
+    monkeypatch.setattr(sys, "argv", ["smd", "admin", "chirp", *argv])
+    assert smd.main() == 0
+    assert held[0] == (f"chirp {argv[0]}", 0) and held[-1] == "released"
+
+
+def test_no_child_command_takes_the_lifecycle_lock(state_with_pass, check_run):  # ruling 4
+    """The only smd child is `admin uploader manifest --write`, which main()
+    dispatches outside the lifecycle-locked set and which takes hs-uploader's
+    install lock alone."""
+    root = state_with_pass
+    check("AC0G-B4", run=check_run, now=STARTED + timedelta(hours=20))
+    apply_retire(root, key="AC0G-B4", run=check_run)
+    smd_children = {tuple(c) for c in check_run.calls if c[0] == "smd"}
+    assert smd_children == {("smd", "admin", "uploader", "manifest", "--write")}
+    assert {c[0] for c in check_run.calls} <= {"smd", "systemctl",
+                                               "hs-uploader", "chirp-recorder"}
+    src = (Path(__file__).resolve().parent.parent / "lib/sigmond/commands/uploader.py").read_text()
+    assert "lifecycle_lock" not in src
+    smd_src = (Path(__file__).resolve().parent.parent / "bin/smd").read_text()
+    assert "_MUTATING = {'install', 'apply', 'start', 'stop', 'restart', 'reload'}" in smd_src
