@@ -1568,6 +1568,36 @@ class AlignBringupTests(unittest.TestCase):
         manifest_step = next(s for s in steps if s.component == "admin uploader manifest --write")
         self.assertNotEqual(manifest_step.detail, "manifest changed")
 
+    # --- v3.94 roll, B1: a radiod-only host enables no catalog `client`, so
+    # nothing there produces data for hs-uploader; the uploader manifest step
+    # failed (no hs-uploader venv) and blocked align's restarts and record.
+
+    def test_host_without_upload_clients_skips_uploader_manifest(self):
+        said = []
+        with mock.patch("os.access", return_value=False):
+            steps = smd._align_bringup(run=_FakeBringupRun([(0, "", "")] * 2),
+                                       say=lambda *a, **k: said.append(" ".join(map(str, a))),
+                                       site_timing_refreshed=True, host_uploads=False)
+        self.assertEqual([s.component for s in steps], ["config render", "doctor --fix"])
+        self.assertTrue(any("uploader manifest" in l and "skipped" in l for l in said))
+
+    def test_host_uploads_rule(self):
+        from types import SimpleNamespace as NS
+        cat = {"ka9q-radio": NS(kind="server"), "igmp-querier": NS(kind="infra"),
+               "wspr-recorder": NS(kind="client"), "gpsdo-monitor": NS(kind="infra")}
+        topo = lambda *names: NS(enabled_components=lambda: sorted(names))
+        self.assertFalse(smd._align_host_uploads(topology=topo("ka9q-radio", "igmp-querier", "gpsdo-monitor"),
+                                                 catalog=cat))
+        self.assertTrue(smd._align_host_uploads(topology=topo("ka9q-radio", "wspr-recorder"), catalog=cat))
+        # unknown names and an unreadable topology keep the step (the old behaviour)
+        self.assertTrue(smd._align_host_uploads(topology=topo("mystery"), catalog=cat))
+        broken = NS(enabled_components=lambda: (_ for _ in ()).throw(OSError("unreadable")))
+        self.assertTrue(smd._align_host_uploads(topology=broken, catalog=cat))
+
+    def test_host_uploads_without_a_topology_file_keeps_the_step(self):
+        with mock.patch.object(smd, "_ALIGN_TOPOLOGY_PATH", Path("/nonexistent/topology.toml")):
+            self.assertTrue(smd._align_host_uploads())
+
     def test_not_executable_site_timing_is_skipped_not_failed(self):
         with mock.patch("os.access", return_value=False):
             steps = smd._align_bringup(run=_FakeBringupRun([(0, "", "")] * 3),

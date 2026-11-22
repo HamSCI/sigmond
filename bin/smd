@@ -9710,9 +9710,38 @@ def _align_declared_units_steps(base, *, timers_out=None) -> list:
     return []
 
 
+_ALIGN_TOPOLOGY_PATH = Path('/etc/sigmond/topology.toml')
+
+
+def _align_host_uploads(*, topology=None, catalog=None) -> bool:
+    """False only when topology enables no catalog ``client``: a radiod-only
+    host (B1: ka9q-radio and igmp-querier) produces nothing for hs-uploader,
+    and the uploader manifest step there failed for want of hs-uploader's
+    venv, blocking align's restarts and record (v3.94 roll, 2026-11-21).
+    Anything unknown -- no topology file, an unreadable one, a name the
+    catalog does not know -- keeps the step."""
+    try:
+        if topology is None:
+            if not _ALIGN_TOPOLOGY_PATH.exists():
+                return True
+            from sigmond.topology import load_topology
+            topology = load_topology(_ALIGN_TOPOLOGY_PATH)
+        if catalog is None:
+            from sigmond.catalog import load_catalog
+            catalog = load_catalog()
+        enabled = topology.enabled_components()
+    except Exception:  # noqa: BLE001 -- unknown means keep the step
+        return True
+    for name in enabled:
+        entry = catalog.get(name)
+        if entry is None or getattr(entry, 'kind', None) == 'client':
+            return True
+    return False
+
+
 def _align_bringup(*, run=subprocess.run, say=print, site_timing_refreshed: bool = False,
                    base='/opt/git/sigmond', start_timers: bool = True,
-                   timers_out=None) -> list:
+                   timers_out=None, host_uploads=None) -> list:
     """Re-run bring-up's own steps, in bring-up's own order, stopping at
     the first failure: `sigmond-site-timing`, `config render --if-present`,
     `admin uploader manifest --write` (never `--enable`: whether to
@@ -9815,36 +9844,42 @@ def _align_bringup(*, run=subprocess.run, say=print, site_timing_refreshed: bool
     steps += _align_device_steps(start=start_timers, base=base)
     steps += _align_declared_units_steps(base, timers_out=timers_out)
 
-    try:
-        before = um.MANIFEST_PATH.read_bytes()
-    except OSError:
-        before = None
-    # 600 s, above the step's worst case.  Killing the child after its
-    # `systemctl stop` would leave hs-uploader stopped, so the limit must
-    # cover every wait the child can take, in order:
-    #     20 s  discard-support probe (only under mode = "discard")
-    #   + 20 s  `hs-uploader capabilities` probe
-    #   + 20 s  D13 environment reads, 10 s per psk-recorder/meteor-scatter unit
-    #   + 10 s  `systemctl show` for the daemon's store path
-    #   +120 s  `hs-uploader migrate --check` (_MIGRATE_TIMEOUT_S)
-    #   + 90 s  `systemctl stop` (the unit sets no TimeoutStopSec: default 90 s)
-    #   +120 s  `hs-uploader migrate` (_MIGRATE_TIMEOUT_S)
-    #   + 30 s  `systemctl start` (the unit's TimeoutStartSec)
-    #   = 430 s, plus interpreter start-up; 600 s leaves room.
-    r = _align_run([sys.executable, str(_SCRIPT), 'admin', 'uploader', 'manifest', '--write'],
-                   run=run, timeout=600, action='admin uploader manifest --write',
-                   stdin=subprocess.DEVNULL)
-    detail = _tail(r)
-    if r.returncode != 0:
-        steps.append(align_apply.Step('admin uploader manifest --write', 'failed', detail))
-        return steps
-    try:
-        after = um.MANIFEST_PATH.read_bytes()
-    except OSError:
-        after = None
-    if before != after:
-        detail = 'manifest changed'
-    steps.append(align_apply.Step('admin uploader manifest --write', 'ran', detail))
+    if host_uploads is None:
+        host_uploads = _align_host_uploads()
+    if not host_uploads:
+        say('  admin uploader manifest --write: skipped -- topology enables no client, '
+            'so nothing on this host uploads')
+    else:
+        try:
+            before = um.MANIFEST_PATH.read_bytes()
+        except OSError:
+            before = None
+        # 600 s, above the step's worst case.  Killing the child after its
+        # `systemctl stop` would leave hs-uploader stopped, so the limit must
+        # cover every wait the child can take, in order:
+        #     20 s  discard-support probe (only under mode = "discard")
+        #   + 20 s  `hs-uploader capabilities` probe
+        #   + 20 s  D13 environment reads, 10 s per psk-recorder/meteor-scatter unit
+        #   + 10 s  `systemctl show` for the daemon's store path
+        #   +120 s  `hs-uploader migrate --check` (_MIGRATE_TIMEOUT_S)
+        #   + 90 s  `systemctl stop` (the unit sets no TimeoutStopSec: default 90 s)
+        #   +120 s  `hs-uploader migrate` (_MIGRATE_TIMEOUT_S)
+        #   + 30 s  `systemctl start` (the unit's TimeoutStartSec)
+        #   = 430 s, plus interpreter start-up; 600 s leaves room.
+        r = _align_run([sys.executable, str(_SCRIPT), 'admin', 'uploader', 'manifest', '--write'],
+                       run=run, timeout=600, action='admin uploader manifest --write',
+                       stdin=subprocess.DEVNULL)
+        detail = _tail(r)
+        if r.returncode != 0:
+            steps.append(align_apply.Step('admin uploader manifest --write', 'failed', detail))
+            return steps
+        try:
+            after = um.MANIFEST_PATH.read_bytes()
+        except OSError:
+            after = None
+        if before != after:
+            detail = 'manifest changed'
+        steps.append(align_apply.Step('admin uploader manifest --write', 'ran', detail))
 
     r = _align_run([sys.executable, str(_SCRIPT), 'doctor', '--fix'],
                    run=run, timeout=120, action='doctor --fix', stdin=subprocess.DEVNULL)
