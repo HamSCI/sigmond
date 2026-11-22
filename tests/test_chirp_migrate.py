@@ -597,7 +597,12 @@ def _converted(root: Path, key: str, rid: str, *, verdicts=None,
     env = root / "etc/codar-sounder/env"
     env.mkdir(parents=True, exist_ok=True)
     (env / f"{key}.env").write_text("CODAR_X=1\n")
-    for d in (env.parent, env):        # root's 0755, as install.sh leaves it
+    out = root / "var/lib/codar-sounder"
+    (out / "arrivals").mkdir(parents=True, exist_ok=True)
+    cfg = root / "etc/codar-sounder" / f"{key}.toml"
+    cfg.write_text(cfg.read_text() + f'[paths]\noutput_dir = "{out}"\n')
+    clients = root / "etc/sigmond/clients"
+    for d in (env.parent, env, clients):   # root's 0755, as installs leave them
         os.chmod(d, 0o755)
     ch = root / "etc/chirp-recorder"
     ch.mkdir(parents=True, exist_ok=True)
@@ -656,7 +661,7 @@ def b2_states(chirp_root):
 
 
 VERDICT = {
-    "status": "pass", "match": "bin", "mode": "bin", "codar_bin_ns": {},
+    "status": "pass", "match": "bin", "codar_bin_ns": {},
     "rows": [
         {"name": "matched", "value": 4, "limit": 3, "gating": True, "passed": True},
         {"name": "coverage", "value": 1.0, "limit": 0.9, "gating": True, "passed": True},
@@ -761,23 +766,33 @@ def test_check_runs_compare_over_the_night_and_stores_the_verdict(state_after_co
     (c,) = [c for c in check_run.calls if c[:2] == ["chirp-recorder", "compare"]]
     assert c == ["chirp-recorder", "compare", "--instance", "AC0G-B4",
                  "--since", "2026-11-20T18:00:00Z",
-                 "--until", "2026-11-21T14:00:00Z", "--json"]
+                 "--until", "2026-11-21T14:00:00Z",
+                 "--codar-rows", str(state_after_convert / "var/lib/codar-sounder/arrivals"),
+                 "--json"]
     assert out["status"] == "pass" and out["night"] == "2026-11-21"
     st = json.loads(STATE("AC0G-B4").read_text())
     (v,) = st["verdicts"]
     assert v["night"] == "2026-11-21" and v["status"] == "pass"
-    assert v["rows"] == VERDICT["rows"] and v["mode"] == "bin"
+    assert v["rows"] == VERDICT["rows"] and v["match"] == "bin"
     text = check_run.output
     for word in ("matched", "coverage", "doppler", "s4", "sigma_phi",
                  "gates", "reported", "explained", "unmatched", "61000000"):
         assert word in text, word
 
 
-def test_check_tolerates_a_verdict_without_mode(state_after_convert, check_run):
-    del check_run.verdict["mode"]
+def test_check_tolerates_a_verdict_without_match(state_after_convert, check_run):
+    del check_run.verdict["match"]
     check("AC0G-B4", run=check_run, now=STARTED + timedelta(hours=20))
     (v,) = json.loads(STATE("AC0G-B4").read_text())["verdicts"]
-    assert "mode" not in v and v["status"] == "pass"
+    assert "match" not in v and v["status"] == "pass"
+
+
+def test_check_takes_mode_when_match_is_absent(state_after_convert, check_run):  # R1 I-1
+    del check_run.verdict["match"]
+    check_run.verdict["mode"] = "exact"
+    check("AC0G-B4", run=check_run, now=STARTED + timedelta(hours=20))
+    (v,) = json.loads(STATE("AC0G-B4").read_text())["verdicts"]
+    assert v["match"] == "exact"
 
 
 def test_check_keeps_one_verdict_per_night(state_after_convert, check_run):
@@ -1069,3 +1084,137 @@ def test_no_child_command_takes_the_lifecycle_lock(state_with_pass, check_run): 
     assert "lifecycle_lock" not in src
     smd_src = (Path(__file__).resolve().parent.parent / "bin/smd").read_text()
     assert "_MUTATING = {'install', 'apply', 'start', 'stop', 'restart', 'reload'}" in smd_src
+
+
+# == Task 22, fix round 1 ======================================================
+
+def test_check_stores_compares_real_match_field(state_after_convert, check_run):  # I-1
+    assert "mode" not in check_run.verdict          # what compare emits
+    check("AC0G-B4", run=check_run, now=STARTED + timedelta(hours=20))
+    (v,) = json.loads(STATE("AC0G-B4").read_text())["verdicts"]
+    assert v["match"] == "bin" and "mode" not in v
+
+
+def test_check_reads_codar_rows_from_the_default_output_dir(state_after_convert):  # I-3
+    root = state_after_convert
+    cfg = root / "etc/codar-sounder/AC0G-B4.toml"
+    cfg.write_text(cfg.read_text().split("[paths]")[0])
+    assert CM.codar_rows_dir(root / "etc", "AC0G-B4") == \
+        root / "var/lib/codar-sounder/arrivals"
+
+
+def test_check_without_codar_arrivals_reads_insufficient(state_after_convert, check_run):  # I-3
+    import shutil
+    shutil.rmtree(state_after_convert / "var/lib/codar-sounder/arrivals")
+    out = check("AC0G-B4", run=check_run, now=STARTED + timedelta(hours=20))
+    assert out["status"] == "insufficient"
+    assert "bf3f360" in out["message"] and "arrivals" in out["message"]
+    assert not any(c[:2] == ["chirp-recorder", "compare"] for c in check_run.calls)
+    assert json.loads(STATE("AC0G-B4").read_text())["verdicts"] == []
+
+
+def test_a_check_cannot_strand_a_half_retired_receiver(state_with_pass, check_run):  # I-2
+    root = state_with_pass
+    check_run.fail.add(("smd", "admin"))                       # stops at the manifest
+    assert apply_retire(root, key="AC0G-B4", run=check_run) == 1
+    with pytest.raises(MigrateRefused, match="retire.*again"):
+        check("AC0G-B4", run=check_run, now=STARTED + timedelta(hours=44))
+    # even an insufficient night recorded meanwhile does not block the resume
+    p = STATE("AC0G-B4")
+    doc = json.loads(p.read_text())
+    doc["verdicts"].append({"night": "2026-11-22", "status": "insufficient",
+                            "rows": [], "covered": True})
+    p.write_text(json.dumps(doc))
+    check_run.fail.clear()
+    assert apply_retire(root, key="AC0G-B4", run=check_run) == 0
+    assert json.loads(p.read_text())["retired_at"]
+
+
+def test_a_forced_record_waits_for_the_preflight(b2_states, check_run):  # M1
+    check_run.fail.add(("hs-uploader", "sink", "status"))
+    assert apply_retire(b2_states, key="AC0G-B1B", run=check_run,
+                        force_reason="no T6 tie on B1B") == 1
+    st = json.loads(STATE("AC0G-B1B").read_text())
+    assert "forced" not in st and "forced_partner" not in st
+    assert "nothing changed" in check_run.output
+    check_run.fail.clear()
+    assert apply_retire(b2_states, key="AC0G-B1B", run=check_run,
+                        force_reason="no T6 tie on B1B") == 0
+    st = json.loads(STATE("AC0G-B1B").read_text())
+    assert st["forced"] == "no T6 tie on B1B" and st["forced_partner"] == "AC0G-B1A"
+
+
+def test_aside_refusals_come_before_codar_stops(state_with_pass, check_run):  # M2
+    os.chmod(state_with_pass / "etc/codar-sounder", 0o777)
+    assert apply_retire(state_with_pass, key="AC0G-B4", run=check_run) == 1
+    assert not any(c[0] == "systemctl" for c in check_run.calls)
+    assert "by hand" in check_run.output
+
+
+def test_a_stale_retired_file_refuses_before_codar_stops(state_with_pass, check_run):  # M2
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+    (state_with_pass / f"etc/codar-sounder/AC0G-B4.toml.retired-{stamp}").write_text("old\n")
+    assert apply_retire(state_with_pass, key="AC0G-B4", run=check_run) == 1
+    assert not any(c[0] == "systemctl" for c in check_run.calls)
+
+
+def test_a_sink_without_a_chirp_switch_refuses_first(state_with_pass, check_run):  # M3
+    check_run.sink["clients"] = []
+    assert apply_retire(state_with_pass, key="AC0G-B4", run=check_run) == 1
+    assert not any(c[0] == "systemctl" for c in check_run.calls)
+    assert "no chirp-recorder" in check_run.output
+
+
+def test_retire_moves_the_sources_file_aside(state_with_pass, check_run):  # M4
+    root = state_with_pass
+    assert apply_retire(root, key="AC0G-B4", run=check_run) == 0
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+    src = root / "etc/sigmond/clients"
+    assert not (src / "codar-sounder@AC0G-B4.sources.toml").exists()
+    assert (src / f"codar-sounder@AC0G-B4.sources.toml.retired-{stamp}").exists()
+    assert "drop-in" in check_run.output
+
+
+def test_a_state_refusal_in_the_last_step_stops_truthfully(state_with_pass, check_run):  # M5
+    p = STATE("AC0G-B4")
+    def loosen():
+        os.chmod(p, 0o666)
+    check_run.after[("hs-uploader", "sink", "set")] = loosen
+    assert apply_retire(state_with_pass, key="AC0G-B4", run=check_run) == 1
+    out = check_run.output
+    assert "nothing changed" not in out and "again" in out
+
+
+def test_a_resume_on_another_day_keeps_the_first_stamp(state_with_pass, check_run):  # M7
+    root = state_with_pass
+    check_run.fail.add(("systemctl", "disable"))
+    assert apply_retire(root, key="AC0G-B4", run=check_run) == 1
+    p = STATE("AC0G-B4")
+    doc = json.loads(p.read_text())
+    assert doc["retire_stamp"] == datetime.now(timezone.utc).strftime("%Y%m%d")
+    doc["retire_stamp"] = "20261101"                  # as if begun on 11-01
+    p.write_text(json.dumps(doc))
+    check_run.fail.clear()
+    assert apply_retire(root, key="AC0G-B4", run=check_run) == 0
+    etc = root / "etc/codar-sounder"
+    assert (etc / "AC0G-B4.toml.retired-20261101").exists()
+    assert (etc / "env/AC0G-B4.env.retired-20261101").exists()
+
+
+def test_check_a_named_night(state_after_convert, check_run):  # M6
+    now = STARTED + timedelta(hours=68)               # 14:00Z 11-23
+    out = check("AC0G-B4", run=check_run, now=now, night="2026-11-21")
+    assert out["night"] == "2026-11-21"
+    (c,) = [c for c in check_run.calls if c[:2] == ["chirp-recorder", "compare"]]
+    assert c[c.index("--since") + 1] == "2026-11-20T18:00:00Z"
+    assert c[c.index("--until") + 1] == "2026-11-21T18:00:00Z"
+    with pytest.raises(MigrateRefused, match="2026-11-20"):
+        check("AC0G-B4", run=check_run, now=now, night="2026-11-20")   # before start
+    with pytest.raises(MigrateRefused, match="2026-11-24"):
+        check("AC0G-B4", run=check_run, now=now, night="2026-11-24")   # not closed
+
+
+def test_verb_parses_check_night():  # M6
+    smd = _load_smd()
+    assert _args(smd, 'check', 'AC0G-B4', '--night', '2026-11-21').night == '2026-11-21'
+    assert _args(smd, 'check', 'AC0G-B4').night is None

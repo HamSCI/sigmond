@@ -699,14 +699,27 @@ def _convert(etc_root, want, run, dry_run, say) -> int:
 #
 # check: after a side-by-side night, `chirp-recorder compare` sets
 # chirp-recorder's rows against codar-sounder's over that night, and the
-# verdict lands in the state file, one per night.
+# verdict lands in the state file, one per night.  codar-sounder's side
+# comes from its daily arrival JSONL (`--codar-rows`, codar-sounder bf3f360
+# and later), never from the sink queue its uploader empties.
 #
 # retire: once the last N stored verdicts pass on consecutive covered
-# nights, codar-sounder goes for that receiver, in this order:
+# nights, codar-sounder goes for that receiver.  First a pre-flight that
+# changes nothing:
+#   0. `hs-uploader sink status --json` must list chirp-recorder's switch,
+#      and not at `off` (an operator's choice the raise to upload would
+#      override); each file to move aside must sit in a directory only root
+#      can write, with no `*.retired-STAMP` already in the way.
+# Then one state write records `sink_before_retire`, `retire_stamp` and, on
+# a forced retire, `forced` and `forced_partner`.  From here the retire has
+# begun.  Then, in order:
 #   1. systemctl disable --now codar-sounder@KEY.service;
-#   2. /etc/codar-sounder/KEY.toml and env/KEY.env move aside to
-#      *.retired-YYYYMMDD, after a copy into instance_move's /etc-side
-#      backup (data under /var/lib/codar-sounder stays);
+#   2. /etc/codar-sounder/KEY.toml, env/KEY.env and
+#      /etc/sigmond/clients/codar-sounder@KEY.sources.toml move aside to
+#      *.retired-STAMP, after a copy into instance_move's /etc-side backup,
+#      as instance_move.apply_retires does.  Data under
+#      /var/lib/codar-sounder stays, and so does the unit's drop-in
+#      directory (the unit stays disabled, so it applies to nothing);
 #   3. codar-sounder leaves topology, by the same set_component_enabled
 #      convert uses, only when no codar-sounder instance remains on the host
 #      (validate_receivers keeps codar-sounder out of a receiver's
@@ -714,16 +727,13 @@ def _convert(etc_root, want, run, dry_run, say) -> int:
 #   4. smd admin uploader manifest --write;
 #   5. hs-uploader sink set chirp-recorder upload: the held rows ship;
 #   6. retired_at in the state file.
-# Before step 1, retire reads chirp-recorder's switch through
-# `hs-uploader sink status --json` and records what it found in the state
-# file (`sink_before_retire`).  A switch an operator set `off` refuses: the
-# raise to upload would override that choice.  A read that fails refuses
-# too, before anything changes.
 #
 # A step that fails stops the run.  What ran stays (codar-sounder down,
 # chirp-recorder still holding its rows at fill), and a second run resumes:
-# a disabled unit disables again, a file already aside is skipped, the
-# recorded switch state is kept.
+# once `sink_before_retire` stands the verdict gate no longer applies (a
+# night codar-sounder spent down would read `insufficient`), check refuses
+# until the retire finishes, a disabled unit disables again, a file already
+# aside is skipped, and the first stamp and switch reading are kept.
 #
 # None of the commands these verbs run takes the lifecycle lock that
 # `bin/smd` holds around them: systemctl, chirp-recorder and hs-uploader
@@ -734,6 +744,8 @@ CHECK_STATUSES = ("pass", "fail", "insufficient")
 RETIRE_REASON = "codar-sounder retired"
 RETIRE_BY = "smd admin chirp retire"
 _NIGHT = "00:00-06:00 local solar time"
+#: The codar-sounder commit that first keeps arrival rows in daily JSONL.
+CODAR_ROWS_SINCE = "bf3f360"
 
 #: The brief's step number for each retire phase, as `--dry-run` prints them.
 RETIRE_STEP = {"disable": 1, "aside": 2, "topology": 3, "manifest": 3,
@@ -758,6 +770,23 @@ def _key(key: str) -> str:
         return instance_key(key)
     except (InvalidReporterId, ValueError) as exc:
         raise MigrateRefused(f"{key!r}: {exc}") from None
+
+
+def _today() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%d")
+
+
+def _retire_begun(st: dict) -> bool:
+    """True once a retire has run its pre-flight and recorded the switch:
+    codar-sounder may already be down."""
+    return isinstance(st.get("sink_before_retire"), dict)
+
+
+def _half_retired(key: str, st: dict) -> str:
+    return (f"{key}: a retire began "
+            f"({st['sink_before_retire'].get('read_at', 'time unknown')}) "
+            f"and has not finished; codar-sounder may be down.  Run `smd "
+            f"admin chirp retire {key}` again to finish it")
 
 
 # ---- the night ----------------------------------------------------------
@@ -794,19 +823,48 @@ def night_covered(started_at: datetime, now: datetime,
     return _first_midnight(started_at, receiver_lon) + timedelta(hours=6) <= now
 
 
+def _cut(started_at: datetime, now: datetime, m: datetime, lon: float):
+    """(night date, since, until) for the night whose local solar midnight
+    falls at ``m``: local solar noon to noon around it, cut to the
+    side-by-side window.  The night carries the local solar date of its
+    midnight (the morning's date)."""
+    since = max(started_at, m - timedelta(hours=12))
+    until = min(now, m + timedelta(hours=12))
+    return (m + _solar_offset(lon)).date().isoformat(), since, until
+
+
 def _night_window(started_at: datetime, now: datetime, lon: float):
-    """(night date, since, until) of the latest covered night: local solar
-    noon to noon around its midnight, cut to the side-by-side window.  The
-    night carries the local solar date of its midnight.  None when no night
-    is covered yet."""
+    """The latest covered night, as `_cut` gives it; None when no night is
+    covered yet."""
     if not night_covered(started_at, now, lon):
         return None
     m = _last_midnight(now, lon)
     if m < started_at:
         return None
-    since = max(started_at, m - timedelta(hours=12))
-    until = min(now, m + timedelta(hours=12))
-    return (m + _solar_offset(lon)).date().isoformat(), since, until
+    return _cut(started_at, now, m, lon)
+
+
+def _named_night(night: str, started_at: datetime, now: datetime,
+                 lon: float):
+    """The night dated ``night`` (YYYY-MM-DD, local solar), as `_cut` gives
+    it.  Raises MigrateRefused for a night the side-by-side window does not
+    hold whole."""
+    try:
+        d = date.fromisoformat(night)
+    except ValueError:
+        raise MigrateRefused(f"--night {night!r} is no YYYY-MM-DD date") \
+            from None
+    m = datetime(d.year, d.month, d.day, tzinfo=timezone.utc) \
+        - _solar_offset(lon)
+    if m < started_at:
+        raise MigrateRefused(f"the night of {night} began before the "
+                             f"side-by-side window ({_iso(started_at)})")
+    if m + timedelta(hours=6) > now or not night_covered(started_at, now,
+                                                          lon):
+        raise MigrateRefused(f"the night of {night} has not closed: its "
+                             f"{_NIGHT} ends {_iso(m + timedelta(hours=6))}, "
+                             f"and the window needs 12 h")
+    return _cut(started_at, now, m, lon)
 
 
 def _grid_lon(grid: str) -> float:
@@ -821,24 +879,28 @@ def _grid_lon(grid: str) -> float:
     return lon + 1.0
 
 
-def receiver_lon(etc_root: Path, key: str) -> float:
-    """The receiver's longitude from chirp-recorder's own config:
-    ``[station] receiver_lon``, else the centre of ``grid_square``.  Read
-    without following a link."""
+def _read_toml(path: Path, missing: str) -> dict:
     import tomllib
     from . import safe_write
-    path = chirp_config(etc_root, key)
     try:
         text = safe_write.read_nofollow(path)
     except OSError as exc:
         raise MigrateRefused(f"{path}: {exc}") from None
     if text is None:
-        raise MigrateRefused(f"{path} is missing: the receiver's longitude "
-                             f"places its night")
+        raise MigrateRefused(f"{path} is missing: {missing}")
     try:
-        st = tomllib.loads(text).get("station") or {}
+        return tomllib.loads(text)
     except ValueError as exc:
         raise MigrateRefused(f"{path}: {exc}") from None
+
+
+def receiver_lon(etc_root: Path, key: str) -> float:
+    """The receiver's longitude from chirp-recorder's own config:
+    ``[station] receiver_lon``, else the centre of ``grid_square``.  Read
+    without following a link."""
+    path = chirp_config(etc_root, key)
+    st = _read_toml(path, "the receiver's longitude places its night"
+                    ).get("station") or {}
     lon = st.get("receiver_lon")
     if isinstance(lon, (int, float)) and -180 <= lon <= 180:
         return float(lon)
@@ -847,6 +909,20 @@ def receiver_lon(etc_root: Path, key: str) -> float:
     except ValueError:
         raise MigrateRefused(f"{path}: [station] gives neither receiver_lon "
                              f"nor a grid_square") from None
+
+
+def codar_rows_dir(etc_root: Path, key: str) -> Path:
+    """codar-sounder's daily arrival JSONL for this receiver:
+    ``<output_dir>/arrivals``, with ``output_dir`` from
+    /etc/codar-sounder/KEY.toml's ``[paths]`` (default
+    /var/lib/codar-sounder, beside ``etc_root``)."""
+    cfg = Path(etc_root) / CODAR / f"{key}.toml"
+    paths = _read_toml(cfg, "codar-sounder's config names its output "
+                       "directory").get("paths") or {}
+    out = paths.get("output_dir")
+    if isinstance(out, str) and out.startswith("/"):
+        return Path(out) / "arrivals"
+    return Path(etc_root).parent / "var" / "lib" / CODAR / "arrivals"
 
 
 # ---- verdicts -----------------------------------------------------------
@@ -897,26 +973,30 @@ def _print_verdict(d: dict, say) -> None:
 
 
 def check(key: str, *, run: Runner = default_run, now=None, root=None,
+          night: Optional[str] = None,
           say: Callable[[str], None] = print) -> dict:
     """Compare chirp-recorder with codar-sounder over the latest covered
-    night and append the verdict to the state file's ``verdicts`` (one per
-    night; a second check of the same night replaces the first).
+    night (or the one dated ``night``) and append the verdict to the state
+    file's ``verdicts`` (one per night; a second check of the same night
+    replaces the first).
 
     Returns ``{"status": ...}``: ``window`` while no night is covered,
-    ``error`` when the comparison gave no verdict (nothing stored), else
-    the verdict's own ``pass``, ``fail`` or ``insufficient``.  Raises
-    MigrateRefused for a receiver it cannot check."""
+    ``insufficient`` without comparing when codar-sounder keeps no arrival
+    JSONL, ``error`` when the comparison gave no verdict (nothing stored in
+    either case), else the verdict's own ``pass``, ``fail`` or
+    ``insufficient``.  Raises MigrateRefused for a receiver it cannot check,
+    a half-finished retire among them."""
     key = _key(key)
     etc_root = _root(root) / "etc"
     now = now or datetime.now(timezone.utc)
     lock = _lock(etc_root)
     try:
-        return _check(etc_root, key, run, now, say)
+        return _check(etc_root, key, run, now, night, say)
     finally:
         os.close(lock)
 
 
-def _check(etc_root, key, run, now, say) -> dict:
+def _check(etc_root, key, run, now, night, say) -> dict:
     st = read_state(etc_root, key)
     if st is None:
         raise MigrateRefused(f"{key} has no conversion state: run `smd admin "
@@ -924,13 +1004,18 @@ def _check(etc_root, key, run, now, say) -> dict:
     if st.get("retired_at"):
         raise MigrateRefused(f"{key}: codar-sounder retired already "
                              f"({st['retired_at']}); nothing to compare")
+    if _retire_begun(st):
+        raise MigrateRefused(_half_retired(key, st))
     try:
         started = _parse_iso(st["started_at"])
     except (KeyError, ValueError):
         raise MigrateRefused(f"{state_path(etc_root, key)}: no readable "
                              f"started_at") from None
     lon = receiver_lon(etc_root, key)
-    win = _night_window(started, now, lon)
+    if night is not None:
+        win = _named_night(night, started, now, lon)
+    else:
+        win = _night_window(started, now, lon)
     if win is None:
         first = max(_first_midnight(started, lon) + timedelta(hours=6),
                     started + timedelta(hours=12))
@@ -940,8 +1025,17 @@ def _check(etc_root, key, run, now, say) -> dict:
         say(msg)
         return {"status": "window", "message": msg, "ready_at": _iso(first)}
     night, since, until = win
+    rows_dir = codar_rows_dir(etc_root, key)
+    if not os.path.isdir(rows_dir):
+        msg = (f"{key}: insufficient for the night of {night}: {rows_dir} is "
+               f"missing.  codar-sounder at {CODAR_ROWS_SINCE} or later keeps "
+               f"its arrival rows there (arrivals-YYYYMMDD.jsonl); update "
+               f"codar-sounder and check after its next covered night.  "
+               f"Nothing stored")
+        say(msg)
+        return {"status": "insufficient", "message": msg, "night": night}
     argv = (CHIRP, "compare", "--instance", key, "--since", _iso(since),
-            "--until", _iso(until), "--json")
+            "--until", _iso(until), "--codar-rows", str(rows_dir), "--json")
     say(f"{key}: night {night}, {_iso(since)} to {_iso(until)}")
     rc, out, err = _call(run, argv)
     for line in err.strip().splitlines():
@@ -960,8 +1054,9 @@ def _check(etc_root, key, run, now, say) -> dict:
     entry = {"night": night, "status": status, "rows": d["rows"],
              "since": _iso(since), "until": _iso(until), "covered": True,
              "checked_at": _iso(now)}
-    if "mode" in d:
-        entry["mode"] = d["mode"]
+    match = d.get("match", d.get("mode"))      # compare names it `match`
+    if match is not None:
+        entry["match"] = match
     verdicts = [v for v in st.get("verdicts") or []
                 if isinstance(v, dict) and v.get("night") != night]
     verdicts.append(entry)
@@ -970,7 +1065,7 @@ def _check(etc_root, key, run, now, say) -> dict:
     st["verdict"] = status
     _write_state(etc_root, key, st)
     say(f"{key}: {status} for the night of {night}"
-        + (f", match {d['mode']}" if "mode" in d else ""))
+        + (f", match {match}" if match is not None else ""))
     _print_verdict(d, say)
     run_n = _passing_run(verdicts)
     say(f"{key}: {run_n} passing night{'s' if run_n != 1 else ''} in a row "
@@ -988,8 +1083,16 @@ class RetireTarget:
 
 
 def _codar_files(etc_root: Path, key: str) -> list:
+    """What retire moves aside: config, env and sigmond's sources file, as
+    instance_move.apply_retires does."""
     d = Path(etc_root) / CODAR
-    return [d / f"{key}.toml", d / "env" / f"{key}.env"]
+    return [d / f"{key}.toml", d / "env" / f"{key}.env",
+            _im._clients_dir(etc_root) / f"{CODAR}@{key}.sources.toml"]
+
+
+def _dropin(etc_root: Path, key: str) -> Path:
+    return (Path(etc_root) / "systemd" / "system"
+            / f"{CODAR}@{systemd_escape(key)}.service.d")
 
 
 def _states(etc_root: Path) -> list:
@@ -1014,28 +1117,10 @@ def _states(etc_root: Path) -> list:
     return out
 
 
-def retire_steps(key: str, *, nights: int = 1,
-                 force_reason: Optional[str] = None, root=None,
-                 record: bool = True) -> list:
-    """Retire's steps for one receiver, in order; raises MigrateRefused
-    unless its last ``nights`` stored verdicts pass on consecutive covered
-    nights.
-
-    ``force_reason`` serves one case (Michael, 2026-11-19, decision 6):
-    this receiver's own latest check reads ``insufficient`` and a partner
-    receiver on this host holds ``nights`` passing verdicts.  ``record``
-    writes the reason and the partner's key into the state file."""
-    key = _key(key)
-    etc_root = _root(root) / "etc"
-    if nights < 1:
-        raise MigrateRefused("--nights must be at least 1")
-    st = read_state(etc_root, key)
-    if st is None:
-        raise MigrateRefused(f"{key} has no conversion state: run `smd admin "
-                             f"chirp convert {key}` first")
-    if st.get("retired_at"):
-        raise MigrateRefused(f"{key}: codar-sounder retired already "
-                             f"({st['retired_at']})")
+def _gate(etc_root: Path, key: str, st: dict, nights: int,
+          force_reason: Optional[str]) -> Optional[str]:
+    """Apply the verdict gate; the forced retire's partner key, or None.
+    Raises MigrateRefused with the rule that fails."""
     verdicts = st.get("verdicts") or []
     have = _passing_run(verdicts)
     if force_reason is None:
@@ -1047,38 +1132,66 @@ def retire_steps(key: str, *, nights: int = 1,
             raise MigrateRefused(
                 f"{key} holds {have} passing night{'s' if have != 1 else ''} "
                 f"in a row; retire wants {nights}")
-    else:
-        rule = (f"--force serves one case only: {key}'s own latest check "
-                f"reads \"insufficient\" (hf-timestd ties another radiod on "
-                f"this host) while a partner receiver here holds {nights} "
-                f"passing night{'s' if nights != 1 else ''} in a row")
-        reason = force_reason.strip()
-        if not reason:
-            raise MigrateRefused(f"{rule}; --force needs --reason TEXT")
-        last = verdicts[-1] if verdicts and isinstance(verdicts[-1], dict) \
-            else {}
-        if last.get("status") != "insufficient":
-            raise MigrateRefused(
-                f"{rule}; {key}'s latest check reads "
-                f"{last.get('status') or 'nothing'}, not \"insufficient\"")
-        partners = [p["key"] for p in _states(etc_root)
-                    if p.get("key") != key
-                    and _passing_run(p.get("verdicts")) >= nights]
-        if not partners:
-            raise MigrateRefused(f"{rule}; no partner receiver on this host "
-                                 f"holds them")
-        if record:
-            st["forced"] = reason
-            st["forced_partner"] = partners[0]
+        return None
+    rule = (f"--force serves one case only: {key}'s own latest check "
+            f"reads \"insufficient\" (hf-timestd ties another radiod on "
+            f"this host) while a partner receiver here holds {nights} "
+            f"passing night{'s' if nights != 1 else ''} in a row")
+    if not force_reason.strip():
+        raise MigrateRefused(f"{rule}; --force needs --reason TEXT")
+    last = verdicts[-1] if verdicts and isinstance(verdicts[-1], dict) else {}
+    if last.get("status") != "insufficient":
+        raise MigrateRefused(
+            f"{rule}; {key}'s latest check reads "
+            f"{last.get('status') or 'nothing'}, not \"insufficient\"")
+    partners = [p["key"] for p in _states(etc_root)
+                if p.get("key") != key
+                and _passing_run(p.get("verdicts")) >= nights]
+    if not partners:
+        raise MigrateRefused(f"{rule}; no partner receiver on this host "
+                             f"holds them")
+    return partners[0]
+
+
+def retire_steps(key: str, *, nights: int = 1,
+                 force_reason: Optional[str] = None, root=None,
+                 record: bool = True) -> list:
+    """Retire's steps for one receiver, in order; raises MigrateRefused
+    unless its last ``nights`` stored verdicts pass on consecutive covered
+    nights.  Once a retire has begun (``sink_before_retire`` stands) the
+    gate no longer applies: the steps resume.
+
+    ``force_reason`` serves one case (Michael, 2026-11-19, decision 6):
+    this receiver's own latest check reads ``insufficient`` and a partner
+    receiver on this host holds ``nights`` passing verdicts.  ``record``
+    writes the reason and the partner's key into the state file;
+    `apply_retire` passes False and records them only after its
+    pre-flight."""
+    key = _key(key)
+    etc_root = _root(root) / "etc"
+    if nights < 1:
+        raise MigrateRefused("--nights must be at least 1")
+    st = read_state(etc_root, key)
+    if st is None:
+        raise MigrateRefused(f"{key} has no conversion state: run `smd admin "
+                             f"chirp convert {key}` first")
+    if st.get("retired_at"):
+        raise MigrateRefused(f"{key}: codar-sounder retired already "
+                             f"({st['retired_at']})")
+    if not _retire_begun(st):
+        partner = _gate(etc_root, key, st, nights, force_reason)
+        if partner is not None and record:
+            st["forced"] = force_reason.strip()
+            st["forced_partner"] = partner
             _write_state(etc_root, key, st)
     t = RetireTarget(key, etc_root)
-    cfg, env = _codar_files(etc_root, key)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+    stamp = st.get("retire_stamp") or _today()
+    moved = ", ".join(str(p) for p in _codar_files(etc_root, key))
     return [
         Step("disable", f"disable and stop {codar_unit(key)}",
              ("systemctl", "disable", "--now", codar_unit(key)), t),
-        Step("aside", f"move {cfg} and {env} aside to *.retired-{stamp}, "
-             f"after a backup; /var/lib/{CODAR} stays", (), t),
+        Step("aside", f"move {moved} aside to *.retired-{stamp}, after a "
+             f"backup; /var/lib/{CODAR} and the unit's drop-in stay", (), t),
         Step("topology", f"disable {CODAR} in {topology_path(etc_root)} "
              f"once no {CODAR} instance remains", (), t),
         Step("manifest", "render the uploader pipelines again", _MANIFEST, t),
@@ -1110,13 +1223,12 @@ def _sink_found(run: Runner) -> "tuple[Optional[dict], str]":
     return {"file_state": "missing", "effective": None}, ""
 
 
-def _move_aside(paths: list, stamp: str, etc_root: Path, say) -> Optional[str]:
-    """Back up, then rename each existing path to ``*.retired-<stamp>``
-    within its directory, by descriptor, where only root can write that
-    directory.  A path already aside (a resumed run) is skipped.  None on
-    success, else why it stopped."""
-    var_root = Path(etc_root).parent / "var"
-    todo = []
+def _aside_plan(paths: list, stamp: str) -> "tuple[list, list, Optional[str]]":
+    """(to move [(path, new name)], already aside [(path, new name)], why
+    not).  Reads only: each parent opened by descriptor must belong to root
+    alone, and no ``*.retired-<stamp>`` may stand beside a file still to
+    move."""
+    todo, done = [], []
     for p in paths:
         new = f"{p.name}.retired-{stamp}"
         try:
@@ -1124,12 +1236,10 @@ def _move_aside(paths: list, stamp: str, etc_root: Path, say) -> Optional[str]:
         except FileNotFoundError:
             continue
         except OSError as exc:
-            return f"could not open {p.parent}: {exc.strerror}; move {p} by hand"
+            return todo, done, (f"could not open {p.parent}: {exc.strerror}; "
+                                f"move {p} by hand")
         try:
             st = os.fstat(pfd)
-            if st.st_uid != _im._trusted_uid() or st.st_mode & 0o022:
-                return (f"refusing to move {p}: others than root can write "
-                        f"{p.parent}; move it aside by hand")
             here = there = True
             try:
                 os.stat(p.name, dir_fd=pfd, follow_symlinks=False)
@@ -1141,14 +1251,32 @@ def _move_aside(paths: list, stamp: str, etc_root: Path, say) -> Optional[str]:
                 there = False
         finally:
             os.close(pfd)
+        if here and (st.st_uid != _im._trusted_uid() or st.st_mode & 0o022):
+            return todo, done, (f"refusing to move {p}: others than root can "
+                                f"write {p.parent}; move it aside by hand")
         if here and there:
-            return f"{p.parent / new} exists already; move {p} aside by hand"
+            return todo, done, (f"{p.parent / new} exists already; move {p} "
+                                f"aside by hand")
         if here:
             todo.append((p, new))
         elif there:
-            say(f"{p} is aside already ({new})")
+            done.append((p, new))
+    return todo, done, None
+
+
+def _move_aside(paths: list, stamp: str, etc_root: Path, say) -> Optional[str]:
+    """Back up, then rename each path `_aside_plan` passes to
+    ``*.retired-<stamp>`` within its directory, by descriptor.  A path
+    already aside (a resumed run) is skipped.  None on success, else why it
+    stopped."""
+    todo, done, why = _aside_plan(paths, stamp)
+    if why:
+        return why
+    for p, new in done:
+        say(f"{p} is aside already ({new})")
     if not todo:
         return None
+    var_root = Path(etc_root).parent / "var"
     try:
         backup = _im._backup([p for p, _ in todo], var_root,
                              datetime.now(timezone.utc).strftime(
@@ -1175,8 +1303,9 @@ def apply_retire(root, *, key: str, nights: int = 1,
                  force_reason: Optional[str] = None,
                  run: Runner = default_run, dry_run: bool = False,
                  say: Callable[[str], None] = print) -> int:
-    """Refusals, the switch read, then `retire_steps` in order.  ``root``
-    stands for ``/``.  0 when the receiver retired (or had already)."""
+    """The gate, the pre-flight, one state write, then `retire_steps` in
+    order.  ``root`` stands for ``/``.  0 when the receiver retired (or had
+    already)."""
     etc_root = Path(root) / "etc"
     try:
         k = _key(key)
@@ -1189,6 +1318,8 @@ def apply_retire(root, *, key: str, nights: int = 1,
             lock = _lock(etc_root)
         return _retire(etc_root, k, nights, force_reason, run, dry_run, say)
     except MigrateRefused as exc:
+        # Raised only before the state write that begins the retire, or by
+        # that write itself (atomic): nothing changed.
         say(f"FAILED: {exc}")
         say("refused; nothing changed")
         return 1
@@ -1205,10 +1336,14 @@ def _retire(etc_root, key, nights, force_reason, run, dry_run, say) -> int:
             f"nothing to do")
         return 0
     steps = retire_steps(key, nights=nights, force_reason=force_reason,
-                         root=Path(etc_root).parent, record=not dry_run)
-    say(f"{key}: retire codar-sounder" + (" (dry run)" if dry_run else ""))
+                         root=Path(etc_root).parent, record=False)
+    begun = _retire_begun(st)
+    say(f"{key}: retire codar-sounder"
+        + (" (resuming the retire begun earlier)" if begun else "")
+        + (" (dry run)" if dry_run else ""))
     if dry_run:
-        say("  0. read chirp-recorder's sink switch and record it")
+        say("  0. pre-flight: read chirp-recorder's sink switch, check what "
+            "moves aside, record both")
         say("       hs-uploader sink status --json")
         for s in steps:
             say(f"  {RETIRE_STEP[s.phase]}. {s.text}")
@@ -1216,6 +1351,9 @@ def _retire(etc_root, key, nights, force_reason, run, dry_run, say) -> int:
                 say(f"       {' '.join(s.argv)}")
         say("dry run; nothing changed")
         return 0
+
+    # Pre-flight: reads only.  Every refusal here leaves the station as it
+    # stood.
     found, why = _sink_found(run)
     if found is None:
         raise MigrateRefused(why)
@@ -1225,13 +1363,35 @@ def _retire(etc_root, key, nights, force_reason, run, dry_run, say) -> int:
             f"retire would raise it to upload.  Set it to fill or upload "
             f"first (hs-uploader sink set chirp-recorder fill --reason TEXT "
             f"--by NAME), or leave codar-sounder running")
+    if found["file_state"] == "missing":
+        raise MigrateRefused(
+            "hs-uploader sink status lists no chirp-recorder switch, so the "
+            "raise to upload would fail with codar-sounder down; set it "
+            "first (hs-uploader sink set chirp-recorder fill --reason TEXT "
+            "--by NAME)")
+    stamp = st.get("retire_stamp") or _today()
+    _, _, why = _aside_plan(_codar_files(etc_root, key), stamp)
+    if why:
+        raise MigrateRefused(why)
+    partner = None
+    if not begun:
+        partner = _gate(etc_root, key, st, nights, force_reason)
+
+    # One atomic write begins the retire.
     st = read_state(etc_root, key)
-    if "sink_before_retire" not in st:
+    if not _retire_begun(st):
         st["sink_before_retire"] = dict(found, read_at=_iso(
             datetime.now(timezone.utc)))
-        _write_state(etc_root, key, st)
-    say(f"chirp-recorder's sink switch reads {found['file_state']} "
-        f"(effective {found['effective']}); recorded")
+    st.setdefault("retire_stamp", stamp)
+    if partner is not None:
+        st["forced"] = force_reason.strip()
+        st["forced_partner"] = partner
+    _write_state(etc_root, key, st)
+    say(f"chirp-recorder's sink switch read "
+        f"{st['sink_before_retire']['file_state']} before the retire "
+        f"(effective {st['sink_before_retire']['effective']}); recorded")
+    if partner is not None:
+        say(f"forced: {st['forced']} (partner {partner}); recorded")
 
     def stop(msg: str) -> int:
         say(f"FAILED: {msg}")
@@ -1239,13 +1399,14 @@ def _retire(etc_root, key, nights, force_reason, run, dry_run, say) -> int:
             f"again to finish: each step resumes")
         return 1
 
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
     for s in steps:
         if s.phase == "aside":
             why = _move_aside(_codar_files(etc_root, key), stamp, etc_root,
                               say)
             if why:
                 return stop(why)
+            say(f"left: {_dropin(etc_root, key)} (the unit's drop-in, if any)"
+                f" stays; the unit is disabled")
             continue
         if s.phase == "topology":
             left = _codar_left(etc_root)
@@ -1261,9 +1422,12 @@ def _retire(etc_root, key, nights, force_reason, run, dry_run, say) -> int:
                 return stop(f"{s.text}: {exc}")
             continue
         if s.phase == "state":
-            st = read_state(etc_root, key)
-            st["retired_at"] = _iso(datetime.now(timezone.utc))
             try:
+                st = read_state(etc_root, key)
+                if st is None:
+                    raise MigrateRefused(f"{state_path(etc_root, key)} "
+                                         f"vanished")
+                st["retired_at"] = _iso(datetime.now(timezone.utc))
                 _write_state(etc_root, key, st)
             except (OSError, MigrateRefused) as exc:
                 return stop(f"{s.text}: {exc}")

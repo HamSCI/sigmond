@@ -31137,8 +31137,9 @@ def cmd_chirp_convert(args, *, run=None, root=None) -> int:
 
 
 def cmd_chirp_check(args, *, run=None, root=None) -> int:
-    """`smd admin chirp check KEY`: compare chirp-recorder with
-    codar-sounder over the latest covered night and store the verdict in
+    """`smd admin chirp check KEY [--night YYYY-MM-DD]`: compare
+    chirp-recorder with codar-sounder over the latest covered night (or the
+    named one) and store the verdict in
     the receiver's state file (plan Task 22).  0 on a pass, and while the
     night is still running; 1 otherwise."""
     from sigmond import chirp_migrate as _cm
@@ -31149,7 +31150,8 @@ def cmd_chirp_check(args, *, run=None, root=None) -> int:
 
     def go() -> int:
         out = _cm.check(key, run=run or _cm.default_run,
-                        root=Path(root) if root else None, say=_chirp_say)
+                        root=Path(root) if root else None,
+                        night=getattr(args, 'night', None), say=_chirp_say)
         return 0 if out.get('status') in ('pass', 'window') else 1
     try:
         return _chirp_locked('check', False, root, go)
@@ -33685,6 +33687,10 @@ def _build_parser() -> argparse.ArgumentParser:
              "night that holds 00:00-06:00 local solar time, and store the "
              "verdict")
     p_ch_check.add_argument('key', help='the receiver (AC0G-B4 or AC0G/B4)')
+    p_ch_check.add_argument(
+        '--night', default=None, metavar='YYYY-MM-DD',
+        help='check this night (the local solar date of its midnight) '
+             'instead of the latest; recovers a night a check missed')
     p_ch_retire = chirp_sub.add_parser(
         'retire',
         help="after passing checks, stop the receiver's codar-sounder, move "
@@ -33697,7 +33703,9 @@ def _build_parser() -> argparse.ArgumentParser:
         '--force', action='store_true',
         help='retire a receiver whose check reads "insufficient" because '
              'hf-timestd ties another radiod here, once a partner receiver '
-             'on this host passed; needs --reason')
+             'on this host passed; needs --reason.  Retire checks the '
+             'status and the partner only: the reason carries the claim '
+             'about the cause, and lands in the state file')
     p_ch_retire.add_argument('--reason', default=None,
                              help='why --force; kept in the state file')
     p_ch_retire.add_argument('--dry-run', action='store_true',
