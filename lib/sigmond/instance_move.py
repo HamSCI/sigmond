@@ -22,7 +22,9 @@ move in progress, so a re-run after a crash finishes it (or rolls it back).
 
 Nothing is deleted except the copies this module made itself: old config,
 env and sources files take a ``.moved`` (or ``.retired``) suffix; state
-directories and drop-ins are copied, and the old ones stay.  Stdlib only;
+directories and drop-ins are copied, and the old ones stay.  Backups cover
+the /etc side (config, env, sources, drop-ins); the old state directory
+needs none, because it stays in place under its old key.  Stdlib only;
 systemctl runs only through the injectable ``run``.  Root never acts by path
 under a directory a service account can write: see "Root and the
 directories service users can write" below.
@@ -312,12 +314,21 @@ _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _CHILD_ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"}
 
 
-def _run_as(uid: int, gid: int, argv: list) -> tuple:
+def _run_as(uid: int, gid: int, argv: list, *,
+            allow_root: bool = False) -> tuple:
     """Run ``argv`` as uid:gid; returns (returncode, output).  As root it
     drops privileges with setpriv first (the user's own supplementary
-    groups when it has a passwd entry, none otherwise), so the command can
-    do only what that user could already do.  Not root, it cannot change
-    user and runs as itself, which escalates nothing."""
+    groups when it has a passwd entry, none otherwise; no_new_privs set),
+    so the command can do only what that user could already do.  Not root,
+    it cannot change user and runs as itself, which escalates nothing.
+
+    uid 0 is refused unless ``allow_root``: a caller expects a drop, and a
+    "drop" to root is none.  Only the copy between directories that are
+    root's alone asks for it.  The child gets no stdin and its own session,
+    so it never holds the controlling terminal."""
+    if uid == 0 and not allow_root:
+        return 1, (f"refusing to run {argv[:1]} as root where a drop to "
+                   f"the owner was expected")
     if _geteuid() == 0 and uid != 0:
         try:
             pwd.getpwuid(uid)
@@ -325,9 +336,10 @@ def _run_as(uid: int, gid: int, argv: list) -> tuple:
         except KeyError:
             groups = "--clear-groups"
         argv = ["setpriv", f"--reuid={uid}", f"--regid={gid}", groups,
-                "--", *argv]
+                "--no-new-privs", "--", *argv]
     try:
         p = subprocess.run(argv, capture_output=True, text=True, check=False,
+                           stdin=subprocess.DEVNULL, start_new_session=True,
                            cwd="/", env=_CHILD_ENV, timeout=6 * 3600)
     except (OSError, subprocess.SubprocessError) as exc:
         return 127, str(exc)
@@ -371,7 +383,8 @@ def _copy_as_owner(src: Path, dst: Path) -> None:
                       f"can write; refusing to copy it as root")
     rc, out = _run_as(st.st_uid, st.st_gid,
                       ["cp", "-a", "--no-dereference", "-T", "--",
-                       str(src), str(dst)])
+                       str(src), str(dst)],
+                      allow_root=st.st_uid == 0)
     if rc != 0:
         raise OSError(f"copying {src} as uid {st.st_uid} failed: "
                       f"{str(out).strip()[:200]}")
@@ -632,7 +645,11 @@ def _subdir_at(dfd: int, name: str) -> int:
 
 
 def _backup(srcs: list, var_root: Path, stamp: str, etc_root: Path) -> Path:
-    """Copy each existing source into BACKUP_DIR/<stamp>/<label>.  The
+    """Copy each existing source into BACKUP_DIR/<stamp>/<label>.  Callers
+    pass the /etc side only (config, env, sources, drop-ins): a move copies
+    the state directory and leaves the old one in place under its old key,
+    and a retire keeps it, so a backup of state would only spend /var a
+    third time on chirp or hfdl data.  The
     backup root is opened by descriptor and must be root's alone; a link
     planted there aborts.  An entry already backed up under this stamp
     (a resumed move) keeps the first copy."""
@@ -704,6 +721,10 @@ def _rm(p: Path, roots: tuple, allowed: list) -> None:
             return
     finally:
         os.close(pfd)
+    if parent.st_uid == 0 and not _root_only(parent):
+        raise OSError(f"refusing to remove {p}: its directory belongs to "
+                      f"root but group or other can write it; remove it by "
+                      f"hand")
     if _root_only(parent) and _geteuid() == 0:
         shutil.rmtree(p)                 # the fd-based walk; parent is root's
     else:
@@ -884,7 +905,9 @@ def _move_one(m: Move, etc_root: Path, var_root: Path, sysd: _Sys,
         olds = _old_spellings(old, old_reporter)
         if was_active:
             sysd.must("stop", old_unit)
-        backup = _backup(ofiles + odirs
+        # the /etc side only: odirs[0] is the drop-in; the state directory
+        # (odirs[1]) stays in place under its old key and needs no backup
+        backup = _backup(ofiles + odirs[:1]
                          + [p for p in nfiles if os.path.lexists(p)],
                          var_root, stamp, etc_root)
         changed: list = []
@@ -974,7 +997,8 @@ def apply_retires(retires: list, *, etc_root: Path, var_root: Path,
             was_enabled, was_active = sysd.state(unit)
             if was_active:
                 sysd.must("stop", unit)
-            backup = _backup(files + dirs, var_root, stamp, etc_root)
+            # drop-in only (dirs[0]); the state directory stays where it is
+            backup = _backup(files + dirs[:1], var_root, stamp, etc_root)
             for f in files:
                 if os.path.lexists(f):
                     g = f.with_name(f.name + RETIRED_SUFFIX)

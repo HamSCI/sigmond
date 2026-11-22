@@ -128,14 +128,20 @@ def test_apply_rewrites_reporter_copies_state_keeps_old(tmp_root, fake_systemctl
 
 
 def test_backups_land_in_backup_dir(tmp_root, fake_systemctl):
+    """Only the /etc side is backed up: the old state directory stays in
+    place under its old key, so a second copy would only spend /var."""
     make_instance(tmp_root, "psk-recorder", "N8UR", RADIOD)
     apply_moves([Move("psk-recorder", "N8UR", "N8UR-SIGMOND", "N8UR-SIGMOND", RADIOD)],
                 etc_root=tmp_root / "etc", var_root=tmp_root / "var",
                 run=fake_systemctl)
     root = tmp_root / "var" / BACKUP_DIR[len("var/"):]
     names = {p.name for p in root.rglob("*") if p.is_file()}
-    assert {"N8UR.toml", "N8UR.env", "cursor", "o.conf",
+    assert {"N8UR.toml", "N8UR.env", "o.conf",
             "psk-recorder@N8UR.sources.toml"} <= names
+    assert "cursor" not in names
+    assert not [p for p in root.rglob("*")
+                if "var/lib/psk-recorder" in p.relative_to(root).as_posix()]
+    assert (tmp_root / "var/lib/psk-recorder/N8UR/cursor").read_text() == "42\n"
 
 
 def test_declared_plus_undeclared_on_one_radiod_retires(tmp_root, fake_systemctl):
@@ -185,6 +191,7 @@ def test_retire_stops_backs_up_renames_keeps_state(tmp_root, fake_systemctl):
     assert not [s for s in steps if s.startswith("ERROR")]
     root = tmp_root / "var" / BACKUP_DIR[len("var/"):]
     assert any(p.name == "N8UR.toml" for p in root.rglob("*"))
+    assert not any(p.name == "cursor" for p in root.rglob("*"))
 
 
 def test_reporter_declared_elsewhere_does_not_move():
@@ -354,8 +361,8 @@ def test_oserror_mid_copy_rolls_back(tmp_root, fake_systemctl):
     before = _tree(tmp_root)
     real_run_as = IM._run_as
     with mock.patch.object(IM, "_run_as",
-                           lambda u, g, a: (1, "disk full") if a[0] == "cp"
-                           else real_run_as(u, g, a)):
+                           lambda u, g, a, **k: (1, "disk full") if a[0] == "cp"
+                           else real_run_as(u, g, a, **k)):
         steps = apply_moves(
             [Move("psk-recorder", "N8UR", "N8UR-SIGMOND", "N8UR-SIGMOND", RADIOD)],
             etc_root=tmp_root / "etc", var_root=tmp_root / "var",
@@ -661,7 +668,7 @@ def test_symlink_inside_destination_tree_aborts(tmp_root, fake_systemctl):
     (st / "sub").mkdir()
     (st / "sub/f").write_text("x")
     # a copy that fails mid-tree leaves nothing behind
-    def half(uid, gid, argv):
+    def half(uid, gid, argv, **kw):
         rc, out = RecordingRunner()(uid, gid, argv)
         return (1, "failed half way") if argv[0] == "cp" else (rc, out)
     with mock.patch.object(IM, "_run_as", half):
@@ -676,7 +683,7 @@ def test_backup_does_not_follow_symlinks(tmp_root, fake_systemctl):
     make_instance(tmp_root, "chirp-recorder", "AB4EJ", RADIOD)
     outside = tmp_root / "outside.txt"
     outside.write_text("secret\n")
-    os.symlink(outside, tmp_root / "var/lib/chirp-recorder/AB4EJ/link")
+    os.symlink(outside, tmp_root / "etc/systemd/system/chirp-recorder@AB4EJ.service.d/link")
     apply_moves([Move("chirp-recorder", "AB4EJ", "AB4EJ-RX888", "AB4EJ-RX888", RADIOD)],
                 etc_root=tmp_root / "etc", var_root=tmp_root / "var",
                 run=fake_systemctl)
@@ -715,10 +722,11 @@ class RecordingRunner:
     the test user."""
 
     def __init__(self, before=None):
-        self.calls, self.before = [], before
+        self.calls, self.before, self.kw = [], before, []
 
-    def __call__(self, uid, gid, argv):
+    def __call__(self, uid, gid, argv, **kw):
         self.calls.append((uid, gid, list(argv)))
+        self.kw.append(kw)
         if self.before:
             self.before(list(argv))
         p = subprocess.run(list(argv), capture_output=True, text=True)
@@ -981,3 +989,81 @@ def test_rollback_removes_the_new_state_as_its_owner(tmp_root, fake_systemctl):
     assert rms and all((u, g) == (parent.st_uid, parent.st_gid)
                        for u, g, _ in rms)
     assert (tmp_root / "var/lib/chirp-recorder/AB4EJ/cursor").read_text() == "42\n"
+
+
+# ---- fix round 5 ---------------------------------------------------------
+
+def _fake_subprocess():
+    seen = []
+
+    def fake_run(argv, **kw):
+        seen.append((list(argv), kw))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    return seen, fake_run
+
+
+def test_runner_detaches_the_child_from_the_tty():
+    seen, fake_run = _fake_subprocess()
+    with mock.patch.object(IM, "_geteuid", lambda: 0), \
+            mock.patch.object(IM.subprocess, "run", fake_run):
+        IM._run_as(4242, 4343, ["cp", "-a", "x", "y"])
+    argv, kw = seen[0]
+    assert "--no-new-privs" in argv[:argv.index("--")]
+    assert kw.get("stdin") == subprocess.DEVNULL
+    assert kw.get("start_new_session") is True
+
+
+def test_runner_refuses_root_unless_asked():
+    seen, fake_run = _fake_subprocess()
+    with mock.patch.object(IM, "_geteuid", lambda: 0), \
+            mock.patch.object(IM.subprocess, "run", fake_run):
+        rc, out = IM._run_as(0, 0, ["rm", "-rf", "--", "/x"])
+        assert rc != 0 and seen == [] and "root" in out
+        rc, _ = IM._run_as(0, 0, ["cp", "-a", "x", "y"], allow_root=True)
+    assert rc == 0 and seen[0][0] == ["cp", "-a", "x", "y"]
+    assert seen[0][1].get("stdin") == subprocess.DEVNULL
+
+
+def test_rm_refuses_a_root_owned_parent_others_can_write(tmp_root):
+    """A root-owned parent that group or other can write: root must not
+    rm -rf by path there, and no drop to a user would be a drop at all."""
+    victim = tmp_root / "var/lib/sigmondish/NEW"
+    (victim / "sub").mkdir(parents=True)
+    (victim / "sub/f").write_text("x")
+    parent = victim.parent
+    real_fstat = os.fstat
+
+    def fstat(fd):
+        st = real_fstat(fd)
+        try:
+            here = Path(os.readlink(f"/proc/self/fd/{fd}"))
+        except OSError:
+            return st
+        if here == parent:
+            vals = list(st)
+            vals[0] = st.st_mode | 0o020          # st_mode: group-writable
+            vals[4] = 0                           # st_uid: root
+            return os.stat_result(vals)
+        return st
+    runner = RecordingRunner()
+    with mock.patch.object(IM, "_run_as", runner), \
+            mock.patch.object(IM.os, "fstat", fstat):
+        with pytest.raises(OSError):
+            IM._rm(victim, (tmp_root / "var",), [victim])
+    assert not [c for c in runner.calls if c[0] == 0]
+    assert (victim / "sub/f").read_text() == "x"
+
+
+def test_root_owned_dropin_copy_asks_for_root_explicitly(tmp_root):
+    src = tmp_root / "etc/systemd/system/x@A.service.d"
+    src.mkdir(parents=True)
+    (src / "o.conf").write_text("[Service]\n")
+    dst = src.parent / "x@B.service.d"
+    root_dir = types.SimpleNamespace(st_uid=0, st_gid=0, st_mode=0o40755)
+    runner = RecordingRunner()
+    with mock.patch.object(IM, "_lstat_at",
+                           side_effect=[(root_dir, root_dir), (None, root_dir)]), \
+            mock.patch.object(IM, "_run_as", runner):
+        IM._copy_as_owner(src, dst)
+    assert runner.calls[0][:2] == (0, 0)
+    assert runner.kw[0].get("allow_root") is True
