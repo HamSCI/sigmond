@@ -1,0 +1,27 @@
+model=AMD Ryzen 7 8745HS w/ Radeon 780M Graphics
+l3_bytes=16777216
+l3_ways=16
+mem_total_kb=20257800
+radiod_core_type=uniform
+radiod_l3_bytes=16777216
+samprate=129600000
+codelets=537
+bytes=84049
+planned_profiles=cob15,cob45,cob85,cob160,cob200,cob205,cob300,cob320,cob400,cob405,cob480,cob600,cob800,cob810,cob960,cob1200,cob1600,cob1620,cob1920,cob3200,cob3240,cob4800,cob4860,cob6930,cob8100,cob9600,cob16200,cob32400,cob40500,cob81000,cob162000,cif300,cif512,cif600,cif2400,cof512,cob512,cob2400,cof1625,cof1638,cof1650,cof1664,cif1650,cif2080,cif3250,cif4095,cif8125,cob1650,cob2080,cob3250,cob4095,cob8125,rof3240,rof6480,rof12960,rof16200,rof25920,rof32400,rof64800,rof129600,rof162000,rof259200,rof324000,cdb15,cdb45,cdb85,cdb160,cdb200,cdb205,cdb300,cdb320,cdb400,cdb405,cdb480,cdb512,cdb600,cdb800,cdb810,cdb960,cdb1200,cdb1600,cdb1620,cdb1650,cdb1920,cdb2080,cdb2400,cdb3200,cdb3240,cdb3250,cdb4095,cdb4800,cdb4860,cdb6930,cdb8100,cdb8125,cdb9600,cdb16200,cdb32400,cdb40500,cdb81000,cdb162000,cob55,cob100,cob175,cob220,cob350,cob420,cob825,cob2000,cob2048,cob2500,cob4000,cob5500,cdb55,cdb100,cdb175,cdb220,cdb350,cdb420,cdb825,cdb2000,cdb2048,cdb2500,cdb4000,cdb5500,cif55,cif100,cif175,cif200,cif220,cif350,cif400,cif420,cif825,cif1600,cif2000,cif2048,cif2500,cif3200,cif4000,cif4800,cif5500,cif6930,cof1680,cof1750,cof1760,cof2000,cof2048,cof2200,rof1620000,rof3240000,cob25,cif25,cif800,cif1200,cob1250,cif1250,cob1000,cif1000,cdb1000,cdb1250
+# Planned on bare metal on an 8745HS (Zen 4, full AVX-512): W0WWV at the
+# WWV site, RAC 19, Debian 13 (kernel 6.12.117).  FFTW 3.3.11 built with
+# avx512 (Phil's /usr/local build; header "fftw-3.3.11 ... avx512"), so
+# this file is only accepted by a radiod linked to a 3.3.11
+# sse2-avx-avx2-avx2_128-avx512 libfftw3f -- Debian/Ubuntu's 3.3.10
+# packages reject it and plan from scratch as before.  Laid out the way
+# sigmond runs radiod: radiod's pair = CPUs 7+15 at 3200 MHz (performance,
+# measured 3169 MHz via APERF/MPERF), every other CPU capped at 1400 MHz,
+# xhci IRQs on 0,8, no resctrl/CAT (radiod_l3_bytes is the sysfs L3
+# domain; harvest guessed "guest" for want of resctrl).  Whole station
+# stopped by `smd admin wisdom suspend`.  `smd admin wisdom plan --fresh`
+# = `taskset -c 7 fftwf-wisdom -v -T 1 -n` (nothing imported) over 161
+# specs: sigmond's 151 profiles + 10 from radiod's fft.log.  853 plans;
+# 2 h 5 m 59 s (2026-11-23 04:17:52Z - 06:23:51Z).  In production the
+# rof3240000 fft thread uses 31.3% of CPU 7 at 3169 MHz (32.2% with the
+# Oct 6 wisdom it replaced; the Zen 3 5825U on Debian's 3.3.10 sse2-avx
+# FFTW uses ~45% at 3381 MHz).
