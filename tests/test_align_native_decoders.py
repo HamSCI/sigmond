@@ -214,7 +214,7 @@ class OldTargetTests(unittest.TestCase):
                            mock.Mock(side_effect=[[boot], rest])),
                 mock.patch.object(smd, "_need_root", return_value=False),
                 mock.patch.object(smd, "lifecycle_lock",
-                                  lambda reason=None: contextlib.nullcontext()),
+                                  lambda reason=None, **kw: contextlib.nullcontext()),
                 mock.patch.object(smd, "_align_live_state",
                                   return_value=({"sigmond": "459bee6", "hf-timestd": "5c8196d",
                                                  "ka9q-radio": "401992c"}, {}, {}, {})),

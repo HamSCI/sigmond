@@ -685,7 +685,7 @@ def run_apply(*, apply=True, allow_rollback=False, max_bytes=None, release=APPLY
                               no_restart=no_restart, manifest=manifest)
 
     m_need_root = mock.Mock(return_value=need_root)
-    m_lock = mock.Mock(side_effect=lambda reason=None: contextlib.nullcontext())
+    m_lock = mock.Mock(side_effect=lambda reason=None, **kw: contextlib.nullcontext())
     m_live_state = mock.Mock(return_value=(live, {}, {}, {}))
     m_ancestry = mock.Mock(return_value=ancestor)
     m_apply_plan = mock.Mock(return_value=apply_plan_result if apply_plan_result is not None else [])
@@ -792,7 +792,7 @@ class AlignApplyOrderTests(unittest.TestCase):
                                mock.Mock(side_effect=lambda *a: calls.append("need_root") or False)), \
              mock.patch("sigmond.align.fetch_release",
                         mock.Mock(side_effect=lambda *a, **k: calls.append("fetch_release") or APPLY_REL)), \
-             mock.patch.object(smd, "lifecycle_lock", lambda reason=None: contextlib.nullcontext()), \
+             mock.patch.object(smd, "lifecycle_lock", lambda reason=None, **kw: contextlib.nullcontext()), \
              mock.patch.object(smd, "_align_live_state",
                                return_value=({"sigmond": "daba1f6", "hf-timestd": "5c8196d",
                                              "ka9q-radio": "401992c"}, {}, {}, {})), \
@@ -909,7 +909,7 @@ class AlignApplySigmondBootstrapTests(unittest.TestCase):
         m_apply_plan = mock.Mock(side_effect=[[boot_step], other_steps])
         with mock.patch("sigmond.align_apply.apply_plan", m_apply_plan), \
              mock.patch.object(smd, "_need_root", return_value=False), \
-             mock.patch.object(smd, "lifecycle_lock", lambda reason=None: contextlib.nullcontext()), \
+             mock.patch.object(smd, "lifecycle_lock", lambda reason=None, **kw: contextlib.nullcontext()), \
              mock.patch.object(smd, "_align_live_state",
                                return_value=({"sigmond": "459bee6", "hf-timestd": "5c8196d",
                                              "ka9q-radio": "401992c"}, {}, {}, {})), \
@@ -946,7 +946,7 @@ class AlignApplySigmondBootstrapTests(unittest.TestCase):
         # exercised by the other tests in this class.
         rc, out, mocks = run_apply(
             live={"sigmond": "daba1f6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"})
-        mocks["lock"].assert_called_once_with(reason="align")
+        mocks["lock"].assert_called_once_with(reason="align", wait_s=smd._ALIGN_LOCK_WAIT_S)
 
     def test_history_written_for_boot_steps_before_execv_and_flush(self):
         # I2, as amended by final review I6: the sigmond self-move must be
@@ -960,7 +960,7 @@ class AlignApplySigmondBootstrapTests(unittest.TestCase):
         m_execv = mock.Mock(side_effect=lambda *a, **k: call_order.append("execv"))
         with mock.patch.object(smd, "_need_root", return_value=False), \
              mock.patch.object(smd, "lifecycle_lock",
-                               lambda reason=None: contextlib.nullcontext()), \
+                               lambda reason=None, **kw: contextlib.nullcontext()), \
              mock.patch.object(smd, "_align_live_state",
                                return_value=({"sigmond": "459bee6", "hf-timestd": "5c8196d",
                                              "ka9q-radio": "401992c"}, {}, {}, {})), \
@@ -1011,7 +1011,7 @@ class AlignApplyBudgetCarryoverTests(unittest.TestCase):
 
         with mock.patch.object(smd, "_need_root", return_value=False), \
              mock.patch.object(smd, "lifecycle_lock",
-                               lambda reason=None: contextlib.nullcontext()), \
+                               lambda reason=None, **kw: contextlib.nullcontext()), \
              mock.patch.object(smd, "_align_live_state", return_value=(live, {}, {}, {})), \
              mock.patch("sigmond.align.fetch_release", return_value=rel), \
              mock.patch("sigmond.align_apply.verify_release", return_value=None), \
@@ -1064,7 +1064,7 @@ class AlignApplyBudgetCarryoverTests(unittest.TestCase):
         m_apply_plan = mock.Mock(side_effect=fake_apply_plan)
         with mock.patch.object(smd, "_need_root", return_value=False), \
              mock.patch.object(smd, "lifecycle_lock",
-                               lambda reason=None: contextlib.nullcontext()), \
+                               lambda reason=None, **kw: contextlib.nullcontext()), \
              mock.patch.object(smd, "_align_live_state",
                                return_value=({"sigmond": "459bee6", "hf-timestd": "5c8196d",
                                              "ka9q-radio": "401992c"}, {}, {}, {})), \
@@ -1111,7 +1111,7 @@ class AlignApplyRadiodMissingTests(unittest.TestCase):
                                        "ka9q-radio": "401992c"})
         with mock.patch.object(smd, "_need_root", return_value=False), \
              mock.patch.object(smd, "lifecycle_lock",
-                               lambda reason=None: contextlib.nullcontext()), \
+                               lambda reason=None, **kw: contextlib.nullcontext()), \
              mock.patch.object(smd, "_align_live_state", return_value=(live, {}, {}, {})), \
              mock.patch("sigmond.align.fetch_release", return_value=rel), \
              mock.patch("sigmond.align_apply.verify_release", return_value=None), \
@@ -2084,7 +2084,7 @@ def _apply_patches(st, *, rel, live, dirty=None, ancestry=None, **extra):
         _quiet_live_stages(),
         _no_real_record_live(),
         mock.patch.object(smd, "_need_root", return_value=False),
-        mock.patch.object(smd, "lifecycle_lock", lambda reason=None: contextlib.nullcontext()),
+        mock.patch.object(smd, "lifecycle_lock", lambda reason=None, **kw: contextlib.nullcontext()),
         mock.patch.object(smd, "_align_live_state", return_value=(live, dirty or {}, {}, {})),
         mock.patch("sigmond.align.fetch_release", return_value=rel),
         mock.patch("sigmond.align_apply.verify_release", return_value=None),
@@ -3115,7 +3115,7 @@ class AlignRecordSurvivesNoRestartTests(unittest.TestCase):
             with contextlib.ExitStack() as st:
                 st.enter_context(mock.patch.object(smd, "_need_root", return_value=False))
                 st.enter_context(mock.patch.object(
-                    smd, "lifecycle_lock", lambda reason=None: contextlib.nullcontext()))
+                    smd, "lifecycle_lock", lambda reason=None, **kw: contextlib.nullcontext()))
                 st.enter_context(mock.patch.object(
                     smd, "_align_live_state", return_value=(dict(rel.components), {}, {}, {})))
                 st.enter_context(mock.patch("sigmond.align.fetch_release", return_value=rel))

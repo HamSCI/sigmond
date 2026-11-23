@@ -10035,6 +10035,13 @@ def _align_catalog_prune(apply: bool, *, say=print) -> int:
     return 0
 
 
+#: align waits this long for the lifecycle lock, from a terminal too.  The
+#: holders it meets are short (the storage pass, the location check, the
+#: gap after its own re-exec), and a refusal there left a half-run align
+#: (AC1SN, N8UR, v3.94 roll).  Bounded, so two operators' aligns still part.
+_ALIGN_LOCK_WAIT_S = 300
+
+
 def _align_apply(args) -> int:
     """The `--apply` path for `smd align` (Plan 2a): verify the release,
     classify every component, bring sigmond forward first if it needs it
@@ -10058,7 +10065,7 @@ def _align_apply(args) -> int:
 
     if _need_root('align --apply'):
         return 1
-    with lifecycle_lock(reason='align'):
+    with lifecycle_lock(reason='align', wait_s=_ALIGN_LOCK_WAIT_S):
         base = getattr(args, 'base', None) or '/opt/git/sigmond'
         try:
             rel = _align_target(args)
