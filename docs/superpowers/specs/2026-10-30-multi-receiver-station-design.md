@@ -436,10 +436,13 @@ What changes:
    would be `KFS-KIWI-NW` etc. and merge into `KFS` on the server with the
    RX888 receivers. The first test rig is the Kiwi on AI6VN's LAN,
    decoded by AI6VN-2 (RAC 527; Rob, 2026-11-22).
-4. **Timing tier.** No hf-timestd, no chain delay. The Kiwi's own GPS
-   timestamp is what wsprdaemon uses; the adapter labels rows with the tier
-   the Kiwi reports (`/gps` says whether it has a fix), and never claims an
-   injected tier.
+4. **Timing tier.** No hf-timestd, no chain delay. Minute boundaries come
+   from the host clock, the same as wsprdaemon: kiwirecorder splits files
+   on host time, and WD renames a file that lands near a boundary to that
+   minute. The adapter correlates the Kiwi's sample stream to the host
+   clock and labels rows with the host-clock (standalone) tier; it never
+   claims an injected tier. The Kiwi's GPS time (`/gps`, `/status`) may be
+   logged as a diagnostic, but nothing is aligned to it (Rob, 2026-11-23).
 5. **`smd check` and bring-up** treat a Kiwi receiver as radiod-independent
    (Stage 3b timing, no stagger), and report "Kiwi unreachable" by host.
 6. **Channel contention.** A public Kiwi can have its channels taken by
