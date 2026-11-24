@@ -43,6 +43,19 @@ A release of fixes.  Sensed bring-up and run-with-purpose wait for the package p
   true number of samples, and re-syncs after radiod restarts its sequence.
 - A zero position in a GNSS receiver's RTCM message no longer crashes `timestd-vtec`.
 
+### WSPR
+
+- **Spot frequencies keep their sub-hertz digits.**  wspr-recorder stores the frequency
+  the decoder printed, and hs-uploader sends it to wsprdaemon.org with nine decimals.
+  Before, every spot reached the server rounded to the hertz.  The FST4W spread now
+  comes from the right column (w50, in Hz).
+- **wspr-recorder can take audio from a KiwiSDR** (`[[source]] kiwisdr = "host:port"`,
+  fixed bands).  It stays off unless a station's config names a Kiwi.  See the
+  recorder's `docs/KIWISDR.md`.
+- **An optional carrier archive** files each WSPR and FST4W spot's carrier as a short
+  WAV, with a read-only browser on localhost.  It ships off (`[carrier_archive]
+  enabled = false`).
+
 ### Align and bring-up
 
 - **`smd align` waits for a busy station.**  It now waits up to five minutes for the
