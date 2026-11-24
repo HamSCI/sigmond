@@ -10,6 +10,65 @@ what has run on real hardware.  A release that no station has yet installed says
 
 ---
 
+## sigmond v3.95 (draft)
+
+A release of fixes.  Sensed bring-up and run-with-purpose wait for the package pilot.
+
+### Audio in ka9q-web
+
+- **ka9q-web plays audio again.**  radiod stopped giving a new channel a data
+  destination when the station's `[global]` section names none.  ka9q-web now sends the
+  destination itself, when it opens the channel and with every mode change.  An older
+  radiod ignores the field, so the change costs nothing there.  sigmond installs it from
+  a fork until the fix merges upstream (wa2n-code/ka9q-web#12).
+
+### Recording and timing
+
+- **The raw archive places each batch by its first sample.**  It used to label a batch
+  by its tenth packet, which put samples 60 ms late, and a chunk's seam lost the tail of
+  a batch.  hf-timestd now carries a straddling batch into the next chunk and holds a
+  broken label line until radiod's next time pair.
+- **A recorder restart no longer hides data.**  A chunk reopened after a restart gets
+  segments of its own (`<chunk>.seg1`, `.seg2`, ...).  Every reader now joins them:
+  hf-timestd's archive readers, its storage tiering and F32 export, and GRAPE's daily
+  processing.
+- **Storage housekeeping leaves GRAPE's upload spool alone.**  hf-timestd's storage pass
+  used to delete the packaged GRAPE datasets hours after packaging, and the uploader then
+  shipped empty folders.  It now skips hamsci-physics's `upload/` folder and writes each
+  deletion to the journal (tag `hf-timestd-storage`).
+- **T3 admits itself.**  Each station decides each minute whether its WWV/WWVH timing
+  (T3) beats T2 against its reference, and every hf-timestd process follows that one
+  published decision.  `[timing.t3] admission = auto` (the default), `off` or `on`.
+- **ka9q-python 3.28.0.**  Its resequencer counts each sample once, fills a gap with the
+  true number of samples, and re-syncs after radiod restarts its sequence.
+- A zero position in a GNSS receiver's RTCM message no longer crashes `timestd-vtec`.
+
+### Align and bring-up
+
+- **`smd align` waits for a busy station.**  It now waits up to five minutes for the
+  lifecycle lock, from a terminal too.  On v3.94 it gave up at once when the storage pass
+  or the location check held the lock, and left a half-run align (AC1SN, N8UR).
+- **Meteor-scatter's site-timing file carries the right name.**  `sigmond-site-timing`
+  wrote it as `AC0G=B4.toml`, while the live instance reads `AC0G-B4.toml`.  The stray
+  name made align fail its uploader step.  The script now writes the instance key and
+  moves its own stray file aside.
+- align skips the uploader step on a host that runs no client, such as a radiod-only
+  host.
+- The UberSDR decoders build against the system FFTW, never a copy in `/usr/local`.
+- Ubuntu 22.04: the helper scripts fall back to `tomli`, and the recorders require
+  hamsci-dsp (PR #110).
+- systemd 249: the journal reads fall back to `--timestamp=utc` (PR #113).
+- The CPU-frequency step takes radiod's cores from the affinity plan, even before
+  radiod's drop-ins exist (PR #112).
+- New admin verbs for the move from codar-sounder to chirp-recorder:
+  `smd admin chirp convert`, `check` and `retire`.
+
+### How it was proven
+
+(Draft: fills in after the rig tests and the canaries.)
+
+---
+
 ## sigmond v3.94 — blessed 2026-11-21
 
 ### A release now lives in sigmond
