@@ -76,6 +76,14 @@ A release of fixes.  Sensed bring-up and run-with-purpose wait for the package p
 - New admin verbs for the move from codar-sounder to chirp-recorder:
   `smd admin chirp convert`, `check` and `retire`.
 
+- **A rollback past a linked unit completes.**  wspr-recorder links
+  `wspr-carrier-browser.service` into `/etc/systemd/system`, and `systemctl disable`
+  removes such a link itself.  `smd admin manifest restore` then found the file gone and
+  exited 1; now it counts the unit as retired.  The rig's update test found it rolling
+  v3.95 back to v3.94.
+- The release list names chirp-recorder, and a test requires a row for every catalog
+  repo: the golden VM refuses a checkout the list does not name.
+
 ### How it was proven
 
 (Draft: fills in after the rig tests and the canaries.)
