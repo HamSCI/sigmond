@@ -101,7 +101,13 @@ def test_resume_restarts_every_unit_suspend_stopped(tmp_path, monkeypatch):
     monkeypatch.setattr(smd, "_system_stopping", lambda: False)
     monkeypatch.setattr(smd, "_radiods_older_than_wisdom", lambda *a: [])
     calls = []
-    monkeypatch.setattr(smd, "_run", lambda argv, **k: calls.append(argv) or _ok(argv))
+    def run(argv, **k):
+        calls.append(argv)
+        if argv[1] == "is-active":       # igmp-querier is up once started
+            up = ["systemctl", "start", "igmp-querier.service"] in calls
+            return subprocess.CompletedProcess(argv, 0 if up else 3, "", "")
+        return _ok(argv)
+    monkeypatch.setattr(smd, "_run", run)
     monkeypatch.setattr(smd, "_ok", lambda *a: None)
     assert smd.cmd_wisdom_resume(NS()) == 0
     assert ["systemctl", "start", "igmp-querier.service"] in calls
