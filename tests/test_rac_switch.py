@@ -19,7 +19,7 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 WIZARD = (REPO / "scripts" / "proxmox" / "sigmond-wizard.sh").read_text()
 
-SOCKETS = [f"sigmond-vm-{n}-relay.socket" for n in ("ssh", "web", "station", "gmag")]
+SOCKETS = [f"sigmond-vm-{n}-relay.socket" for n in ("ssh", "web", "station", "gmag", "carrier")]
 UNIT = "sigmond-rac-host.service"
 RETRY_TIMER = "sigmond-rac-register.timer"
 ON, OFF, DOWN = "Remote access: on", "Remote access: off", "Remote access: wanted on, not up"

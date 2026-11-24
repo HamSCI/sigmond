@@ -126,8 +126,8 @@ RAC_NUMBER_FILE = "/etc/sigmond-appliance/rac-number"
 FRPC_API = "http://127.0.0.1:7500/api/status"
 TUNNEL_RESULT = "/var/lib/pm-align/tunnel-result.json"
 BANDS = {"vm-ssh": 35800, "vm-web": 45800, "host-ssh": 50800, "host-ui": 55800,
-         "vm-station": 48800, "vm-gmag": 49800}
-LOCAL = {"vm-station": 12224, "vm-gmag": 12225}
+         "vm-station": 48800, "vm-gmag": 49800, "vm-carrier": 41800}
+LOCAL = {"vm-station": 12224, "vm-gmag": 12225, "vm-carrier": 12226}
 
 HB_CONFIG = "/etc/pm-heartbeat/config.toml"
 HB_DEFAULT = ("wd30.wsprdaemon.org", "38222")      # sigmond-wizard.sh:680, 687
@@ -579,7 +579,8 @@ _VM4_OLD_RULE = re.compile(r"^-A PREROUTING -p tcp -m tcp --dport (\d+) -j DNAT 
 VM4RELAY_REMOVED = "/etc/sigmond-appliance/vm4relay-removed"
 _RELAY_ENV_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 RELAYS = (("ssh", 12222, 22), ("web", 12223, 8081),
-          ("station", 12224, 8000), ("gmag", 12225, 8082))
+          ("station", 12224, 8000), ("gmag", 12225, 8082),
+          ("carrier", 12226, 8089))
 NOT_TOUCHED = (
     "network: /etc/network/*, vmbr1 + NAT + sysctl, sigmond-netfix / sigmond-setnet "
     "and their unit (sigmond-netfix.service).  One exception: sigmond-vm4relay install "
@@ -1327,7 +1328,7 @@ def _check_proxy_names_agree(toml_text: str) -> Optional[str]:
 def tunnel_plan(toml_text: str, rac_marker: Optional[str]):
     """(new text, [names added]).  The RAC number is the marker's, and must
     agree with the vm-ssh proxy's remotePort − 35800; without a marker the
-    port decides.  Only a missing vm-station / vm-gmag block is appended."""
+    port decides.  Only a missing vm-station / vm-gmag / vm-carrier block is appended."""
     ports = _remote_ports(toml_text)
     ssh = next(((n, p) for n, p in ports.items() if n.endswith("-vm-ssh")), None)
     if ssh is None:
@@ -1346,7 +1347,7 @@ def tunnel_plan(toml_text: str, rac_marker: Optional[str]):
                                f"{ssh[1]} (RAC {from_port}) — refused")
     names = set(declared_proxies(toml_text))
     added, blocks = [], []
-    for ch in ("vm-station", "vm-gmag"):
+    for ch in ("vm-station", "vm-gmag", "vm-carrier"):
         name = f"{site}-{ch}"
         if name in names:
             continue

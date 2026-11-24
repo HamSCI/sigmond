@@ -181,7 +181,8 @@ def test_register_station_end_to_end(tmp_path):
     toml = (tmp_path / "frpc-host-gw2.toml").read_text()
     names = [ln.split('"')[1] for ln in toml.splitlines() if ln.startswith("name = ")]
     assert names == ["AC0G-SIGMA-vm-ssh", "AC0G-SIGMA-vm-web",
-                     "AC0G-SIGMA-vm-station", "AC0G-SIGMA-vm-gmag"]
+                     "AC0G-SIGMA-vm-station", "AC0G-SIGMA-vm-gmag",
+                     "AC0G-SIGMA-vm-carrier"]
 
 
 def test_register_failure_prints_reason(tmp_path):

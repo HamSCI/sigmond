@@ -15,9 +15,9 @@
 #          gateway and brings the tunnel up (tasks/plan-remote-access.md).
 #          The registrar ($RAC_SERVER, configurable via SIGMOND_RAC_SERVER/
 #          _REGISTRAR) assigns a free RAC number, and ONE host-side frpc
-#          carries six channels: VM ssh (35800+n), VM ka9q-web (45800+n),
+#          carries seven channels: VM ssh (35800+n), VM ka9q-web (45800+n),
 #          station-web (48800+n), magnetometer (49800+n), host ssh (50800+n)
-#          and the Proxmox UI (55800+n).  The vm-* channels go through local
+#          the Proxmox UI (55800+n) and the wspr-recorder carrier browser (41800+n).  The vm-* channels go through local
 #          relays, so the host stays reachable even when the VM is down.
 #          The operator holds the switch, in the decoder VM: smd remote off,
 #          smd remote on, smd remote status.
@@ -139,6 +139,8 @@ RAC_BASE_HSSH=50800;  RAC_BASE_HUI=55800
 # reusing those would mislabel these as ka9q-web instances.  Both sit inside
 # 35800-59999, which is what makes them shareable rather than mesh-only.
 RAC_BASE_VMSTN=48800; RAC_BASE_VMGMAG=49800
+# wspr-recorder's carrier browser (8089 on the decoder); 41800-42799 is unused on both gateways.
+RAC_BASE_VMCARRIER=41800
 # A decoder that runs more than one radiod serves one ka9q-web page per radiod
 # (ka9q-web.service on 8081 for the first, ka9q-web@<radiod> for the rest).
 # Each extra page gets a channel of its own on the bands gw2 already keeps for
@@ -558,7 +560,7 @@ rac_ladder(){
             _pvs=$((RAC_BASE_VMSSH+_racn)); _pvw=$((RAC_BASE_VMWEB+_racn))
             _phs=$((RAC_BASE_HSSH+_racn)); _phu=$((RAC_BASE_HUI+_racn))
             if [ "${RAC_MODE:-host}" = station ]; then _phs=0; _phu=0; fi
-            _pst=$((RAC_BASE_VMSTN+_racn)); _pgm=$((RAC_BASE_VMGMAG+_racn))
+            _pst=$((RAC_BASE_VMSTN+_racn)); _pgm=$((RAC_BASE_VMGMAG+_racn)); _pcr=$((RAC_BASE_VMCARRIER+_racn))
             _duser="DASI-$(printf '%03d' "$DASI_NUM")"
             IFS='|' read -r _ _ _ _gwca_probe _gwsni_probe _ <<<"$(rac_gateway_set "$_cand" | head -1)"
             say "  deterministic mapping: $_duser -> RAC #$_racn (attempting, not probing)"
@@ -585,9 +587,9 @@ rac_ladder(){
                 printf '[webServer]\naddr = "127.0.0.1"\nport = 7502\n'
                 local _specs
                 if [ "${RAC_MODE:-host}" = station ]; then
-                    _specs="vm-ssh:22:$_pvs vm-web:8081:$_pvw vm-station:8000:$_pst vm-gmag:8082:$_pgm"
+                    _specs="vm-ssh:22:$_pvs vm-web:8081:$_pvw vm-station:8000:$_pst vm-gmag:8082:$_pgm vm-carrier:8089:$_pcr"
                 else
-                    _specs="vm-ssh:12222:$_pvs vm-web:12223:$_pvw host-ssh:22:$_phs host-ui:8006:$_phu vm-station:12224:$_pst vm-gmag:12225:$_pgm"
+                    _specs="vm-ssh:12222:$_pvs vm-web:12223:$_pvw host-ssh:22:$_phs host-ui:8006:$_phu vm-station:12224:$_pst vm-gmag:12225:$_pgm vm-carrier:12226:$_pcr"
                 fi
                 for _spec in $_specs; do
                     IFS=: read -r _n _lp _rp <<<"$_spec"
@@ -898,7 +900,7 @@ rac_write_config(){
     # configuration and its marks.  It leaves RACN, SRV and the four gateway
     # ports set for the caller's summary line.
     local RAC_TLS_BLOCK _written="" _stale _sname _stn_ok
-    RACN=""; P_VMSTN=""; P_VMGMAG=""
+    RACN=""; P_VMSTN=""; P_VMGMAG=""; P_VMCARRIER=""
     eval "$REG"
     [ -n "$RACN" ] || { RAC_FAIL="the registration carried no RAC number"; return 1; }
     # The two newest channels are DERIVED, never supplied.  The deterministic
@@ -907,6 +909,7 @@ rac_write_config(){
     # construction, so deriving is the same rule, applied here.
     P_VMSTN=$((RAC_BASE_VMSTN+RACN))
     P_VMGMAG=$((RAC_BASE_VMGMAG+RACN))
+    P_VMCARRIER=$((RAC_BASE_VMCARRIER+RACN))
     # The decoder's ka9q-web pages, asked ONCE (the guest agent is slow), then
     # written into every gateway's config (rac_web_channels).
     rac_web_channels
@@ -935,7 +938,7 @@ rac_write_config(){
         [ -n "$_first" ] || _first="$_toml"
         RAC_UNITS="${RAC_UNITS:+$RAC_UNITS }sigmond-rac-host@$_gwname.service"
         if [ "${RAC_MODE:-host}" = station ]; then
-            _stn_web=""; _stn_stn=""; _stn_gmag=""; _stn_n=1
+            _stn_web=""; _stn_stn=""; _stn_gmag=""; _stn_carrier=""; _stn_n=1
             if rac_station_runs ka9q-web.service; then
                 _stn_web=$(printf '\n[[proxies]]\nname = "%s-vm-web"\ntype = "tcp"\nlocalIP = "127.0.0.1"\nlocalPort = 8081\nremotePort = %s%s%s\n' \
                     "$SITE" "$P_VMWEB" "$RAC_WEB_META" "$RAC_WEB_EXTRA")
@@ -949,9 +952,13 @@ rac_write_config(){
                 _stn_gmag=$(printf '\n[[proxies]]\nname = "%s-vm-gmag"\ntype = "tcp"\nlocalIP = "127.0.0.1"\nlocalPort = 8082\nremotePort = %s\n' "$SITE" "$P_VMGMAG")
                 _stn_n=$((_stn_n + 1))
             fi
+            if rac_station_runs wspr-carrier-browser.service; then
+                _stn_carrier=$(printf '\n[[proxies]]\nname = "%s-vm-carrier"\ntype = "tcp"\nlocalIP = "127.0.0.1"\nlocalPort = 8089\nremotePort = %s\n' "$SITE" "$P_VMCARRIER")
+                _stn_n=$((_stn_n + 1))
+            fi
             say "writing $_toml ($_stn_n channels, gateway $_gwname at $_gwhost:$_gwport)"
         else
-            say "writing $_toml ($((6+RAC_WEB_N)) channels, gateway $_gwname at $_gwhost:$_gwport)"
+            say "writing $_toml ($((7+RAC_WEB_N)) channels, gateway $_gwname at $_gwhost:$_gwport)"
         fi
     # Write beside the live file under a closed umask, then rename: the file
     # holds the station's token, and frpc must never read half of it.
@@ -992,7 +999,7 @@ remotePort = $P_VMSSH
 [proxies.metadatas]
 user = "$_stn_login"
 
-${_stn_web}${_stn_stn}${_stn_gmag}
+${_stn_web}${_stn_stn}${_stn_gmag}${_stn_carrier}
 STNTOMLEOF
         ) && mv -f "$_toml.new" "$_toml" && _stn_ok=1 || _stn_ok=0
         if [ "$_stn_ok" != 1 ]; then
@@ -1003,7 +1010,7 @@ STNTOMLEOF
     elif ! ( umask 077; cat > "$_toml.new" <<TOMLEOF
 # Written by sigmond-setup $(date -u +%F) — RAC #$RACN, site $SITE.
 # ONE frpc on the Proxmox host carries every channel; the vm-* channels
-# ride the local relays (12222-12225), so this file never needs the VM's
+# ride the local relays (12222-12226), so this file never needs the VM's
 # address.
 # serverPort comes from the TIER that answered (35736 TLS / 35735 legacy),
 # not from the registrar's reply — the registrar only knows the legacy stack.
@@ -1058,6 +1065,13 @@ type = "tcp"
 localIP = "127.0.0.1"
 localPort = 12225
 remotePort = $P_VMGMAG
+
+[[proxies]]
+name = "$SITE-vm-carrier"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 12226
+remotePort = $P_VMCARRIER
 
 [[proxies]]
 name = "$SITE-host-ssh"
@@ -1477,7 +1491,7 @@ journal_units(){
 retire_legacy_unit(){
     [ "$(rac_units)" = "$UNIT" ] || systemctl disable --now "$UNIT" >/dev/null 2>&1
 }
-SOCKETS="sigmond-vm-ssh-relay.socket sigmond-vm-web-relay.socket sigmond-vm-station-relay.socket sigmond-vm-gmag-relay.socket"
+SOCKETS="sigmond-vm-ssh-relay.socket sigmond-vm-web-relay.socket sigmond-vm-station-relay.socket sigmond-vm-gmag-relay.socket sigmond-vm-carrier-relay.socket"
 # Words that name where the operator stands.  A station has one machine.
 IN_VM="(in the decoder VM)"
 ON_HOST="(on the Proxmox host)"
@@ -5328,7 +5342,7 @@ rac_install_relays(){
             # VM's address can change — so the vm-* channels point at local
             # sockets whose per-connection handler asks the guest agent for
             # the VM's CURRENT IP (same trick as sigmond-vm).
-            say "installing the VM port relays (ssh, ka9q-web, station-web, gmag)"
+            say "installing the VM port relays (ssh, ka9q-web, station-web, gmag, carrier)"
             install -d /usr/local/lib/sigmond
             cat > /usr/local/lib/sigmond/vm-port-relay.py <<'RLEOF'
 #!/usr/bin/env python3
@@ -5508,7 +5522,7 @@ finally:
     vm.close()
 RLEOF
             chmod 755 /usr/local/lib/sigmond/vm-port-relay.py
-            for spec in "ssh:12222:22" "web:12223:8081" "station:12224:8000" "gmag:12225:8082"; do
+            for spec in "ssh:12222:22" "web:12223:8081" "station:12224:8000" "gmag:12225:8082" "carrier:12226:8089"; do
                 IFS=: read -r RNAME RLPORT RVPORT <<<"$spec"
                 cat > "/etc/systemd/system/sigmond-vm-$RNAME-relay.socket" <<SOCKEOF
 [Unit]

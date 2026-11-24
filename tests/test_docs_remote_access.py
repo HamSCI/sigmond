@@ -222,7 +222,7 @@ def test_each_gateway_base_belongs_to_its_channel():
     # The wizard's RAC_BASE_<NAME>=<base> assignments, read out and set beside
     # the row the page gives for that channel.
     row_of = {"VMSSH": "**VM ssh**", "VMWEB": "**VM web**", "VMSTN": "**station pages**",
-              "VMGMAG": "**magnetometer**", "HSSH": "**host ssh**", "HUI": "**host UI**",
+              "VMGMAG": "**magnetometer**", "VMCARRIER": "**carrier browser**", "HSSH": "**host ssh**", "HUI": "**host UI**",
               "VMWEB2": "**VM web, 2nd radiod**", "VMWEB3": "**VM web, 3rd radiod**"}
     bases = dict(re.findall(r"\bRAC_BASE_(\w+)=(\d+)", WIZARD))
     assert set(row_of) <= set(bases), sorted(bases)
@@ -376,11 +376,11 @@ def test_the_wizards_words_on_the_page_are_the_wizards():
         assert f'echo "{line}"' in WIZARD, line
 
 
-def test_the_page_lists_the_six_channels_the_tunnel_declares():
+def test_the_page_lists_the_seven_channels_the_tunnel_declares():
     declared = re.findall(r'name = "\$SITE-([a-z-]+)"', WIZARD)
-    assert sorted(declared) == ["host-ssh", "host-ui", "vm-gmag", "vm-ssh", "vm-station", "vm-web"]
-    assert "**six channels**" in PAGE
-    for base in ("35800", "45800", "48800", "49800", "50800", "55800"):
+    assert sorted(declared) == ["host-ssh", "host-ui", "vm-carrier", "vm-gmag", "vm-ssh", "vm-station", "vm-web"]
+    assert "**seven channels**" in PAGE
+    for base in ("35800", "41800", "45800", "48800", "49800", "50800", "55800"):
         assert f"{base} + your RAC number" in PAGE, base
         # The wizard's header comment names every base too; only an
         # assignment makes it the base the tunnel uses.
@@ -403,14 +403,14 @@ def test_the_page_says_a_multi_radiod_decoder_adds_a_web_channel_per_radiod():
     assert "no gateway band for a 4th ka9q-web page" in WIZARD
 
 
-def test_the_station_config_declares_at_most_four_channels():
+def test_the_station_config_declares_at_most_five_channels():
     # Station mode spells its names ${SITE}-vm-* in the heredoc (with braces,
     # so the six-channel count above does not see them) and %s-vm-* in the
     # blocks it adds only for pages the machine runs (rac_station_runs).
     start = WIZARD.index('_stn_web=""; _stn_stn=""')
     block = WIZARD[start:WIZARD.index("\nSTNTOMLEOF", start)]
     declared = re.findall(r'name = "(?:\$\{SITE\}|%s)-([a-z-]+)"', block)
-    assert sorted(declared) == ["vm-gmag", "vm-ssh", "vm-station", "vm-web"]
+    assert sorted(declared) == ["vm-carrier", "vm-gmag", "vm-ssh", "vm-station", "vm-web"]
     assert "carries ssh alone" in flat(PAGE)
 
 

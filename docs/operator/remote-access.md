@@ -34,9 +34,9 @@ recognise are in the [glossary](glossary.md).
 > - **The tunnel and the switch both live on your machine.**  Type `smd remote status`,
 >   `smd remote off` and `smd remote on` as yourself, never with `sudo`; smd asks for root through
 >   sudo on its own and may ask for your password.
-> - **It carries at most four channels, not six:** ssh (port 22) always, and the ka9q-web page
->   (8081, plus one more per extra radiod), the station pages (8000) and the magnetometer page
->   (8082) only when your machine runs them.  A machine that runs only radiod carries ssh alone.
+> - **It carries at most five channels, not seven:** ssh (port 22) always, and the ka9q-web page
+>   (8081, plus one more per extra radiod), the station pages (8000), the magnetometer page
+>   (8082) and the carrier browser (8089) only when your machine runs them.  A machine that runs only radiod carries ssh alone.
 >   The host's ssh and the Proxmox UI do not exist here.
 > - **Its name** joins your callsign and hostname in upper case, as in `AC0G-SIGMA`; once
 >   registered, the name sticks.
@@ -117,7 +117,7 @@ The VM asks; the host alone acts (§4).
 
 ## 2. What it exposes, and to whom
 
-The tunnel carries **six channels** and nothing else on your station. This is
+The tunnel carries **seven channels** and nothing else on your station. This is
 the complete list.
 
 | Channel | What it reaches | Gateway port |
@@ -126,6 +126,7 @@ the complete list.
 | **VM web** | the [ka9q-web](glossary.md) live-receiver page (port 8081 on the VM) | 45800 + your RAC number |
 | **station pages** | the station's own web pages (port 8000 on the VM) | 48800 + your RAC number |
 | **magnetometer** | the magnetometer dashboard (port 8082 on the VM) | 49800 + your RAC number |
+| **carrier browser** | wspr-recorder's carrier browser (port 8089 on the VM) | 41800 + your RAC number |
 | **host ssh** | a command line on the Proxmox `[host]`, as `root` | 50800 + your RAC number |
 | **host UI** | the Proxmox web GUI (port 8006 on the host) | 55800 + your RAC number |
 
@@ -456,7 +457,7 @@ Plainly:
   the trade — it is what makes "just ask, they'll fix it"
   ([INSTALL.md §11](https://github.com/HamSCI/sigmond-proxmox/blob/main/INSTALL.md#11-if-something-goes-wrong))
   possible.
-- **The tunnel itself forwards nothing but those six ports.** It is not a
+- **The tunnel itself forwards nothing but those seven ports.** It is not a
   route onto your home network: no other device of yours becomes reachable
   *through the tunnel*. (An admin who logs in is then on your LAN like any
   other machine in the house — that follows from the shell in the bullet above,

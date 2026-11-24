@@ -241,7 +241,7 @@ VMEOF
 #!/usr/bin/env python3
 print("relay")
 RLEOF
-            for spec in "ssh:12222:22" "web:12223:8081" "station:12224:8000" "gmag:12225:8082"; do
+            for spec in "ssh:12222:22" "web:12223:8081" "station:12224:8000" "gmag:12225:8082" "carrier:12226:8089"; do
                 IFS=: read -r RNAME RLPORT RVPORT <<<"$spec"
                 cat > "/etc/systemd/system/sigmond-vm-$RNAME-relay.socket" <<SOCKEOF
 [Unit]
@@ -292,11 +292,15 @@ def test_extract_heredocs_allows_an_indented_start():
         == '#!/usr/bin/env python3\nprint("relay")\n'
 
 
-def test_relay_units_match_the_wizard_template_for_all_four():
+def test_relay_units_match_the_wizard_template_for_all_five():
     units = {f.path: f.content.decode() for f in pm_align.relay_units(WIZ, 100)}
-    assert len(units) == 8
+    assert len(units) == 10
     sock = units["/etc/systemd/system/sigmond-vm-gmag-relay.socket"]
     assert "ListenStream=127.0.0.1:12225" in sock and ":8082" in sock
+    csock = units["/etc/systemd/system/sigmond-vm-carrier-relay.socket"]
+    assert "ListenStream=127.0.0.1:12226" in csock and ":8089" in csock
+    csvc = units["/etc/systemd/system/sigmond-vm-carrier-relay@.service"]
+    assert "vm-port-relay.py 8089" in csvc
     svc = units["/etc/systemd/system/sigmond-vm-station-relay@.service"]
     assert "Environment=SIGMOND_VMID=100" in svc
     assert "vm-port-relay.py 8000" in svc
@@ -475,10 +479,12 @@ remotePort = 46305
 
 def test_tunnel_plan_appends_only_the_missing_channels():
     new, added = pm_align.tunnel_plan(TOML4, "505")
-    assert added == ["AC0G_ND-vm-station", "AC0G_ND-vm-gmag"]
+    assert added == ["AC0G_ND-vm-station", "AC0G_ND-vm-gmag", "AC0G_ND-vm-carrier"]
     assert new.startswith(TOML4)                       # existing text byte-for-byte
     assert 'name = "AC0G_ND-vm-station"' in new and "remotePort = 49305" in new
     assert "localPort = 12225" in new and "remotePort = 50305" in new
+    assert 'name = "AC0G_ND-vm-carrier"' in new
+    assert "localPort = 12226" in new and "remotePort = 42305" in new   # 41800 + RAC 505
 
 
 def test_tunnel_plan_is_a_no_op_when_complete():
@@ -498,7 +504,7 @@ def test_tunnel_plan_refuses_a_non_integer_rac_marker():
 
 def test_tunnel_plan_derives_the_rac_number_without_a_marker():
     _, added = pm_align.tunnel_plan(TOML4, None)
-    assert added == ["AC0G_ND-vm-station", "AC0G_ND-vm-gmag"]
+    assert added == ["AC0G_ND-vm-station", "AC0G_ND-vm-gmag", "AC0G_ND-vm-carrier"]
 
 
 def _api(user, names, status="running"):
@@ -1011,7 +1017,7 @@ def test_main_dry_run_reports_would_add_and_counts_as_pending(tmp_path, monkeypa
     _tunnel_root(tmp_path)
     rc = pm_align.main([], root=tmp_path)
     out = capsys.readouterr().out
-    assert "tunnel: would add AC0G_ND-vm-station, AC0G_ND-vm-gmag" in out
+    assert "tunnel: would add AC0G_ND-vm-station, AC0G_ND-vm-gmag, AC0G_ND-vm-carrier" in out
     assert rc == 1
 
 
@@ -1069,7 +1075,7 @@ def test_main_apply_launches_the_detached_tunnel_step_via_the_real_script(tmp_pa
     assert launch[6] == str((PROXMOX / "pm-align.py").resolve())
     assert launch[7] == "--tunnel-step"
     out = capsys.readouterr().out
-    assert "tunnel: adding AC0G_ND-vm-station, AC0G_ND-vm-gmag" in out
+    assert "tunnel: adding AC0G_ND-vm-station, AC0G_ND-vm-gmag, AC0G_ND-vm-carrier" in out
     assert "pm-align --status" in out
 
 
@@ -1698,7 +1704,8 @@ FIELDED_QUOTED = ("/usr/local/bin/sigmond-vm", "/usr/local/lib/sigmond/vm-port-r
 FIELDED_TEMPLATES = ("/etc/systemd/system/sigmond-vm-$RNAME-relay.socket",
                      "/etc/systemd/system/sigmond-vm-$RNAME-relay@.service")
 FIELDED_RELAYS = (("ssh", 12222, 22), ("web", 12223, 8081),
-                  ("station", 12224, 8000), ("gmag", 12225, 8082))
+                  ("station", 12224, 8000), ("gmag", 12225, 8082),
+                  ("carrier", 12226, 8089))
 FIELDED_HEREDOC_START = re.compile(
     r"""^\s*cat\s+>\s*"?(/[^"\s]+)"?\s+<<\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2\s*$""")
 
@@ -1738,7 +1745,7 @@ def test_the_real_wizard_still_satisfies_every_pm_align_in_the_field():
         for kind, tmpl in (("socket", sock), ("service", svc)):
             units[(name, kind)] = (tmpl.replace("$RNAME", name).replace("$RLPORT", str(lport))
                                    .replace("$RVPORT", str(vport)).replace("$VMID", "100"))
-    assert len(units) == 8
+    assert len(units) == 10
     for name, lport, vport in FIELDED_RELAYS:
         assert f"ListenStream=127.0.0.1:{lport}\n" in units[(name, "socket")]
         assert f"ExecStart=/usr/local/lib/sigmond/vm-port-relay.py {vport}\n" in units[(name, "service")]

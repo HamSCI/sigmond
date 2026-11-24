@@ -81,7 +81,7 @@ def write_config(tmp_path, existing):
         RAC_CA_GW2={tmp_path}/ca.crt
         RAC_CA_HAMSCI={tmp_path}/ca.crt
         RAC_PORT_SECURE=35736
-        RAC_BASE_VMSTN=48800; RAC_BASE_VMGMAG=49800
+        RAC_BASE_VMSTN=48800; RAC_BASE_VMGMAG=49800; RAC_BASE_VMCARRIER=41800
         MARK_DIR={tmp_path}
         RAC_TIER_LABEL="HamSCI secure (TOFU) vpn1"
         RAC_REGISTRAR=DIRECT

@@ -119,7 +119,7 @@ def host(tmp_path, *, tiers, relays=True, frpc=True, configured="AC0G/B4 EM38ww 
         RAC_FAIL=""
         RAC_BASE_VMSSH=35800; RAC_BASE_VMWEB=45800
         RAC_BASE_HSSH=50800;  RAC_BASE_HUI=55800
-        RAC_BASE_VMSTN=48800; RAC_BASE_VMGMAG=49800
+        RAC_BASE_VMSTN=48800; RAC_BASE_VMGMAG=49800; RAC_BASE_VMCARRIER=41800
         RAC_BASE_VMWEB2=46800; RAC_BASE_VMWEB3=47800
         DASI_NUM=""; HAMSCI_TOKEN=""
         RAC_SERVER=""; RAC_TLS="on"; RAC_TIER_LABEL=""
@@ -190,9 +190,9 @@ def test_register_writes_the_tunnel_configuration_and_its_marks(tmp_path, regist
     assert f'trustedCaFile = "{tmp_path}/ca.crt"' in toml
     names = [ln.split('"')[1] for ln in toml.splitlines() if ln.startswith("name = ")]
     assert names == [f"AC0G_B4-{c}" for c in
-                     ("vm-ssh", "vm-web", "vm-station", "vm-gmag", "host-ssh", "host-ui")]
+                     ("vm-ssh", "vm-web", "vm-station", "vm-gmag", "vm-carrier", "host-ssh", "host-ui")]
     ports = [int(ln.split("=")[1]) for ln in toml.splitlines() if ln.startswith("remotePort")]
-    assert ports == [36307, 46307, 48800 + 507, 49800 + 507, 51307, 56307]
+    assert ports == [36307, 46307, 48800 + 507, 49800 + 507, 41800 + 507, 51307, 56307]
     assert stat.S_IMODE((tmp_path / "frpc-host.toml").stat().st_mode) == 0o600
     assert not (tmp_path / "frpc-host.toml.new").exists()
     marks = tmp_path / "marks"
@@ -474,7 +474,7 @@ def test_the_ssh_proxies_advertise_their_login_to_the_gateway(tmp_path, registra
     doc = tomllib.loads((tmp_path / "frpc-host.toml").read_text())
     users = {p["name"].split("-", 1)[1]: p.get("metadatas", {}).get("user") for p in doc["proxies"]}
     assert users == {"vm-ssh": "hamsci", "vm-web": None, "vm-station": None,
-                     "vm-gmag": None, "host-ssh": "root", "host-ui": None}
+                     "vm-gmag": None, "vm-carrier": None, "host-ssh": "root", "host-ui": None}
     assert doc["metadatas"]["site"] == "AC0G_B4"      # the login-level table is unchanged
 
 
@@ -498,7 +498,7 @@ def test_a_multi_radiod_vm_gets_one_web_channel_per_page(tmp_path, registrar):
     toml = (tmp_path / "frpc-host.toml").read_text()
     names = [ln.split('"')[1].split("-", 1)[1] for ln in toml.splitlines() if ln.startswith("name = ")]
     # the 2nd page sits right after the 1st, where the gateway page reads it
-    assert names == ["vm-ssh", "vm-web", "vm-web2", "vm-station", "vm-gmag", "host-ssh", "host-ui"]
+    assert names == ["vm-ssh", "vm-web", "vm-web2", "vm-station", "vm-gmag", "vm-carrier", "host-ssh", "host-ui"]
     px = _proxies(toml)
     assert px["vm-web"]["metadatas"]["radiod"] == "KFS-NW"
     assert px["vm-web"]["localPort"] == 12223                      # the relay, as before
@@ -509,16 +509,16 @@ def test_a_multi_radiod_vm_gets_one_web_channel_per_page(tmp_path, registrar):
     assert px["vm-web2"]["type"] == "tcp"
 
 
-def test_a_single_radiod_vm_keeps_the_six_channels_and_names_its_page(tmp_path, registrar):
+def test_a_single_radiod_vm_keeps_the_seven_channels_and_names_its_page(tmp_path, registrar):
     pre = host(tmp_path, tiers=tier(registrar.port))
     r = run(pre + "rac_register fresh\n", tmp_path, {"SIGMOND_RAC_KA9Q_WEBS": "AC0G 8081\n"})
     assert r.returncode == 0, r.stdout + r.stderr
     px = _proxies((tmp_path / "frpc-host.toml").read_text())
-    assert sorted(px) == ["host-ssh", "host-ui", "vm-gmag", "vm-ssh", "vm-station", "vm-web"]
+    assert sorted(px) == ["host-ssh", "host-ui", "vm-carrier", "vm-gmag", "vm-ssh", "vm-station", "vm-web"]
     assert px["vm-web"]["metadatas"] == {"radiod": "AC0G"}
 
 
-def test_a_vm_that_cannot_be_asked_gets_the_six_bare_channels(tmp_path, registrar):
+def test_a_vm_that_cannot_be_asked_gets_the_seven_bare_channels(tmp_path, registrar):
     # No guest agent in this scratch host: the configuration is the one every
     # station has had so far -- six channels, no radiod names.
     pre = host(tmp_path, tiers=tier(registrar.port))
@@ -526,7 +526,7 @@ def test_a_vm_that_cannot_be_asked_gets_the_six_bare_channels(tmp_path, registra
     assert r.returncode == 0, r.stdout + r.stderr
     toml = (tmp_path / "frpc-host.toml").read_text()
     assert "radiod" not in toml and "vm-web2" not in toml
-    assert len(_proxies(toml)) == 6
+    assert len(_proxies(toml)) == 7
 
 
 def test_a_primary_page_without_a_radiod_name_carries_none(tmp_path, registrar):
@@ -600,7 +600,7 @@ def test_the_writing_line_counts_the_channels_it_writes(tmp_path, registrar):
     r = run(pre + "rac_register fresh\n", tmp_path,
             {"SIGMOND_RAC_KA9Q_WEBS": "A 8081\nB 8084\nC 8085\n", "SIGMOND_MGMT_VM": "10.99.0.2"})
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "(8 channels, gateway gw2" in r.stdout, r.stdout
+    assert "(9 channels, gateway gw2" in r.stdout, r.stdout
 
 
 # -- a radiod added (or removed) after registration ---------------------------
@@ -639,7 +639,7 @@ def test_refresh_adds_the_channel_of_a_radiod_added_later(tmp_path, registrar):
     after = (tmp_path / "frpc-host-gw2.toml").read_text()
     assert len(registrar.bodies) == 1                       # the gateway was not asked again
     names = [ln.split('"')[1].split("-", 1)[1] for ln in after.splitlines() if ln.startswith("name = ")]
-    assert names == ["vm-ssh", "vm-web", "vm-web2", "vm-station", "vm-gmag", "host-ssh", "host-ui"]
+    assert names == ["vm-ssh", "vm-web", "vm-web2", "vm-station", "vm-gmag", "vm-carrier", "host-ssh", "host-ui"]
     px = _proxies(after)
     assert px["vm-web2"]["metadatas"]["radiod"] == "B"
     assert (px["vm-web2"]["localIP"], px["vm-web2"]["localPort"], px["vm-web2"]["remotePort"]) \
@@ -663,7 +663,7 @@ def test_refresh_drops_the_channel_of_a_radiod_removed_since(tmp_path, registrar
     assert "vm-web3" not in px and px["vm-web2"]["metadatas"]["radiod"] == "C"
     assert len(registrar.bodies) == 1
     assert _without_extra_webs(after) == _without_extra_webs(before)
-    assert len(_proxies(after)) == 7
+    assert len(_proxies(after)) == 8
 
 
 def test_refresh_with_nothing_changed_touches_nothing(tmp_path, registrar):

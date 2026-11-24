@@ -142,7 +142,8 @@ def test_station_toml_four_proxies(tmp_path):
         {"name": "AC0G-SIGMA-vm-ssh", "local": 22, "remote": 35817},
         {"name": "AC0G-SIGMA-vm-web", "local": 8081, "remote": 45817},
         {"name": "AC0G-SIGMA-vm-station", "local": 8000, "remote": 48817},
-        {"name": "AC0G-SIGMA-vm-gmag", "local": 8082, "remote": 49817}]
+        {"name": "AC0G-SIGMA-vm-gmag", "local": 8082, "remote": 49817},
+        {"name": "AC0G-SIGMA-vm-carrier", "local": 8089, "remote": 41817}]
     assert "host-ssh" not in toml and "host-ui" not in toml
     assert (tmp_path / "marks" / "rac-site").read_text() == "AC0G-SIGMA\n"
 
@@ -156,9 +157,9 @@ def test_host_toml_unchanged(tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     got = proxies((tmp_path / "frpc-host-gw2.toml").read_text())
     assert [p["name"].split("-", 1)[1] for p in got] == [
-        "vm-ssh", "vm-web", "vm-station", "vm-gmag", "host-ssh", "host-ui"]
-    assert [p["local"] for p in got] == [12222, 12223, 12224, 12225, 22, 8006]
-    assert [p["remote"] for p in got] == [35817, 45817, 48817, 49817, 50817, 55817]
+        "vm-ssh", "vm-web", "vm-station", "vm-gmag", "vm-carrier", "host-ssh", "host-ui"]
+    assert [p["local"] for p in got] == [12222, 12223, 12224, 12225, 12226, 22, 8006]
+    assert [p["remote"] for p in got] == [35817, 45817, 48817, 49817, 41817, 50817, 55817]
 
 
 def test_station_registrar_ports_zero_when_omitted(tmp_path):
@@ -223,7 +224,8 @@ http.server.HTTPServer(("127.0.0.1", 7502), H).serve_forever()
     assert "rc=0 fail=" in r.stdout, r.stdout + r.stderr
     got = proxies(claim.read_text())
     assert [(p["name"].split("-", 2)[2], p["local"]) for p in got] == [
-        ("vm-ssh", 22), ("vm-web", 8081), ("vm-station", 8000), ("vm-gmag", 8082)]
+        ("vm-ssh", 22), ("vm-web", 8081), ("vm-station", 8000), ("vm-gmag", 8082),
+        ("vm-carrier", 8089)]
     assert "P_HSSH=0 P_HUI=0" in r.stdout
 
 
@@ -426,7 +428,8 @@ def test_station_extra_page_dials_its_own_service(tmp_path):
         {"name": "AC0G-SIGMA-vm-web", "local": 8081, "remote": 45817},
         {"name": "AC0G-SIGMA-vm-web2", "local": 8084, "remote": 46817},
         {"name": "AC0G-SIGMA-vm-station", "local": 8000, "remote": 48817},
-        {"name": "AC0G-SIGMA-vm-gmag", "local": 8082, "remote": 49817}]
+        {"name": "AC0G-SIGMA-vm-gmag", "local": 8082, "remote": 49817},
+        {"name": "AC0G-SIGMA-vm-carrier", "local": 8089, "remote": 41817}]
     import tomllib
     px = {p["name"]: p for p in tomllib.loads(toml)["proxies"]}
     assert px["AC0G-SIGMA-vm-web2"]["localIP"] == "127.0.0.1"        # bare metal: its own service
