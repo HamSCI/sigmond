@@ -18,7 +18,7 @@ from sigmond.align import COMPONENT_NAME_RE, RELEASE_TAG_RE, _preamble
 from sigmond.doctor import _parse_manifest_components, _sha_equal
 
 ROWS = (
-    "callhash", "codar-sounder", "ft8_lib", "gmag-webui", "gpsdo-monitor",
+    "callhash", "chirp-recorder", "codar-sounder", "ft8_lib", "gmag-webui", "gpsdo-monitor",
     "hamsci-dsp", "hamsci-physics", "hf-tec", "hf-timestd", "hfdl-recorder",
     "hs-uploader", "igmp-querier", "ka9q-python", "ka9q-radio", "ka9q-web",
     "mag-recorder", "meteor-scatter", "onion", "psk-recorder",

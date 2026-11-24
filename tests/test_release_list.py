@@ -154,8 +154,8 @@ def test_compare_live_absent_only_with_require_all():
 
 def test_compare_live_unlisted_checkout_reported():
     rlist = parse_list(GOOD)
-    out = compare_live(rlist, {"chirp-recorder": "abcdef1"})
-    assert out == [Mismatch("chirp-recorder", None, "abcdef1", out[0].note)]
+    out = compare_live(rlist, {"future-client": "abcdef1"})
+    assert out == [Mismatch("future-client", None, "abcdef1", out[0].note)]
     assert out[0].note
 
 
@@ -266,3 +266,16 @@ def test_real_list_owners_agree():
         got = ft8lib_from_install_sh(_git_show(
             psk, rlist.components["psk-recorder"], "scripts/install.sh"))
         assert rlist.components["ft8_lib"] == got
+
+
+def test_every_catalog_repo_has_a_row():
+    # install.sh clones every catalog repo, and the golden VM's freshness gate
+    # refuses a checkout the list does not name (v3.95 candidate 2 stopped on
+    # chirp-recorder).  So a repo added to the catalog needs a row here too.
+    import tomllib
+    catalog = tomllib.loads(
+        (Path(__file__).resolve().parent.parent / "etc" / "catalog.toml").read_text())
+    repos = {name for section in catalog.values() if isinstance(section, dict)
+             for name, entry in section.items()
+             if isinstance(entry, dict) and entry.get("repo")}
+    assert repos - set(ROWS) == set()

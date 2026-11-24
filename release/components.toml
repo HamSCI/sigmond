@@ -4,6 +4,7 @@ version = "v3.95"
 
 [components]
 callhash = "5e0d2436163e2f10006f5abd2be982bf9cda3584"
+chirp-recorder = "4d6431a92de64b8d8d01150af7afc2cb52dddd39"
 codar-sounder = "b619637d1ad4eb95e16b65af4df5c9a5a73503c6"
 ft8_lib = "0dfd14fd8cdd85dab9a9c7b96ccdd61866bdddec"
 gmag-webui = "bc1328b205f6509ece3a75edc5430750d8789be3"

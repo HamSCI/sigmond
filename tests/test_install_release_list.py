@@ -133,11 +133,11 @@ def test_catalog_at_release_sets_pins():
     rl = _rl()
     catalog = {"wspr-recorder": _client_entry("wspr-recorder"),
                "hs-uploader": _client_entry("hs-uploader"),
-               "chirp-recorder": _client_entry("chirp-recorder")}
+               "future-client": _client_entry("future-client")}
     out = smd._catalog_at_release(catalog, rl)
     assert out["wspr-recorder"].pin == rl.components["wspr-recorder"]
     assert out["hs-uploader"].pin == rl.components["hs-uploader"]
-    assert out["chirp-recorder"].pin is None
+    assert out["future-client"].pin is None
     # a copy: the caller's catalog keeps its pins
     assert catalog["wspr-recorder"].pin is None
 
@@ -181,17 +181,17 @@ def _assert_nothing_changed(mocks):
 
 
 def test_unlisted_component_refuses_before_change(tmp_path, capsys):
-    entry = _client_entry("chirp-recorder")
+    entry = _client_entry("future-client")
     targets = smd._InstallTargets()
     targets.catalog_queue.append(entry)
     path = _write_list(tmp_path, _rl())
     with mock.patch.object(smd, "_RELEASE_BASE", tmp_path / "base"):
         rc, mocks = _full_suite(
-            _args(components="chirp-recorder", release_list=path),
-            targets, {"chirp-recorder": entry})
+            _args(components="future-client", release_list=path),
+            targets, {"future-client": entry})
     assert rc == 1
     _assert_nothing_changed(mocks)
-    assert "chirp-recorder" in capsys.readouterr().err
+    assert "future-client" in capsys.readouterr().err
 
 
 def test_unreadable_list_refuses_before_change(tmp_path, capsys):
@@ -442,7 +442,7 @@ def _single(args, entry, base):
 
 
 def test_single_client_unlisted_refuses_before_change(tmp_path):
-    entry = _client_entry("chirp-recorder")
+    entry = _client_entry("future-client")
     path = _write_list(tmp_path, _rl())
     rc, install, root = _single(_args(client=entry.name, release_list=path),
                                 entry, tmp_path / "base")
