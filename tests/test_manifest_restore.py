@@ -967,6 +967,27 @@ class ManifestRestoreApplyTests(unittest.TestCase):
         self.assertEqual(rc, 1, out)
         self.assertIn('cannot remove', out)
 
+    def test_a_linked_unit_that_disable_already_removed_is_retired(self):
+        # wspr-recorder links wspr-carrier-browser.service into
+        # /etc/systemd/system, and `systemctl disable` removes a linked unit
+        # file itself, so the unlink after it finds nothing (v3.95 rig,
+        # 2026-11-24 14:46Z: restore exited 1 on "No such file").
+        fake = _FakeGit(
+            removed_files={'sigmond': ['systemd/sigmond-new.timer']},
+            blobs={('sigmond', 'systemd/sigmond-new.timer'): b'T'})
+        real_unlink = Path.unlink
+
+        def unlink(self_, *a, **k):
+            if self_.name == 'sigmond-new.timer':
+                real_unlink(self_)
+                raise FileNotFoundError(2, 'No such file or directory', str(self_))
+            return real_unlink(self_, *a, **k)
+        with mock.patch.object(Path, 'unlink', unlink):
+            rc, out, fake, sysd = self._sigmond_run(fake, {'sigmond-new.timer': b'T'})
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn('cannot remove', out)
+        self.assertIn('retired sigmond-new.timer', out)
+
     def test_a_retired_template_timer_takes_its_instances_down(self):
         fake = _FakeGit(
             removed_files={'sigmond': ['systemd/sigmond-x@.timer']},

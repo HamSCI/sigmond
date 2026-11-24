@@ -7214,6 +7214,11 @@ def _restore_apply_units(name, plan) -> tuple:
                 continue
         try:
             dest.unlink()
+        except FileNotFoundError:
+            # A unit a client linked in (`ln -s` into the checkout, as
+            # wspr-recorder links wspr-carrier-browser.service): `systemctl
+            # disable` removes the link itself, so it is already gone.
+            pass
         except OSError as exc:
             _err(f'{name}: cannot remove {dest}: {exc}')
             ok = False
