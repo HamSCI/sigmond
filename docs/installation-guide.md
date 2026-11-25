@@ -42,7 +42,7 @@ vfio binding, CPU isolation, hookscript, and one host reboot. After
 the reboot, sigmond resumes itself and finishes the in-VM install.
 
 What you need before starting:
-- BIOS configured per [`docs/proxmox/wsprdaemon-proxmox-bios-checklist.md`](proxmox/wsprdaemon-proxmox-bios-checklist.md). Sigmond does not configure BIOS.
+- BIOS set per [`docs/station-firmware.md`](station-firmware.md): Restore on AC Power Loss and, for the install, Fast Boot. Sigmond cannot change the BIOS; only a person at the console can.
 - Debian 13 VM created in Proxmox with adequate RAM/disk.
 - A non-root user inside the VM with sudo access (see §1.1 below).
 - The Proxmox host's name or IP, and one-time use of its **root**

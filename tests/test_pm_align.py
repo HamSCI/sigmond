@@ -3414,6 +3414,27 @@ def test_memory_note_ignores_unexpected_output(tmp_path):
     assert pm_align._memory_note(tmp_path, _fake_run([], rc=2, stdout="Traceback\n")) is None
 
 
+# --- pm-firmware (v3.96): the BIOS settings Linux can see, beside pm-memory. ----
+
+def test_desired_files_install_pm_firmware():
+    src = pm_align.Sources(FB_FULL, pm_align.render_wizard(WIZ, 100),
+                           {"pm-firmware.py": b"#pm-firmware\n"})
+    paths = {f.path: f.mode for f in pm_align.desired_files(src, 100)}
+    assert paths["/usr/local/sbin/pm-firmware"] == 0o755
+    assert "/usr/local/sbin/pm-firmware" not in {f.path for f in pm_align.desired_files(_src(), 100)}
+
+
+def test_firmware_note_reads_pm_firmware_brief(tmp_path):
+    p = tmp_path / "usr/local/sbin/pm-firmware"
+    p.parent.mkdir(parents=True)
+    p.write_text("#\n")
+    calls = []
+    note = pm_align._firmware_note(tmp_path, _fake_run(calls, rc=1, stdout="firmware: to do: iommu\n"))
+    assert note == "firmware: to do: iommu"
+    assert calls == [["python3", str(p), "--brief"]]
+    assert pm_align._firmware_note(tmp_path, _fake_run([], stdout="memory: x\n")) is None
+
+
 def test_pm_align_still_never_runs_qm_set():
     assert any("qm set, of any kind" in line for line in pm_align.NOT_TOUCHED)
     src = (REPO / "scripts" / "proxmox" / "pm-align.py").read_text()

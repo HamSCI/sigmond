@@ -1,5 +1,11 @@
 # BIOS Checklist for the WSPR / Sigma Proxmox Host
 
+> **Superseded 2026-11-25 by [../station-firmware.md](../station-firmware.md)**,
+> which lists the BIOS settings by platform and how `pm-firmware` checks them.
+> The host's kernel command line now carries `tsc=reliable processor.max_cstate=1`
+> (`scripts/proxmox/host-apply.sh`), so the C-state steps below no longer need a
+> BIOS visit.  This page stays for its TSC notes from AI6VN-1.
+
 **Author:** Rob Robinett (AI6VN / W0DAS)
 **Date:** April 2026
 **Companion to:** `wsprdaemon-proxmox-cpu-clock-tuning.md`

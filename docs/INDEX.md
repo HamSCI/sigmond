@@ -108,7 +108,8 @@ Front door for each audience: [docs/README.md](README.md).
 | [PSWS-HEARTBEAT-SPEC.md](PSWS-HEARTBEAT-SPEC.md) | Proposed station→PSWS heartbeat interface spec (health/availability/provenance) — plan, not implemented |
 | [PROVISIONING-INPUTS.md](PROVISIONING-INPUTS.md) | Every unique-per-installation input, credential, and manual action needed to stand up a host, both deployment models |
 | [proxmox/CLAUDE.md](proxmox/CLAUDE.md) | Index for the Proxmox host-setup docs — what to read before touching VM/VFIO/CPU-pin config |
-| [proxmox/wsprdaemon-proxmox-bios-checklist.md](proxmox/wsprdaemon-proxmox-bios-checklist.md) | Standalone BIOS checklist meant to be carried to the Proxmox host physically |
+| [station-firmware.md](station-firmware.md) | BIOS settings by platform, set before you install: graphics memory, virtualization, power-on after a power cut; `pm-firmware` checks them, and operators report new platforms |
+| [proxmox/wsprdaemon-proxmox-bios-checklist.md](proxmox/wsprdaemon-proxmox-bios-checklist.md) | Superseded by station-firmware.md; kept for its April 2026 TSC notes |
 | [proxmox/wsprdaemon-proxmox-cpu-clock-tuning.md](proxmox/wsprdaemon-proxmox-cpu-clock-tuning.md) | CPU isolation, hyperthread-pair exposure, and clock-accuracy tuning for the Proxmox VM |
 | [proxmox/wsprdaemon-proxmox-vm-setup.md](proxmox/wsprdaemon-proxmox-vm-setup.md) | Setting up the Proxmox VM + RX-888 USB passthrough for bare-metal SDR performance |
 | [superpowers/specs/](superpowers/specs/) | Design specs written for planning documentation-program-style work |

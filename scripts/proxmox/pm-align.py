@@ -78,17 +78,21 @@ RAW = "https://raw.githubusercontent.com/HamSCI"
 PROXMOX_FILES = ("pm-heartbeat.py", "pm-heartbeat.service", "pm-heartbeat.timer",
                  "pm-heartbeat-setup.sh", "pm-align.py",
                  "pm-storage.py", "pm-storage.service", "pm-storage.timer",
-                 "pm-memory.py")
+                 "pm-memory.py", "pm-firmware.py")
 # Files a release may predate: a 404 leaves them absent.  pm-storage arrived
 # with the storage ledger (v3.86); pm-heartbeat-setup.sh installs it from
 # its own directory whenever the release carries it.
 OPTIONAL_PROXMOX_FILES = ("pm-align.py", "pm-storage.py", "pm-storage.service",
-                          "pm-storage.timer", "pm-memory.py")
+                          "pm-storage.timer", "pm-memory.py", "pm-firmware.py")
 # pm-memory (v3.93) reports the BIOS graphics carve-out and the VM's memory
 # against the install rule.  pm-align installs it and prints its one-line
 # finding; the resize stays the operator's act (`pm-memory --apply`), because
 # pm-align never changes the VM's configuration.
 PM_MEMORY = "/usr/local/sbin/pm-memory"
+# pm-firmware (v3.96) reads what Linux can see of the BIOS settings in
+# docs/station-firmware.md (virtualization, IOMMU, SMT, the TSC clock).  It
+# only reads; pm-align prints its one line beside pm-memory's.
+PM_FIRMWARE = "/usr/local/sbin/pm-firmware"
 RECORD = "/etc/sigmond-appliance/host-aligned.json"
 # The satellite guard's host side (plan 2026-11-14-satellite-host-guard): sigmond-link
 # and its units from sigmond at wizard_commit.  Optional: a 404 leaves them absent.
@@ -659,6 +663,9 @@ def desired_files(src: Sources, vmid: int, notes: Optional[list] = None) -> list
     if "pm-memory.py" in src.proxmox:
         out.append(HostFile(PM_MEMORY, src.proxmox["pm-memory.py"], 0o755,
                             "scripts/proxmox/pm-memory.py"))
+    if "pm-firmware.py" in src.proxmox:
+        out.append(HostFile(PM_FIRMWARE, src.proxmox["pm-firmware.py"], 0o755,
+                            "scripts/proxmox/pm-firmware.py"))
     if src.vm6proxy is not None:
         if vm6proxy_restricts(src.vm6proxy):
             out.append(HostFile(VM6PROXY, src.vm6proxy, 0o755, "sigmond-appliance/sigmond-vm6proxy"))
@@ -1884,11 +1891,11 @@ def _pairing_note(root: Path) -> str:
     return f"pairing ({PAIRING_RECORD}): {shown}"
 
 
-def _memory_note(root: Path, run) -> Optional[str]:
-    """pm-memory's one line (the BIOS carve-out and the VM's memory), or None
-    when pm-memory is not installed or says nothing.  Read-only: --brief
-    changes nothing.  A failure here never fails pm-align."""
-    path = _under(root, PM_MEMORY)
+def _brief_note(root: Path, run, tool: str, prefix: str) -> Optional[str]:
+    """A host tool's one --brief line, or None when the tool is not installed
+    or says nothing recognisable.  Read-only.  A failure here never fails
+    pm-align."""
+    path = _under(root, tool)
     if not path.exists():
         return None
     try:
@@ -1896,7 +1903,23 @@ def _memory_note(root: Path, run) -> Optional[str]:
     except Exception:                                          # noqa: BLE001
         return None
     line = (r.stdout or "").strip().splitlines()
-    return line[0] if line and line[0].startswith("memory:") else None
+    return line[0] if line and line[0].startswith(prefix) else None
+
+
+def _memory_note(root: Path, run) -> Optional[str]:
+    """pm-memory's line: the BIOS graphics carve-out and the VM's memory."""
+    return _brief_note(root, run, PM_MEMORY, "memory:")
+
+
+def _firmware_note(root: Path, run) -> Optional[str]:
+    """pm-firmware's line: the BIOS settings Linux can see."""
+    return _brief_note(root, run, PM_FIRMWARE, "firmware:")
+
+
+def _host_notes(root: Path, run) -> None:
+    for note in (_memory_note(root, run), _firmware_note(root, run)):
+        if note:
+            _say(f"  {note}")
 
 
 def _print_status(root: Path) -> None:
@@ -2000,9 +2023,7 @@ def main(argv=None, *, root: Path = Path("/"), urlopen: Callable = urllib.reques
             return 2
         rc = _do_apply(changes, rel, root, run, now, src=src, vmid=vmid,
                        heartbeat_opt_in=args.heartbeat, heartbeat_dest=args.heartbeat_dest)
-        mem = _memory_note(root, run)
-        if mem:
-            _say(f"  {mem}")
+        _host_notes(root, run)
         return rc
     tunnel_msg, tunnel_pending = _dry_run_tunnel_note(root)
     _say(f"  {tunnel_msg}")
@@ -2016,9 +2037,7 @@ def main(argv=None, *, root: Path = Path("/"), urlopen: Callable = urllib.reques
             _say(f"  pairing: skipped: {NO_PRIVATE_LINK}")
         else:
             _say(f"  pairing: --apply pairs the decoder VM with this host, or re-asserts it ({SETUP} {PAIR_FLAG})")
-    mem = _memory_note(root, run)
-    if mem:
-        _say(f"  {mem}")
+    _host_notes(root, run)
     _say(f"  summary: {len(pending)} file(s) to refresh; re-run with --apply as root")
     return 1 if (pending or tunnel_pending or vm4_pending or vm6_pending) else 0
 
