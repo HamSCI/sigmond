@@ -48,7 +48,16 @@ case "$verb" in
                 if [ -e "$HOSTDIR/activating" ]; then $say activating; exit 3; fi
                 if [ -e "$HOSTDIR/active" ]; then $say active; exit 0; fi
                 $say inactive; exit 3 ;;
-    is-enabled) [ -e "$HOSTDIR/enabled" ] ;;
+    is-enabled) [ -e "$HOSTDIR/enabled" ] || exit 1 ;;
+    cat)     [ ! -e "$HOSTDIR/no-unit-$1" ] || exit 1 ;;
+    enable|disable)
+             # real systemd: one unit file that does not exist fails the whole call
+             for a in "$@"; do [ -e "$HOSTDIR/no-unit-$a" ] && exit 1; done
+             mkdir -p "$HOSTDIR/socks"
+             for a in "$@"; do case "$a" in *.socket)
+                 if [ "$verb" = enable ]; then touch "$HOSTDIR/socks/$a"; else rm -f "$HOSTDIR/socks/$a"; fi ;; esac; done ;;
+esac
+case "$verb" in
     enable)  case " $* " in *" sigmond-rac-host.service "*)
                  touch "$HOSTDIR/enabled"
                  [ -e "$HOSTDIR/unit-refuses-to-start" ] || touch "$HOSTDIR/active" ;; esac ;;
@@ -135,7 +144,7 @@ class Host:
     # list-unit-files joined the list when switch_on began asking which
     # sigmond-rac-host@ instances are enabled, so it can disable the ones
     # whose config has gone (2026-10-30).
-    _READ_ONLY = ("is-active", "is-enabled", "list-unit-files", "show")
+    _READ_ONLY = ("is-active", "is-enabled", "list-unit-files", "show", "cat")
 
     def changes(self):
         """Every systemctl call that changes something."""
@@ -1194,3 +1203,28 @@ def test_host_advice_keeps_naming_the_legacy_unit_with_per_gateway_configs(tmp_p
     (tmp_path / "unit-refuses-to-start").touch()
     r = h.run("on")
     assert f"journalctl -u {UNIT} -n 50" in r.stdout
+
+
+# -- a host whose pm-align rendered only the four older relays -----------------
+
+def _four_relay_host(tmp_path, **kw):
+    h = Host(tmp_path, **kw)
+    (tmp_path / "no-unit-sigmond-vm-carrier-relay.socket").touch()
+    return h
+
+
+def test_on_with_the_old_four_relays_enables_all_four_and_skips_the_carrier(tmp_path):
+    h = _four_relay_host(tmp_path, wish="off")
+    r = h.run("on")
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    up = sorted(p.name for p in (tmp_path / "socks").iterdir())
+    assert up == sorted(s for s in SOCKETS if "carrier" not in s)
+
+
+def test_off_with_the_old_four_relays_disables_all_four(tmp_path):
+    h = _four_relay_host(tmp_path, wish="on", enabled=True, active=True)
+    for s in SOCKETS[:4]:
+        (tmp_path / "socks").mkdir(exist_ok=True)
+        (tmp_path / "socks" / s).touch()
+    h.run("off")
+    assert list((tmp_path / "socks").iterdir()) == []

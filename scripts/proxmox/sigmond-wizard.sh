@@ -16,9 +16,10 @@
 #          The registrar ($RAC_SERVER, configurable via SIGMOND_RAC_SERVER/
 #          _REGISTRAR) assigns a free RAC number, and ONE host-side frpc
 #          carries seven channels: VM ssh (35800+n), VM ka9q-web (45800+n),
-#          station-web (48800+n), magnetometer (49800+n), host ssh (50800+n)
-#          the Proxmox UI (55800+n) and the wspr-recorder carrier browser (41800+n).  The vm-* channels go through local
-#          relays, so the host stays reachable even when the VM is down.
+#          station-web (48800+n), magnetometer (49800+n), host ssh (50800+n),
+#          the Proxmox UI (55800+n) and the wspr-recorder carrier browser
+#          (41800+n).  The vm-* channels go through local relays, so the host
+#          stays reachable even when the VM is down.
 #          The operator holds the switch, in the decoder VM: smd remote off,
 #          smd remote on, smd remote status.
 #
@@ -531,7 +532,7 @@ rac_ladder(){
     # tier that answered RAC_SERVER, RAC_REGISTRAR, RAC_TLS, RAC_PORT and
     # RAC_TIER_LABEL.  Reads SITE, DASI_NUM, HAMSCI_TOKEN and $RAC_HOSTKEY.pub.
     local _lbl _cand _cand_reg _tls _fport
-    local _racn _pvs _pvw _phs _phu _pst _pgm _duser _tf _dtls _spec _n _lp _rp
+    local _racn _pvs _pvw _phs _phu _pst _pgm _pcr _duser _tf _dtls _spec _n _lp _rp
     local _gwca_probe _gwsni_probe _gwshort
     local _tpid _drun _derr _api _i
     REG=""
@@ -1502,6 +1503,17 @@ if [ "$MODE" = station ]; then
     ON_HOST="(on this machine)"
     HOST_NOUN="This machine"
 fi
+# Only the relay sockets this host has a unit for.  `systemctl enable a b
+# missing.socket` exits 1 and enables NONE of them, so one relay an older
+# pm-align never rendered (the carrier one) would leave ssh/web/station/gmag
+# dead after an off/on while the switch still said "on".
+live_sockets(){
+    local _s _out=""
+    for _s in $SOCKETS; do
+        systemctl cat "$_s" >/dev/null 2>&1 && _out="${_out:+$_out }$_s"
+    done
+    printf '%s' "$_out"
+}
 RETRY_TIMER=sigmond-rac-register.timer
 PAIR_USER=sigmond-remote
 
@@ -1783,13 +1795,14 @@ fi
 switch_off(){
     # Stop and disable first, whatever else fails.  Then say what stands, and
     # what could not be put on file.
-    local recorded=yes wrote=yes did
+    local recorded=yes wrote=yes did _live
     trap '' INT TERM
     set_wish off 2>/dev/null || recorded=no
     # The relays first and the tunnel last: stopping the tunnel may end the
     # caller's own session.
     # shellcheck disable=SC2086
-    [ -z "$SOCKETS" ] || systemctl disable --now $SOCKETS >/dev/null 2>&1
+    _live=$(live_sockets)
+    [ -z "$_live" ] || systemctl disable --now $_live >/dev/null 2>&1
     for _u in $(rac_units); do systemctl disable --now "$_u" >/dev/null 2>&1; done
     retire_legacy_unit
     # With no `off` on file, nothing tells a later run of the retry timer that
@@ -1830,6 +1843,7 @@ switch_off(){
 }
 
 switch_on(){
+    local _live
     # A timer run and a wizard run read the wish before they ask for `on`: the
     # timer a moment before, a wizard that registers afresh some minutes
     # before.  An operator who said off in between has the last word.  With
@@ -1857,7 +1871,8 @@ switch_on(){
     if registered; then
         systemctl disable --now "$RETRY_TIMER" >/dev/null 2>&1
         # shellcheck disable=SC2086
-        [ -z "$SOCKETS" ] || systemctl enable --now $SOCKETS >/dev/null 2>&1
+        _live=$(live_sockets)
+        [ -z "$_live" ] || systemctl enable --now $_live >/dev/null 2>&1
         retire_legacy_unit
         # !! Before enabling what should run, disable what should not: a
         # gateway dropped from this station's tier leaves its unit enabled,

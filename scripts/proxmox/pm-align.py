@@ -127,6 +127,7 @@ FRPC_API = "http://127.0.0.1:7500/api/status"
 TUNNEL_RESULT = "/var/lib/pm-align/tunnel-result.json"
 BANDS = {"vm-ssh": 35800, "vm-web": 45800, "host-ssh": 50800, "host-ui": 55800,
          "vm-station": 48800, "vm-gmag": 49800, "vm-carrier": 41800}
+CARRIER_CHANNEL = "vm-carrier"
 LOCAL = {"vm-station": 12224, "vm-gmag": 12225, "vm-carrier": 12226}
 
 HB_CONFIG = "/etc/pm-heartbeat/config.toml"
@@ -1730,6 +1731,16 @@ def _tunnel_decision(root: Path):
         _, added = tunnel_plan(tpath.read_text(), _read_rac_marker(root))
     except PmAlignError as exc:
         return "refused", [], str(exc)
+    if tpath.is_symlink():
+        # Multi-gateway layout: frpc-host.toml points at the wizard's
+        # frpc-host-<gw>.toml, and tunnel_apply skips it (the legacy unit is
+        # inactive), so a missing vm-carrier could never be installed here and
+        # would read "pending" forever.  The next wizard registration writes it.
+        carrier = f"-{CARRIER_CHANNEL}"
+        deferred = [n for n in added if n.endswith(carrier)]
+        added = [n for n in added if not n.endswith(carrier)]
+        if deferred and not added:
+            return "current", [], f"{CARRIER_CHANNEL} arrives with the next wizard registration"
     if not added:
         return "current", [], None
     return "pending", added, None
@@ -1750,6 +1761,8 @@ def _apply_tunnel(root: Path, run) -> int:
         return 0
     if kind == "current":
         _say("  tunnel: every channel declared")
+        if note:
+            _say(f"  tunnel: info — {note}")
         return 0
     tres = _under(root, TUNNEL_RESULT)
     if tres.exists():
@@ -1843,7 +1856,10 @@ def _dry_run_tunnel_note(root: Path) -> tuple:
     if kind == "refused":
         return f"tunnel: REFUSED — {note}", True
     if kind == "current":
-        return "tunnel: every channel declared", False
+        msg = "tunnel: every channel declared"
+        if note:
+            msg += f"\n  tunnel: info — {note}"
+        return msg, False
     return f"tunnel: would add {', '.join(added)}", True
 
 

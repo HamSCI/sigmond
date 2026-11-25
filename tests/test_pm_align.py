@@ -1021,6 +1021,39 @@ def test_main_dry_run_reports_would_add_and_counts_as_pending(tmp_path, monkeypa
     assert rc == 1
 
 
+def _symlinked_multigateway_root(tmp_path):
+    """frpc-host.toml -> frpc-host-gw2.toml (the wizard's multi-gateway layout),
+    every channel but vm-carrier declared (written by an older wizard)."""
+    full, _ = pm_align.tunnel_plan(TOML4, "505")
+    old = full[:full.index('\n[[proxies]]\nname = "AC0G_ND-vm-carrier"')] + "\n"
+    root = _tunnel_root(tmp_path, text=old)
+    live = root / "etc/sigmond/frpc-host.toml"
+    target = root / "etc/sigmond/frpc-host-gw2.toml"
+    live.rename(target)
+    live.symlink_to("frpc-host-gw2.toml")
+    return root
+
+
+def test_dry_run_on_a_symlinked_multigateway_host_does_not_wait_for_the_carrier(
+        tmp_path, monkeypatch, capsys):
+    _mock_release(monkeypatch)
+    _symlinked_multigateway_root(tmp_path)
+    pm_align.main([], root=tmp_path)
+    out = capsys.readouterr().out
+    assert "tunnel: every channel declared" in out
+    assert "vm-carrier arrives with the next wizard registration" in out
+    assert "would add" not in out
+    # rc may be 1 for unrelated pending files in the mocked release; the tunnel is not pending
+    assert pm_align._dry_run_tunnel_note(tmp_path)[1] is False
+
+
+def test_decision_is_current_for_the_symlinked_host_but_pending_for_a_plain_file(tmp_path):
+    root = _symlinked_multigateway_root(tmp_path / "a")
+    assert pm_align._tunnel_decision(root)[0] == "current"
+    plain = _tunnel_root(tmp_path / "b")
+    assert pm_align._tunnel_decision(plain)[0] == "pending"
+
+
 def test_main_dry_run_reports_every_channel_declared(tmp_path, monkeypatch, capsys):
     _mock_release(monkeypatch)
     full, _ = pm_align.tunnel_plan(TOML4, "505")
@@ -1704,8 +1737,7 @@ FIELDED_QUOTED = ("/usr/local/bin/sigmond-vm", "/usr/local/lib/sigmond/vm-port-r
 FIELDED_TEMPLATES = ("/etc/systemd/system/sigmond-vm-$RNAME-relay.socket",
                      "/etc/systemd/system/sigmond-vm-$RNAME-relay@.service")
 FIELDED_RELAYS = (("ssh", 12222, 22), ("web", 12223, 8081),
-                  ("station", 12224, 8000), ("gmag", 12225, 8082),
-                  ("carrier", 12226, 8089))
+                  ("station", 12224, 8000), ("gmag", 12225, 8082))
 FIELDED_HEREDOC_START = re.compile(
     r"""^\s*cat\s+>\s*"?(/[^"\s]+)"?\s+<<\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2\s*$""")
 
@@ -1745,7 +1777,7 @@ def test_the_real_wizard_still_satisfies_every_pm_align_in_the_field():
         for kind, tmpl in (("socket", sock), ("service", svc)):
             units[(name, kind)] = (tmpl.replace("$RNAME", name).replace("$RLPORT", str(lport))
                                    .replace("$RVPORT", str(vport)).replace("$VMID", "100"))
-    assert len(units) == 10
+    assert len(units) == 8
     for name, lport, vport in FIELDED_RELAYS:
         assert f"ListenStream=127.0.0.1:{lport}\n" in units[(name, "socket")]
         assert f"ExecStart=/usr/local/lib/sigmond/vm-port-relay.py {vport}\n" in units[(name, "service")]
