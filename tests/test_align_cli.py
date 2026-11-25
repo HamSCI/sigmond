@@ -4211,3 +4211,56 @@ class AlignCandidateCliTests(unittest.TestCase):
             # The blessed v3.92 asks for a blessed pm-align run.
             blessed = smd._align_host_line("v3.92", path=p, version_path=Path(d) / "none")
             self.assertIn("v3.92 available: run pm-align on the host", blessed)
+
+
+class AlignApplyRepointsUberSdrOriginTests(unittest.TestCase):
+    """2026-11-25: ubersdr_wsprd has no catalog entry, so repoint_origins
+    never moves it; align --apply points its origin at sigmond's
+    _UBERSDR_REPO before the ancestry fetch, so a release pin that lives
+    only in the fork arrives with that fetch."""
+
+    def _run(self, origins):
+        live = {"sigmond": "daba1f6", "ubersdr_wsprd": "5eeeb53"}
+        rel = align.Release(tag="v3.53", manifest_text="m", appliance_commit="a" * 40,
+                            components={"sigmond": "daba1f6",
+                                        "ubersdr_wsprd": "5eeeb53"})
+        seen = {}
+
+        def fake_ancestry(base, prefetched, max_bytes, say, skipped):
+            seen["origins"] = dict(origins)
+            return lambda *a, **k: True
+
+        with mock.patch.object(smd, "_need_root", return_value=False), \
+             mock.patch.object(smd, "lifecycle_lock",
+                               lambda reason=None, **kw: contextlib.nullcontext()), \
+             mock.patch.object(smd, "_align_live_state",
+                               return_value=(live, {}, origins, {})), \
+             mock.patch("sigmond.align.fetch_release", return_value=rel), \
+             mock.patch("sigmond.align_apply.verify_release", return_value=None), \
+             mock.patch.object(smd, "_align_ancestry", side_effect=fake_ancestry), \
+             mock.patch.object(smd, "_native_repoint_origin",
+                               return_value=True) as m_repoint, \
+             mock.patch.object(Path, "owner", return_value="sigmond"), \
+             mock.patch.object(smd, "_align_target_has_align", return_value=False), \
+             mock.patch("sigmond.align_apply.apply_plan", return_value=[]), \
+             mock.patch("sigmond.align_apply.record"), \
+             mock.patch("sigmond.catalog.load_catalog", return_value={}), \
+             mock.patch.object(smd, "_align_native_decoders", return_value=0), \
+             mock.patch("os.execv"):
+            args = argparse.Namespace(release=None, base="/opt/git/sigmond", no_cost=True,
+                                      apply=True, allow_rollback=False, max_bytes=None)
+            with contextlib.redirect_stdout(io.StringIO()):
+                smd.cmd_align(args)
+        return m_repoint, seen
+
+    def test_a_checkout_with_an_origin_is_repointed_before_the_fetch(self):
+        origins = {"sigmond": "https://github.com/HamSCI/sigmond",
+                   "ubersdr_wsprd": "https://github.com/madpsy/ubersdr_wsprd.git"}
+        m_repoint, seen = self._run(origins)
+        m_repoint.assert_called_once_with(
+            Path("/opt/git/sigmond/ubersdr_wsprd"), smd._UBERSDR_REPO)
+        self.assertEqual(seen["origins"]["ubersdr_wsprd"], smd._UBERSDR_REPO)
+
+    def test_no_checkout_no_repoint(self):
+        m_repoint, _seen = self._run({"sigmond": "https://github.com/HamSCI/sigmond"})
+        m_repoint.assert_not_called()

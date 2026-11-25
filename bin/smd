@@ -1696,6 +1696,34 @@ def _native_clone(url: str, src: Path) -> subprocess.CompletedProcess:
     return _run(cmd)
 
 
+def _native_repoint_origin(src: Path, url: str) -> bool:
+    """Point native source `src`'s origin at `url`, sigmond's repo for it,
+    when it names another repo.  True when it changed the remote.
+
+    A pin can move to a fork before its PR lands upstream (ubersdr_wsprd,
+    2026-11-25: Rob's fork, madpsy PR pending), and every existing checkout
+    still names the old origin, where the pinned commit does not exist: the
+    fetch never brings it and the checkout fails.  The catalog's `replaces`
+    does this for ka9q-web (align_apply.repoint_origins); the native sources
+    have no catalog entry, so sigmond's constant is the authority.
+    Idempotent: a checkout already at `url` (any spelling) is left alone, and
+    nothing ever points it back, so drift and update never see it move.
+    Runs git as the tree's owner (_native_git)."""
+    from sigmond.align_apply import normalize_repo
+    r = _native_git(src, 'remote', 'get-url', 'origin')
+    cur = (r.stdout or '').strip() if r.returncode == 0 else ''
+    if not cur or normalize_repo(cur) == normalize_repo(url):
+        return False
+    r = _native_git(src, 'remote', 'set-url', 'origin', url)
+    if r.returncode != 0:
+        _warn(f'{src.name}: could not repoint origin {cur} -> {url}: '
+              f'{(r.stderr or "").strip()}')
+        return False
+    _info(f'{src.name}: origin repointed {cur} -> {url} (sigmond\'s pin '
+          f'lives there)')
+    return True
+
+
 _HEX40 = re.compile(r'\b[0-9a-f]{40}\b')
 
 
@@ -2825,6 +2853,9 @@ def _build_ubersdr_decoders(*, check: bool = True) -> bool:
         if r.returncode != 0:
             _err(f'git clone ubersdr_wsprd failed: {r.stderr.strip()}')
             return False
+    # Before the fetch: a checkout cloned from madpsy must fetch from the
+    # fork the pin now lives in, or the pin never arrives.
+    _native_repoint_origin(src, _UBERSDR_REPO)
     if not _git_head(src).startswith(pin):
         # --force: madpsy moves its `latest` tag, and a plain fetch then
         # refuses ("would clobber existing tag") and never gets the pin
@@ -10129,6 +10160,13 @@ def _align_apply(args) -> int:
         # never arrives and classify refuses it "ancestry unknown".
         align_apply.repoint_origins(Path(base), catalog, origins,
                                     as_owner=_runuser, say=print)
+        # ubersdr_wsprd has no catalog entry; sigmond's constant names its
+        # repo.  Same reason: a release pin on the fork must fetch from it.
+        # Only a checkout the live state read an origin for.
+        _uber = _UBERSDR_SRC.name
+        if (origins.get(_uber) and _native_repoint_origin(
+                Path(base) / _uber, _UBERSDR_REPO)):
+            origins[_uber] = _UBERSDR_REPO
         items = align.plan_align(rel, live, dirty, errors, local=_locally_managed())
         prefetched: dict = {}
         skipped_budget: set = set()

@@ -666,6 +666,89 @@ class BuildersUseTheOwnerAwareGitTests(unittest.TestCase):
                                       return_value=True))
 
 
+class _StopBuild(Exception):
+    pass
+
+
+class UberSdrForkRepointTests(unittest.TestCase):
+    """2026-11-25: the ubersdr_wsprd pin moved to Rob's fork while his PR
+    waits at madpsy.  Every station's checkout names madpsy as origin,
+    where the pinned commit does not exist, so the rebuild must repoint
+    origin at sigmond's repo before it fetches.  Two local bare repos stand
+    in for madpsy and the fork."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        root = Path(self._tmp.name)
+        work = root / "work"
+        work.mkdir()
+        _git("init", "-q", "-b", "main", cwd=work)
+        (work / "a").write_text("a\n")
+        _git("add", "-A", cwd=work)
+        _git("commit", "-qm", "upstream", cwd=work)
+        self.old = _git("rev-parse", "HEAD", cwd=work).stdout.strip()
+        self.madpsy = root / "madpsy.git"
+        _git("clone", "-q", "--bare", str(work), str(self.madpsy), cwd=root)
+        (work / "b").write_text("b\n")
+        _git("add", "-A", cwd=work)
+        _git("commit", "-qm", "fork: carrier IQ", cwd=work)
+        self.new = _git("rev-parse", "HEAD", cwd=work).stdout.strip()
+        self.fork = root / "fork.git"
+        _git("clone", "-q", "--bare", str(work), str(self.fork), cwd=root)
+        self.base = root / "base"
+        self.base.mkdir()
+        self.src = self.base / "ubersdr_wsprd"
+        _git("clone", "-q", str(self.madpsy), str(self.src), cwd=root)
+        for name, val in (
+                ("_UBERSDR_REPO", str(self.fork)),
+                ("_UBERSDR_COMMIT", self.new),
+                ("_UBERSDR_SRC", self.src),
+                ("_DECODER_DIR", root / "decoders"),
+                ("_BUILD_MANIFEST_DIR", root / "manifests"),
+                ("_NATIVE_BUILD_FAILED", root / "native-build-failed")):
+            p = mock.patch.object(smd, name, val)
+            p.start()
+            self.addCleanup(p.stop)
+        for name, kw in (
+                ("_ensure_native_build_deps", {"return_value": True}),
+                ("_apt", {"return_value": subprocess.CompletedProcess(
+                    [], 0, "", "")}),
+                # Stop right after the checkout, before any compile.
+                ("_decoder_x86_arch", {"side_effect": _StopBuild})):
+            p = mock.patch.object(smd, name, **kw)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _origin(self):
+        return _git("remote", "get-url", "origin",
+                    cwd=self.src).stdout.strip()
+
+    def _rebuild(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(out), \
+                self.assertRaises(_StopBuild):
+            smd._align_native_decoders(True, self.base)
+        return out.getvalue()
+
+    def test_rebuild_repoints_origin_and_checks_out_the_fork_pin(self):
+        self.assertEqual(self._origin(), str(self.madpsy))
+        out = self._rebuild()
+        self.assertEqual(self._origin(), str(self.fork))
+        self.assertEqual(_git("rev-parse", "HEAD", cwd=self.src)
+                         .stdout.strip(), self.new)
+        self.assertIn("origin repointed", out)
+
+    def test_repoint_is_idempotent(self):
+        self.assertTrue(smd._native_repoint_origin(self.src, str(self.fork)))
+        self.assertFalse(smd._native_repoint_origin(self.src, str(self.fork)))
+        # Another spelling of the same repo is not a change either.
+        self.assertFalse(smd._native_repoint_origin(
+            self.src, str(self.fork) + "/"))
+        self.assertEqual(self._origin(), str(self.fork))
+
+
 if __name__ == "__main__":
     unittest.main()
 
