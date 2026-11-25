@@ -4625,6 +4625,14 @@ exec /usr/local/sbin/sigmond-location-check
 LOCEOF
 )
 LOCINST=$(cat <<INSTEOF
+# sigmond ships its own location-check units (systemd/, b0503a3) and install.sh
+# installs them; drift compares the installed files with those.  Writing this
+# wizard's older pair over them left every fresh v3.95 image with a drift fault
+# (AI6VN, AI6VN-2, 2026-11-25).  Use sigmond's units when the checkout has them.
+LOC_UNITS=/opt/git/sigmond/sigmond/systemd
+if [ -f \$LOC_UNITS/sigmond-location-check.service ] && [ -f \$LOC_UNITS/sigmond-location-check.timer ]; then
+install -m 644 \$LOC_UNITS/sigmond-location-check.service \$LOC_UNITS/sigmond-location-check.timer /etc/systemd/system/
+else
 echo $LOCTICK_B64 | base64 -d > /usr/local/sbin/sigmond-location-tick
 chmod 755 /usr/local/sbin/sigmond-location-tick
 cat > /etc/systemd/system/sigmond-location-check.service <<'UEOF'
@@ -4644,6 +4652,7 @@ OnUnitActiveSec=120
 [Install]
 WantedBy=timers.target
 TEOF
+fi
 systemctl daemon-reload
 # Retire the predecessor wherever this wizard runs against an existing station.
 systemctl disable --now sigmond-sdr-sentinel.timer 2>/dev/null || true
