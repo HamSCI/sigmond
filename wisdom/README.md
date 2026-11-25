@@ -34,3 +34,4 @@ Entries:
 - `wisdomf-amd-ryzen-7-5825u` — AMD Ryzen 7 5825U (B4, 2026-07-23)
 - `wisdomf-amd-ryzen-7-6800u` — AMD Ryzen 7 6800U (G3ZIL, bare metal, 2026-11-19)
 - `wisdomf-amd-ryzen-7-8745hs-w-radeon-780m-graphics` — AMD Ryzen 7 8745HS (W0WWV, bare metal, 2026-11-23; FFTW 3.3.11 avx512 format, so only hosts whose radiod links a 3.3.11 avx512 libfftw3f can use it)
+- `wisdomf-intel-core-i5-6500t-2-50ghz` — Intel Core i5-6500T (AI6VN-2, 3-vCPU Proxmox VM, 2026-11-25; FFTW 3.3.10 Debian 13, full fresh plan incl. rof3240000, ~3 h)

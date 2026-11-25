@@ -1,0 +1,8 @@
+model=Intel(R) Core(TM) i5-6500T CPU @ 2.50GHz
+l3_bytes=6291456
+l3_ways=12
+mem_total_kb=5709192
+radiod_l3_bytes=unknown-from-guest (resctrl is host-only)
+samprate=129600000
+codelets=500
+bytes=77002
