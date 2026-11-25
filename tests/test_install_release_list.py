@@ -315,6 +315,34 @@ def test_seat_with_no_pull_refuses_a_row_the_checkout_lacks(tmp_path):
     assert _git(repo, "rev-parse", "HEAD") == c2
 
 
+def test_seat_repoints_a_native_checkout_to_the_fork_its_row_lives_in(tmp_path):
+    """Review I-1 (2026-11-25): ubersdr_wsprd's row is a commit only Rob's
+    fork holds, and an old host's checkout names madpsy as origin.  Seating
+    must point origin at sigmond's _UBERSDR_REPO before the fetch, or
+    resolve refuses the whole install / bring-up step."""
+    madpsy, c1, _ = _origin_with_two_commits(tmp_path, "madpsy")
+    fork = tmp_path / "fork"
+    subprocess.run(["git", "clone", "-q", str(madpsy), str(fork)],
+                   check=True, capture_output=True)
+    (fork / "g.txt").write_text("carrier iq\n")
+    _git(fork, "add", "g.txt")
+    _git(fork, "commit", "-q", "-m", "fork only")
+    fork_only = _git(fork, "rev-parse", "HEAD")
+    base = tmp_path / "base"
+    repo = _clone(madpsy, base, "ubersdr_wsprd")
+    _git(repo, "checkout", "-q", c1)
+    with mock.patch.object(smd, "_UBERSDR_REPO", str(fork)):
+        errors = smd._seat_listed_checkouts(
+            _rl(ubersdr_wsprd=fork_only), base, as_owner=_identity_owner)
+        assert errors == []
+        assert _git(repo, "remote", "get-url", "origin") == str(fork)
+        assert _git(repo, "rev-parse", "HEAD") == fork_only
+        # Idempotent: a second seat neither repoints nor refuses.
+        assert smd._seat_listed_checkouts(
+            _rl(ubersdr_wsprd=fork_only), base, as_owner=_identity_owner) == []
+    assert _git(repo, "remote", "get-url", "origin") == str(fork)
+
+
 # --- pins after the install --------------------------------------------------
 
 def test_write_pins_after_install(tmp_path):

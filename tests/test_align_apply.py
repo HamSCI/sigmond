@@ -290,6 +290,13 @@ class NormalizeRepoTests(unittest.TestCase):
             align_apply.normalize_repo("git@github.com:HamSCI/sigmond.git"),
             align_apply.normalize_repo("https://github.com/hamsci/sigmond/"))
 
+    def test_ssh_url_and_http_forms_are_equal(self):
+        want = align_apply.normalize_repo("https://github.com/madpsy/ubersdr_wsprd.git")
+        for url in ("ssh://git@github.com/madpsy/ubersdr_wsprd.git",
+                    "ssh://git@github.com/madpsy/ubersdr_wsprd",
+                    "http://github.com/madpsy/ubersdr_wsprd"):
+            self.assertEqual(align_apply.normalize_repo(url), want, url)
+
 
 class _MultiFakeGit:
     """Fakes git across several component checkouts for apply_plan tests —

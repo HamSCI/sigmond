@@ -364,6 +364,10 @@ def normalize_repo(url: str) -> str:
     u = (url or "").strip().lower()
     if u.startswith("git@github.com:"):
         u = "https://github.com/" + u[len("git@github.com:"):]
+    elif u.startswith("ssh://git@github.com/"):
+        u = "https://github.com/" + u[len("ssh://git@github.com/"):]
+    elif u.startswith("http://"):
+        u = "https://" + u[len("http://"):]
     u = u.rstrip("/")
     if u.endswith(".git"):
         u = u[:-len(".git")]

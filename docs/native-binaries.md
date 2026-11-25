@@ -95,8 +95,16 @@ to madpsy is pending; the pin moves back to madpsy when it merges.  madpsy's
 5eeeb53, the pin before, is an ancestor of 668cfd2.  Every existing checkout
 was cloned from madpsy, where 668cfd2 does not exist, so the UberSDR build
 and `smd align --apply` point the checkout's origin at `_UBERSDR_REPO` before
-they fetch (`_native_repoint_origin`, one `origin repointed` line, idempotent;
-nothing points it back).
+they fetch, and so does an install or bring-up step under `--release-list`
+(`_native_repoint_origin`, one `origin repointed` line, idempotent).  It
+rewrites any origin that differs from the constant, so an smd whose constant
+is back at madpsy repoints every checkout back to madpsy.
+
+Moving back: first make sure 668cfd2 itself is reachable from madpsy.  A
+squash- or rebase-merge of the PR lands a different commit, and every older
+release list that names 668cfd2 could then no longer be resolved on a
+checkout whose origin is madpsy.  In that case keep the fork as
+`_UBERSDR_REPO` until those lists have aged out.
 
 `onion` was the first migration: it is pinned (`_ONION_COMMIT`) and
 `_build_ka9q_web_with_onion` writes

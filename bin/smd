@@ -1702,7 +1702,7 @@ def _native_clone(url: str, src: Path) -> subprocess.CompletedProcess:
     return _run(cmd)
 
 
-def _native_repoint_origin(src: Path, url: str) -> bool:
+def _native_repoint_origin(src: Path, url: str, *, git=None) -> bool:
     """Point native source `src`'s origin at `url`, sigmond's repo for it,
     when it names another repo.  True when it changed the remote.
 
@@ -1712,15 +1712,22 @@ def _native_repoint_origin(src: Path, url: str) -> bool:
     fetch never brings it and the checkout fails.  The catalog's `replaces`
     does this for ka9q-web (align_apply.repoint_origins); the native sources
     have no catalog entry, so sigmond's constant is the authority.
-    Idempotent: a checkout already at `url` (any spelling) is left alone, and
-    nothing ever points it back, so drift and update never see it move.
-    Runs git as the tree's owner (_native_git)."""
+    Idempotent: a checkout already at `url` (any spelling) is left alone.
+    It rewrites ANY origin that differs, in both directions: an smd whose
+    constant is back at madpsy points every fork checkout back to madpsy on
+    its next build, align or listed install.  Drift and update read no
+    native origin, so they report neither move.
+
+    ``git(*args)`` runs `git <args>` in `src` as its owner; the default is
+    _native_git.  _seat_listed_checkouts passes its own owner's runner."""
     from sigmond.align_apply import normalize_repo
-    r = _native_git(src, 'remote', 'get-url', 'origin')
+    if git is None:
+        git = lambda *a: _native_git(src, *a)
+    r = git('remote', 'get-url', 'origin')
     cur = (r.stdout or '').strip() if r.returncode == 0 else ''
     if not cur or normalize_repo(cur) == normalize_repo(url):
         return False
-    r = _native_git(src, 'remote', 'set-url', 'origin', url)
+    r = git('remote', 'set-url', 'origin', url)
     if r.returncode != 0:
         _warn(f'{src.name}: could not repoint origin {cur} -> {url}: '
               f'{(r.stderr or "").strip()}')
@@ -15229,8 +15236,18 @@ def _seat_listed_checkouts(rl, base: Path, *, pull: bool = True,
         todo.append((name, row, repo, owner, orun))
     if errors or check_only:
         return errors
+    natives = _native_repos()
     for name, row, repo, owner, orun in todo:
         try:
+            # A native row may live only in the repo sigmond names now
+            # (ubersdr_wsprd on Rob's fork, cloned from madpsy): fetch from
+            # that repo, or the row never arrives and resolve refuses the run.
+            if name in natives:
+                _native_repoint_origin(
+                    repo, natives[name],
+                    git=lambda *a, _r=repo, _o=orun: _o(
+                        align_apply.git(_r, *a), capture_output=True,
+                        text=True, timeout=30))
             if pull:
                 align_apply.fetch(repo, owner, run=orun, as_owner=identity)
                 _release_unshallow(repo, row, orun)
