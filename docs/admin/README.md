@@ -223,7 +223,8 @@ these steps; `--apply` does them.  `--no-restart` holds every start and stop.
   for its own sake, leaves a marker that `smd doctor` reports, finishes the
   rest of the alignment and exits 1.
 - *Native rebuilds that are due.*  align runs the UberSDR decoder build (pin
-  5eeeb53), the onion build (pin 124c28c) and the wsjtx build when each falls
+  668cfd2 on Rob's fork rrobinett/ubersdr_wsprd until madpsy merges his PR;
+  the build repoints a madpsy checkout's origin to the fork first), the onion build (pin 124c28c) and the wsjtx build when each falls
   due.  The onion build rebuilds ka9q-web, so align then restarts ka9q-web.
   A build that fails here leaves the alignment recorded and the timers
   started; align names the failure in one line and exits 1.  See

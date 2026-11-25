@@ -85,7 +85,18 @@ provenance moves out of the (un-ownable) upstream repo and into sigmond:
 | `ka9q-radio` | radiod + `fobos` driver | `ka9q/ka9q-radio` (fobos in-tree) | tracks upstream | no | `fobos` disabled by default; `libfobos` is proprietary/external, so it stays opt-in |
 | `ka9q-web` | `onion` | `davidmoreno/onion` | **yes** — `_ONION_COMMIT` pinned | **yes** — `build-manifest/ka9q-web.toml` | ✓ fully migrated (pin + manifest + `smd admin diag` drift check) |
 | `wspr-recorder`, `psk-recorder` | `wsprd`, `jt9` (WSJT-X) | `WSJTX/wsjtx` | **yes** — `_WSJTX_COMMIT` | **yes** — `build-manifest/wsjtx-decoders.toml` | ✓ the FALLBACK since 2026-10-24 |
-| `wspr-recorder`, `psk-recorder` | `wsprd`, `jt9` (UberSDR) | `madpsy/ubersdr_wsprd` | **yes** — `_UBERSDR_COMMIT` | **yes** — `build-manifest/ubersdr-decoders.toml` | ✓ the DEFAULT; selection gated on a parity check |
+| `wspr-recorder`, `psk-recorder` | `wsprd`, `jt9` (UberSDR) | `rrobinett/ubersdr_wsprd` (temporary fork of `madpsy/ubersdr_wsprd`, below) | **yes** — `_UBERSDR_COMMIT` | **yes** — `build-manifest/ubersdr-decoders.toml` | ✓ the DEFAULT; selection gated on a parity check |
+
+**The UberSDR pin is on a fork, temporarily.**  Since 2026-11-25
+`_UBERSDR_REPO` is Rob's fork, `rrobinett/ubersdr_wsprd`, and
+`_UBERSDR_COMMIT` is its 668cfd2: madpsy main 1ff0079 plus one commit that
+adds `wsprd -I DIR` and `jt9 --carrier-dir DIR` (carrier IQ wavs).  Rob's PR
+to madpsy is pending; the pin moves back to madpsy when it merges.  madpsy's
+5eeeb53, the pin before, is an ancestor of 668cfd2.  Every existing checkout
+was cloned from madpsy, where 668cfd2 does not exist, so the UberSDR build
+and `smd align --apply` point the checkout's origin at `_UBERSDR_REPO` before
+they fetch (`_native_repoint_origin`, one `origin repointed` line, idempotent;
+nothing points it back).
 
 `onion` was the first migration: it is pinned (`_ONION_COMMIT`) and
 `_build_ka9q_web_with_onion` writes

@@ -59,7 +59,7 @@ def pin_file(tmp_path, monkeypatch):
 
 def test_station_pin_file_never_wins(pin_file, tmp_path):
     assert smd._native_pin("ubersdr_wsprd") == smd._UBERSDR_COMMIT
-    assert smd._UBERSDR_COMMIT.startswith("5eeeb53")
+    assert smd._UBERSDR_COMMIT.startswith("668cfd2")
     assert smd._native_build_pins() == {
         "onion": smd._ONION_COMMIT, "wsjtx": smd._WSJTX_COMMIT,
         "ubersdr_wsprd": smd._UBERSDR_COMMIT}
@@ -74,7 +74,7 @@ def test_station_pin_file_never_wins(pin_file, tmp_path):
         tmp_path, [], enabled={}, decoder_dir=dec,
         native_pins={"ubersdr_wsprd": smd._native_pin("ubersdr_wsprd")})
     assert [(i.subject, i.detail) for i in items] == [
-        ("ubersdr-decoders", "UberSDR decoders built from 8719788, pin 5eeeb53")]
+        ("ubersdr-decoders", "UberSDR decoders built from 8719788, pin 668cfd2")]
 
 
 def test_track_main_reads_the_remote_never_the_file(pin_file):

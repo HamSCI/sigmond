@@ -1484,8 +1484,14 @@ _JT9_DECODE_SRC = Path('/opt/git/sigmond/psk-recorder/vendor/jt9-decode')
 # same results, so the headroom is tuning, not vectorisation.  We do not reach
 # into an arithmetic contract we did not write.  Contrast _build_wsjtx_decoders,
 # where the lesson was to KEEP an upstream flag; here it is to add none.
-_UBERSDR_REPO   = 'https://github.com/madpsy/ubersdr_wsprd.git'
-_UBERSDR_COMMIT = '5eeeb53576d8d3f9c73de8b8fa9a3d9a39175395'   # madpsy main 5eeeb53 (v3.93 align moved the checkout here; v3.94 rebuilds the decoders from it)
+#
+# Rob's fork (madpsy main 1ff0079 + wsprd -I / jt9 --carrier-dir, PR to madpsy
+# pending); move back to madpsy when it merges.  Rob, 2026-11-25: "pin to my
+# fork so that we can see the changes until madpsy accepts my PR".  madpsy's
+# 5eeeb53, the pin before, is an ancestor.  A checkout cloned from madpsy is
+# repointed here before its fetch (_native_repoint_origin).
+_UBERSDR_REPO   = 'https://github.com/rrobinett/ubersdr_wsprd.git'
+_UBERSDR_COMMIT = '668cfd2167e7b99921458c13b7244cb12c4425da'   # rrobinett carrier-iq 668cfd2
 _UBERSDR_SRC    = Path('/opt/git/sigmond/ubersdr_wsprd')
 
 # Both decoder implementations live here; /usr/local/bin/{wsprd,jt9} are
