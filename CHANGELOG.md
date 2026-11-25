@@ -10,7 +10,7 @@ what has run on real hardware.  A release that no station has yet installed says
 
 ---
 
-## sigmond v3.95 (draft)
+## sigmond v3.95 — blessed 2026-11-25
 
 A release of fixes.  Sensed bring-up and run-with-purpose wait for the package pilot.
 
@@ -84,9 +84,31 @@ A release of fixes.  Sensed bring-up and run-with-purpose wait for the package p
 - The release list names chirp-recorder, and a test requires a row for every catalog
   repo: the golden VM refuses a checkout the list does not name.
 
+### Known issues
+
+- **A fresh v3.95 install shows `sigmond-location-check` as drift.**  The setup
+  wizard writes an older pair of location-check units over the pair sigmond
+  installs, so the drift report flags both.  The units still run.  One
+  `smd align --apply` clears it; v3.96 fixes the wizard.
+- **grape-daily can run a 9.6 GB station out of memory.**  On B4 it did so on
+  2026-11-24 and 11-25, and the kernel stopped the timing recorder first, for about
+  seven minutes.  v3.94 did the same; v3.95 did not cause it.  hamsci-physics
+  00301b5 decodes each raw chunk once and runs each day in its own process; it
+  ships in v3.96.
+
 ### How it was proven
 
-(Draft: fills in after the rig tests and the canaries.)
+Candidate 3 (`sigmond-v3.95-20261124-release.img`, sigmond 1c5d5d0) passed the
+whole rig ladder on 2026-11-24: the golden VM, the nested image test, the update
+test from v3.94 forward and back on the align path, and the bare-metal install
+test.  The rollback fix above came from the update test.
+
+On 2026-11-24 B4 (Proxmox) and SIGMA (bare metal) aligned to candidate 3 as
+canaries; both aligns exited 0.  A day later both passed `smd align --verify`.
+SIGMA's first verify failed on recording gaps.  A live-view prototype running
+outside the release caused them: its band-waterfall channels on radiod cost the
+timing recorder samples.  With those channels stopped, SIGMA's next hour showed
+no gaps and its verify passed.
 
 ---
 
