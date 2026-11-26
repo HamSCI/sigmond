@@ -146,6 +146,10 @@ DEFAULT_GATED = [
     "sigmond-component-fetch.service",      # git fetch of every component
     "apt-daily.service",                    # package lists
     "apt-daily-upgrade.service",            # unattended upgrades
+    "timestd-ionex-download.service",       # IONEX maps (hf-timestd since v3.96)
+    "timestd-iri-update.service",           # IRI index files (hf-timestd since v3.96)
+    # The pre-v3.96 name, for one release: a station whose move align holds
+    # still runs it.  A drop-in for an absent unit does nothing.
     "hamsci-physics-ionex-download.service",
     "timestd-events.service",               # ships event windows
 ]

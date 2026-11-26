@@ -530,3 +530,25 @@ class TestFollowVMReviewFixes(TestFollowVM):
         with contextlib.redirect_stdout(out):
             m.cmd_status(cfg, False)
         self.assertIn("following VM 100", out.getvalue())
+
+
+def test_default_gated_units_follow_the_v396_moves():
+    """v3.96 moved the IONEX and IRI fetches into hf-timestd.  The old
+    hamsci-physics name stays one release: a station whose move is held still
+    runs it, and a drop-in for an absent unit does nothing."""
+    assert m.DEFAULT_GATED == [
+        "sigmond-component-fetch.service",
+        "apt-daily.service",
+        "apt-daily-upgrade.service",
+        "timestd-ionex-download.service",
+        "timestd-iri-update.service",
+        "hamsci-physics-ionex-download.service",
+        "timestd-events.service",
+    ]
+
+
+def test_apply_gates_a_unit_that_is_not_installed():
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        m.cmd_apply({"enabled": True, "gated_units": ["absent.service"]}, root)
+        assert (root / "absent.service.d" / m.DROPIN_NAME).is_file()
