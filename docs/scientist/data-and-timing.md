@@ -634,7 +634,7 @@ above. A live five-minute sidecar, b4 2026-08-23 (read-only `cat` of
   "compression": "zstd",
   "written_at": "2026-08-23T16:55:00.752029+00:00",
   "station": {"callsign": "AC0G", "grid_square": "EM38ww", "id": "S000170",
-              "instrument_id": "171", "latitude": 38.9187497, "longitude": -92.1277207},
+              "instrument_id": "171", "latitude": 38.9375, "longitude": -92.125},
   "pipeline_offset_samples": 0,
   "timing_snapshots": [],
   "bpsk_chain_delay_ns": 16621380,

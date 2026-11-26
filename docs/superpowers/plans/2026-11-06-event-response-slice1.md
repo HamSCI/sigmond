@@ -15,7 +15,7 @@
 - A flare makes an order only if its class is M1.0 or above (`max_class`), its `end_time` is known, and at its `max_time` the station's sun elevation lies above 0° and the sun stands above 0° at the great-circle midpoint of at least one monitored path.  B4 monitors WWV (40.6807, −105.0407) and WWVH (21.9872, −159.7636).  Coordinates come from `hf_timestd/core/broadcast_specs.py` `STATION_COORDINATES`.
 - Window: `begin_time − 30 min` to `end_time + 90 min`.
 - GOES feed: `https://services.swpc.noaa.gov/json/goes/primary/xray-flares-7-day.json`, read hourly, only on wd30.
-- The storm-day (Kp) trigger stays off.  B4 alone (`AC0G-B4`, 38.9187367, −92.1277335) for this slice.
+- The storm-day (Kp) trigger stays off.  B4 alone (`AC0G-B4`, 38.9375, −92.125) for this slice.
 - wd30 tree: `/srv/wd_data/events/<event_id>/<station_id>/hf-timestd/<channel>/`; orders at `/srv/wd_data/events/orders/orders.json`.  `/srv/wd_data` is the 4 TB disk; never write events to wd30's 120 GB root.
 - The station deletes its staging copy only after wd30's `RECEIPT` confirms every file's sha256.  The raw buffer itself prunes as before; this slice never deletes from it.
 - Digital RF carries complex64 at the buffer's sample rate (24 kHz), one channel directory per buffer channel.  Each 10-minute buffer file's JSON sidecar goes, verbatim, into Digital Metadata at that file's first sample, together with the order.
