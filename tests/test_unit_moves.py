@@ -418,3 +418,59 @@ def test_new_units_stay_off_radiods_cores():
     for u in ("hamsci-physics-vtec.service", "timestd-ionex-download.service",
               "timestd-iri-update.service"):
         assert AFFINITY_UNITS.get(u) == "other", u
+
+
+# I5 (v3.96 final review): an old unit that crashed still ran the job, so the
+# move starts the new one and clears the old unit's failed state.
+@pytest.mark.parametrize("word", ["failed", "activating", "reloading"])
+def test_an_old_unit_that_failed_still_starts_the_new_one(tmp_path, word):
+    fake = FakeSystemd({"timestd-vtec.service": ("enabled", word)})
+    step = _apply(fake, tmp_path)
+    flat = [" ".join(c) for c in fake.calls]
+    assert step.outcome == "moved"
+    assert "systemctl start hamsci-physics-vtec.service" in flat
+    assert flat.index("systemctl stop timestd-vtec.service") < \
+        flat.index("systemctl start hamsci-physics-vtec.service")
+
+
+def test_a_failed_old_unit_is_reset(tmp_path):
+    fake = FakeSystemd({"timestd-vtec.service": ("", "failed")})   # disabled, crashed
+    step = _apply(fake, tmp_path)
+    flat = [" ".join(c) for c in fake.calls]
+    assert step.outcome == "moved"
+    assert "systemctl reset-failed timestd-vtec.service" in flat
+    assert "systemctl start hamsci-physics-vtec.service" in flat
+
+
+def test_dry_run_plans_a_start_for_a_failed_old_unit(tmp_path):
+    fake = FakeSystemd({"timestd-vtec.service": ("enabled", "failed")})
+    step = _apply(fake, tmp_path, apply=False)
+    assert step.outcome == "would move" and "enable and start hamsci-physics-vtec.service" in step.detail
+
+
+# I1 (v3.96 final review): clearing that raises after the old unit stopped
+# still brings the new unit up, and the move reads "failed", naming both.
+def test_a_clear_that_raises_still_starts_the_new_unit(tmp_path, monkeypatch):
+    def boom(*a, **k):
+        raise OSError(13, "Permission denied", "/var/lib/sigmond/unit-moves")
+    monkeypatch.setattr(um, "_clear_unit", boom)
+    fake = FakeSystemd({"timestd-vtec.service": ("enabled", "active")})
+    step = _apply(fake, tmp_path)
+    flat = [" ".join(c) for c in fake.calls]
+    assert step.outcome == "failed"
+    assert "systemctl start hamsci-physics-vtec.service" in flat
+    assert flat.index("systemctl stop timestd-vtec.service") < \
+        flat.index("systemctl start hamsci-physics-vtec.service")
+    assert "timestd-vtec.service" in step.detail and "hamsci-physics-vtec.service" in step.detail
+    assert "Permission denied" in step.detail
+
+
+def test_a_clear_that_raises_on_an_idle_unit_starts_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(um, "_clear_unit", lambda *a, **k: (_ for _ in ()).throw(OSError("x")))
+    fake = FakeSystemd({"timestd-vtec.service": ("enabled", "inactive")},
+                       after=("inactive", "yes", "loaded"))
+    step = _apply(fake, tmp_path)
+    flat = [" ".join(c) for c in fake.calls]
+    assert step.outcome == "failed"
+    assert "systemctl enable hamsci-physics-vtec.service" in flat
+    assert "systemctl start hamsci-physics-vtec.service" not in flat

@@ -16,7 +16,11 @@ A gaining component declares the move in its deploy.toml::
 3. disable  -- every old unit that is enabled, then clear what ``disable``
                cannot: the wants-links and the unit entry of an old unit
                whose file already left with its old checkout.
-4. enable   -- the new unit; start it only when an old unit ran.
+4. enable   -- the new unit; start it only when an old unit ran (active,
+               activating, reloading, or failed: a unit that crashed ran
+               the job too).  Clearing that raises after the old unit
+               stopped still enables and starts the new unit, and the move
+               then reads "failed", naming both units.
 
 The old unit stops before the new one starts, so two copies never run.  Some
 of these services read a serial receiver, and a serial port tolerates one
@@ -47,6 +51,10 @@ MIGRATE_TIMEOUT = 600
 CHECKOUT_ROOT = "/opt/git/sigmond/"
 
 _ACTIVE = ("active", "activating", "reloading")
+# What apply_move counts as "the old unit ran the job": a unit that crashed
+# (failed, as ND's timestd-vtec did until 039bd554) ran it too, so the new
+# unit starts in its place.
+_RAN = _ACTIVE + ("failed",)
 # The values of the three properties apply_move reads back; the sets do not
 # overlap, so a value names its property whatever order systemctl prints.
 _ACTIVE_STATES = {"active", "reloading", "inactive", "failed", "activating",
@@ -158,15 +166,20 @@ def _wants_links(unit: str, unit_dir: Path) -> list:
     return links
 
 
+def _unit_words(unit: str, *, unit_dir: Path, run: Callable) -> tuple:
+    """``(enabled, is-active word)`` for one unit."""
+    word = (_systemctl(run, "is-enabled", unit).stdout or "").strip()
+    enabled = word.startswith("enabled") or bool(_wants_links(unit, unit_dir))
+    return enabled, (_systemctl(run, "is-active", unit).stdout or "").strip()
+
+
 def unit_state(unit: str, *, unit_dir: Path, run: Callable) -> tuple:
     """``(enabled, active)`` for one unit.
 
     A wants-link counts as enabled: a unit whose file vanished with its
     checkout still has one, and ``systemctl is-enabled`` then prints nothing.
     """
-    word = (_systemctl(run, "is-enabled", unit).stdout or "").strip()
-    enabled = word.startswith("enabled") or bool(_wants_links(unit, unit_dir))
-    state = (_systemctl(run, "is-active", unit).stdout or "").strip()
+    enabled, state = _unit_words(unit, unit_dir=unit_dir, run=run)
     return enabled, state in _ACTIVE
 
 
@@ -216,8 +229,10 @@ def apply_move(move: UnitMove, *, apply: bool, owner_enabled: bool, unit_dir: Pa
                backup_dir: Path, run: Callable, now: datetime) -> Step:
     """Carry out one move; see the module docstring for the order."""
     label = _label(move)
-    states = {u: unit_state(u, unit_dir=unit_dir, run=run) for u in move.from_units}
-    live = [u for u, (en, act) in states.items() if en or act]
+    # (enabled, ran): a failed old unit counts as having run the job.
+    states = {u: (en, word in _RAN) for u in move.from_units
+              for en, word in [_unit_words(u, unit_dir=unit_dir, run=run)]}
+    live = [u for u, (en, ran) in states.items() if en or ran]
     if not live:
         return Step(label, "unchanged", "")
     old = ", ".join(live)
@@ -246,6 +261,7 @@ def apply_move(move: UnitMove, *, apply: bool, owner_enabled: bool, unit_dir: Pa
             return Step(label, "failed", f"{' '.join(argv)} exit {rc}"
                         + (f" ({why})" if why else "") + f"; {old} left running")
 
+    unclear = []
     for unit in move.from_units:   # every old unit: a timer's .service link goes too
         enabled, active = states[unit]
         if active:
@@ -256,7 +272,14 @@ def apply_move(move: UnitMove, *, apply: bool, owner_enabled: bool, unit_dir: Pa
                             f"{move.to_unit} not started")
         if enabled:
             _systemctl(run, "disable", unit)   # a dangling unit fails here; cleared below
-        _clear_unit(unit, unit_dir, backup_dir, now)
+        if unit in live:
+            _systemctl(run, "reset-failed", unit)   # a crashed old unit stays "failed" otherwise
+        try:
+            _clear_unit(unit, unit_dir, backup_dir, now)
+        except Exception as exc:                                  # noqa: BLE001
+            # The old unit already stopped: bring the new one up all the
+            # same, so the job does not go dark, and fail the move below.
+            unclear.append(f"clearing {unit} raised {type(exc).__name__}: {exc}")
     # From here on the old units are stopped and cleared: a failure names
     # both units, because nothing runs this job until someone looks.
     def broken(what: str) -> Step:
@@ -279,6 +302,10 @@ def apply_move(move: UnitMove, *, apply: bool, owner_enabled: bool, unit_dir: Pa
     if load != "loaded":
         # A missing unit also reads inactive with ConditionResult=no.
         return broken(f"{move.to_unit} LoadState={load or 'unknown'}")
+    if unclear:
+        return Step(label, "failed",
+                    f"{'; '.join(unclear)}; {old} stopped, {move.to_unit} "
+                    f"{active or 'unknown'}: clear what is left of {old} by hand")
     if active == "active":
         return Step(label, "moved", f"{old} stopped; {move.to_unit} active")
     if active == "inactive" and condition == "no":
