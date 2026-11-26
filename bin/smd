@@ -35777,6 +35777,13 @@ def _build_parser() -> argparse.ArgumentParser:
              "(the hourly timer runs it as root)")
     st_expire.add_argument('--dry-run', action='store_true',
         help='print the plan, one line per job, and ask no client')
+    st_compact = storage_sub.add_parser('compact',
+        help="compact a client's database: stop the processes that hold it, swap in "
+             "the compact copy, start them again (dry run unless --apply)")
+    st_compact.add_argument('client', help='the client, e.g. hf-timestd')
+    st_compact.add_argument('target', help='the database target, e.g. timestd')
+    st_compact.add_argument('--apply', action='store_true',
+        help='stop the holders and swap; without it, print the plan and stop nothing')
 
     # check -- read-only: does this station work?  (tasks/spec-smd-check-v372.md)
     p_check = sub.add_parser('check',

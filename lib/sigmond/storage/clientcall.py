@@ -157,3 +157,66 @@ def stop_client(component: str, resolve=_default_resolve,
     if not stopped:
         return False, "no units to stop"
     return True, "stopped " + ", ".join(stopped)
+
+
+@dataclass(frozen=True)
+class CompactAnswer:
+    ok: bool
+    refused: bool = False
+    reason: str = ""
+    unsupported: bool = False
+    holders: tuple = ()          # (pid, unit | None) pairs; `--holders` only
+    data: Mapping = field(default_factory=dict)    # the client's whole answer
+
+
+def _compact(binary: str, flag: str, target: str, timeout: int, run) -> CompactAnswer:
+    argv = [binary, "storage", "compact", flag, "--target", target, "--json"]
+    try:
+        proc = run(argv, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return CompactAnswer(False, reason=f"timed out after {timeout}s")
+    except OSError as exc:
+        return CompactAnswer(False, reason=f"could not run: {exc}")
+    if proc.returncode == 2:
+        return CompactAnswer(False, reason="verb not supported (older client)",
+                             unsupported=True)
+    if proc.returncode != 0:
+        return CompactAnswer(False, reason=f"exit {proc.returncode}")
+    try:
+        data = json.loads(proc.stdout)
+    except (ValueError, TypeError):
+        return CompactAnswer(False, reason="output is not JSON")
+    if not isinstance(data, dict):
+        return CompactAnswer(False, reason="output is not a JSON object")
+    refused = data.get("refused") is True
+    reason = str(data.get("reason", ""))
+    holders = ()
+    if flag == "--holders" and not refused:
+        raw = data.get("holders")
+        if not isinstance(raw, list):
+            return CompactAnswer(False, reason="holders missing or malformed", data=data)
+        pairs = []
+        for h in raw:
+            pid = h.get("pid") if isinstance(h, dict) else None
+            unit = h.get("unit") if isinstance(h, dict) else None
+            if not isinstance(pid, int) or isinstance(pid, bool) \
+                    or not (unit is None or isinstance(unit, str)):
+                return CompactAnswer(False, reason="holders malformed", data=data)
+            pairs.append((pid, unit or None))
+        holders = tuple(pairs)
+    return CompactAnswer(True, refused, reason, False, holders, data)
+
+
+COMPACT_TIMEOUT_S = 3600
+
+
+def call_compact_prepare(binary: str, target: str, run=subprocess.run) -> CompactAnswer:
+    return _compact(binary, "--prepare", target, COMPACT_TIMEOUT_S, run)
+
+
+def call_compact_holders(binary: str, target: str, run=subprocess.run) -> CompactAnswer:
+    return _compact(binary, "--holders", target, HOLDINGS_TIMEOUT_S * 3, run)
+
+
+def call_compact_swap(binary: str, target: str, run=subprocess.run) -> CompactAnswer:
+    return _compact(binary, "--swap", target, COMPACT_TIMEOUT_S, run)

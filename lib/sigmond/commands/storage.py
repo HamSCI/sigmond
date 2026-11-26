@@ -1,4 +1,4 @@
-"""`smd storage status|share|directive|tick|expire` -- the storage capacity ledger.
+"""`smd storage status|share|directive|tick|expire|compact` -- the storage capacity ledger.
 
 docs/superpowers/specs/2026-11-04-storage-capacity-design.md.  `status`
 reads the file the tick writes and needs no root.  `share`, `directive` and
@@ -71,6 +71,11 @@ def cmd_storage(args) -> int:
         return run_tick(datetime.now(timezone.utc), default_runners())
     if verb == "expire":
         return _expire(args)
+    if verb == "compact":
+        from ..storage.compact import compact_client, default_runners
+        return compact_client(args.client, args.target,
+                              apply=bool(getattr(args, "apply", False)),
+                              r=default_runners())
     _complain(f"unknown verb {verb!r}")
     return 2
 
