@@ -39,8 +39,8 @@ def _coord():
     c = coordmod.Coordination()
     c.host.call = "AC0G"
     c.host.grid = "EN16ov"
-    c.host.lat = 46.9071215
-    c.host.lon = -96.7926047
+    c.host.lat = 46.895833333333336
+    c.host.lon = -96.79166666666666
     c.station.reporter_id = "AC0G/ND"
     c.station.psws_id = "S000111"
     c.station.instrument_id = "115"
