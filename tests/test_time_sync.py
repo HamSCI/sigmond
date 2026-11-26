@@ -64,3 +64,48 @@ class TestConfig(unittest.TestCase):
     def test_sourcedir_detection_is_anchored(self):
         self.assertTrue(m.has_sourcedir("sourcedir /etc/chrony/sources.d\n"))
         self.assertFalse(m.has_sourcedir("# sourcedir /etc/chrony/sources.d\n"))
+
+
+class TestOldGnssServer(unittest.TestCase):
+    """An older hf-timestd install.sh wrote '# GNSS Timeserver (ZED-F9P)' and
+    'server <host> iburst prefer' into chrony.conf (ND, B4, SIGMA, N8UR).
+    Michael, 2026-11-26: remove them."""
+
+    CONF = ("pool 2.debian.pool.ntp.org iburst\n"
+            "\n# GNSS Timeserver (ZED-F9P)\nserver 192.0.2.80 iburst prefer\n"
+            "server 192.0.2.99 iburst\n# GNSS Timeserver (other)\nlog tracking\n")
+
+    def test_removes_exactly_the_pair(self):
+        new, hosts = m.without_old_gnss_server(self.CONF)
+        self.assertEqual(hosts, ["192.0.2.80"])
+        self.assertEqual(new, "pool 2.debian.pool.ntp.org iburst\n\n"
+                              "server 192.0.2.99 iburst\n# GNSS Timeserver (other)\nlog tracking\n")
+
+    def test_removes_the_placeholder_host_too(self):
+        new, hosts = m.without_old_gnss_server(
+            "# GNSS Timeserver (ZED-F9P)\nserver <YOUR_GNSS_HOST> iburst prefer\n")
+        self.assertEqual((new, hosts), ("", ["<YOUR_GNSS_HOST>"]))
+
+    def test_leaves_a_lone_comment_or_a_different_server_line(self):
+        for conf in ("# GNSS Timeserver (ZED-F9P)\nserver 192.0.2.80 iburst\n",
+                     "# GNSS Timeserver (ZED-F9P)\n\nserver 192.0.2.80 iburst prefer\n",
+                     "server 192.0.2.80 iburst prefer\n"):
+            self.assertEqual(m.without_old_gnss_server(conf), (conf, []))
+
+    def test_configure_drops_the_pair_and_reports_a_change(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            conf = Path(d) / "chrony.conf"
+            conf.write_text(self.CONF)
+            saved = (m.CHRONY_CONF, m.SOURCES_FILE, m.LOG_PATH)
+            m.CHRONY_CONF, m.SOURCES_FILE, m.LOG_PATH = conf, Path(d) / "s.sources", Path(d) / "log"
+            try:
+                self.assertTrue(m.configure(["pool.ntp.org"]))
+                text = conf.read_text()
+                self.assertNotIn("GNSS Timeserver (ZED-F9P)", text)
+                self.assertNotIn("192.0.2.80", text)
+                self.assertIn("server 192.0.2.99 iburst\n", text)
+                self.assertIn("192.0.2.80", (Path(d) / "log").read_text())
+                self.assertFalse(m.configure(["pool.ntp.org"]))
+            finally:
+                m.CHRONY_CONF, m.SOURCES_FILE, m.LOG_PATH = saved

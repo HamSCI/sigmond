@@ -96,6 +96,12 @@ A release of fixes.  Sensed bring-up and run-with-purpose wait for the package p
 - **ka9q-python 3.28.0.**  Its resequencer counts each sample once, fills a gap with the
   true number of samples, and re-syncs after radiod restarts its sequence.
 - A zero position in a GNSS receiver's RTCM message no longer crashes `timestd-vtec`.
+- **chrony loses the GNSS server an older hf-timestd install wrote.**  That installer
+  added `# GNSS Timeserver (ZED-F9P)` and `server <host> iburst prefer` to
+  `/etc/chrony/chrony.conf` on AC0G-ND, AC0G-B4, SIGMA and N8UR; on N8UR the host was
+  the unresolvable `<YOUR_GNSS_HOST>`.  `sigmond-time-sync --apply`, which sigmond's
+  install runs on each align, now removes exactly that pair, logs the host and restarts
+  chrony.  chrony keeps its other sources.
 
 ### WSPR
 
