@@ -5,6 +5,8 @@ import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 
+import types
+
 import pytest
 
 from sigmond.storage import client_kit
@@ -170,7 +172,29 @@ def _day(n):  # n days before a fixed 'now'
     return (datetime(2026, 11, 25, tzinfo=timezone.utc) - timedelta(days=n)).isoformat()
 
 
+@pytest.fixture(autouse=True)
+def _reset_dropped(monkeypatch):
+    monkeypatch.setattr(client_kit, "_DROPPED_UID", None)
+
+
+def _fake_root(monkeypatch):
+    calls = []
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(os, "setgroups", lambda g: calls.append("groups"))
+    monkeypatch.setattr(os, "setgid", lambda g: calls.append("gid"))
+    monkeypatch.setattr(os, "setuid", lambda u: calls.append("uid"))
+    return calls
+
+
 NOW = datetime(2026, 11, 25, tzinfo=timezone.utc).timestamp()
+
+
+def _q(db, sql):
+    con = sqlite3.connect(db)
+    try:
+        return con.execute(sql).fetchall()
+    finally:
+        con.close()
 
 
 def _prune(db, **kw):
@@ -187,7 +211,7 @@ def test_prune_deletes_rows_older_than_the_cutoff(tmp_path):
     db = _db(tmp_path, [(i, _day(40 - i)) for i in range(1, 41)])
     r = _prune(db)
     assert r.complete and r.deleted == 9          # days 39..31 old
-    left = [t for (t,) in sqlite3.connect(db).execute("SELECT timestamp_utc FROM L2_tick_phase")]
+    left = [t for (t,) in _q(db, "SELECT timestamp_utc FROM L2_tick_phase")]
     assert len(left) == 31
     assert min(left) >= client_kit.cutoff_iso(NOW, 30)
 
@@ -196,7 +220,7 @@ def test_prune_keeps_a_new_row_at_a_low_rowid(tmp_path):
     db = _db(tmp_path, [(1, _day(1)), (2, _day(50)), (3, _day(45)), (4, _day(2)),
                         (5, _day(3))])
     r = _prune(db)
-    left = {x for (x,) in sqlite3.connect(db).execute("SELECT rowid FROM L2_tick_phase")}
+    left = {x for (x,) in _q(db, "SELECT rowid FROM L2_tick_phase")}
     assert {1, 4, 5} <= left
     assert left.isdisjoint({2, 3})                 # the old rows were deleted
     assert r.deleted == 2
@@ -206,14 +230,14 @@ def test_prune_never_deletes_a_null_timestamp(tmp_path):
     db = _db(tmp_path, [(1, None), (2, _day(50))])
     r = _prune(db)
     assert r.deleted == 1
-    assert [x for (x,) in sqlite3.connect(db).execute("SELECT rowid FROM L2_tick_phase")] == [1]
+    assert [x for (x,) in _q(db, "SELECT rowid FROM L2_tick_phase")] == [1]
 
 
 def test_prune_search_skips_null_timestamps(tmp_path):
     db = _db(tmp_path, [(1, _day(50)), (2, _day(50)), (3, None), (4, _day(1)), (5, _day(1))])
     r = _prune(db)
     assert r.complete and r.deleted == 2
-    left = {x for (x,) in sqlite3.connect(db).execute("SELECT rowid FROM L2_tick_phase")}
+    left = {x for (x,) in _q(db, "SELECT rowid FROM L2_tick_phase")}
     assert left == {3, 4, 5}
 
 
@@ -259,7 +283,7 @@ def test_prune_yields_to_a_writer_between_batches(tmp_path):
     r = _prune(db, batch_rows=1, sleep=sleep_and_write)
     assert r.complete and r.deleted == 5
     assert len(inserted) >= 4                       # a writer got in between batches
-    left = sqlite3.connect(db).execute("SELECT count(*) FROM L2_tick_phase").fetchone()[0]
+    left = _q(db, "SELECT count(*) FROM L2_tick_phase")[0][0]
     assert left == len(inserted)                    # new rows all survive
 
 
@@ -294,8 +318,7 @@ def test_incremental_vacuum_frees_pages_only_in_incremental_mode(tmp_path):
     assert client_kit.incremental_vacuum(plain, deadline=time.monotonic() + 30) == 0
     freed = client_kit.incremental_vacuum(inc, deadline=time.monotonic() + 30, pages_per_step=64)
     assert freed > 0
-    con = sqlite3.connect(inc)
-    assert con.execute("PRAGMA freelist_count").fetchone()[0] == 0
+    assert _q(inc, "PRAGMA freelist_count")[0][0] == 0
 
 
 def test_drop_to_owner_sets_groups_gid_uid_in_order(monkeypatch, tmp_path):
@@ -368,3 +391,65 @@ def test_add_expire_verb_creates_the_storage_parser_when_absent(capsys):
                           "--max-seconds", "5", "--json"])
     assert args.func(args) == 0
     assert json.loads(capsys.readouterr().out) == {"target": "x", "max": 5}
+
+
+def test_drop_to_owner_refuses_a_symlink(monkeypatch, tmp_path):
+    calls = _fake_root(monkeypatch)
+    real = tmp_path / "real.db"
+    real.write_bytes(b"")
+    link = tmp_path / "link.db"
+    link.symlink_to(real)
+    with pytest.raises(ValueError, match="symlink"):
+        client_kit.drop_to_owner(str(link))
+    assert calls == []
+
+
+def test_drop_to_owner_refuses_a_root_owned_file(monkeypatch, tmp_path):
+    calls = _fake_root(monkeypatch)
+    p = tmp_path / "x.db"
+    p.write_bytes(b"")
+    real_fstat = os.fstat
+
+    def root_fstat(fd):
+        st = real_fstat(fd)
+        return types.SimpleNamespace(st_uid=0, st_gid=0, st_dev=st.st_dev, st_ino=st.st_ino,
+                                     st_mode=st.st_mode)
+    monkeypatch.setattr(os, "fstat", root_fstat)
+    with pytest.raises(ValueError, match="root-owned"):
+        client_kit.drop_to_owner(str(p))
+    assert calls == []
+
+
+def test_drop_to_owner_raises_for_a_second_owner(monkeypatch, tmp_path):
+    _fake_root(monkeypatch)
+    a = tmp_path / "a.db"
+    b = tmp_path / "b.db"
+    a.write_bytes(b"")
+    b.write_bytes(b"")
+    client_kit.drop_to_owner(str(a))
+    real_fstat = os.fstat
+
+    def other(fd):
+        st = real_fstat(fd)
+        return types.SimpleNamespace(st_uid=st.st_uid + 1, st_gid=st.st_gid, st_dev=st.st_dev,
+                                     st_ino=st.st_ino, st_mode=st.st_mode)
+    monkeypatch.setattr(os, "fstat", other)
+    with pytest.raises(ValueError, match="already dropped"):
+        client_kit.drop_to_owner(str(b))
+
+
+def test_prune_refuses_an_epoch_column_and_deletes_nothing(tmp_path):
+    p = tmp_path / "e.db"
+    con = sqlite3.connect(p)
+    con.execute("CREATE TABLE L2_tick_phase (channel TEXT, timestamp_utc REAL)")
+    con.executemany("INSERT INTO L2_tick_phase VALUES ('c', ?)",
+                    [(NOW - 86400.0 * n,) for n in (1, 2, 3, 60)])
+    con.commit()
+    con.close()
+    with pytest.raises(ValueError, match="real"):
+        _prune(str(p))
+    con = sqlite3.connect(p)
+    try:
+        assert con.execute("SELECT count(*) FROM L2_tick_phase").fetchone()[0] == 4
+    finally:
+        con.close()

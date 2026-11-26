@@ -13,6 +13,7 @@ import json
 import os
 import re
 import sqlite3
+import stat
 import time
 from dataclasses import dataclass
 from typing import Callable, Optional, Sequence
@@ -183,14 +184,48 @@ def cutoff_iso(now: float, days: float) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now - days * 86400))
 
 
-def drop_to_owner(path: str) -> None:
-    """When root, become the owner of `path` so no root-owned -wal/-shm appears."""
-    if os.geteuid() != 0:
-        return
-    st = os.stat(path)
-    os.setgroups([])
-    os.setgid(st.st_gid)
-    os.setuid(st.st_uid)
+_DROPPED_UID: Optional[int] = None
+
+
+def drop_to_owner(path: str):
+    """When root, become the owner of `path` so no root-owned -wal/-shm appears.
+
+    The drop outlasts the call: it covers the rest of the process.  A later call
+    that names a different owner raises.  Refuses a symlink, and refuses a file
+    that root owns (never stays root).  Returns (st_dev, st_ino) of the file it
+    checked, or None when nothing was checked (not root, no earlier drop).
+    """
+    global _DROPPED_UID
+    if os.geteuid() != 0 and _DROPPED_UID is None:
+        return None
+    if stat.S_ISLNK(os.lstat(path).st_mode):
+        raise ValueError(f"refusing to drop privileges to a symlink: {path}")
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        st = os.fstat(fd)
+    finally:
+        os.close(fd)
+    if _DROPPED_UID is not None and st.st_uid != _DROPPED_UID:
+        raise ValueError(f"{path} belongs to uid {st.st_uid}, but this process "
+                         f"already dropped to uid {_DROPPED_UID}")
+    if os.geteuid() == 0:
+        if st.st_uid == 0:
+            raise ValueError(f"refusing to run as root on a root-owned file: {path}")
+        os.setgroups([])
+        os.setgid(st.st_gid)
+        os.setuid(st.st_uid)
+        _DROPPED_UID = st.st_uid
+    return (st.st_dev, st.st_ino)
+
+
+def _open_owned(path: str, timeout: float):
+    """drop_to_owner, then connect only if the path still names the file checked."""
+    ident = drop_to_owner(path)
+    if ident is not None:
+        st = os.lstat(path)
+        if stat.S_ISLNK(st.st_mode) or (st.st_dev, st.st_ino) != ident:
+            raise ValueError(f"{path} changed after the ownership check")
+    return sqlite3.connect(path, timeout=timeout, isolation_level=None)
 
 
 def _ident(name: str) -> str:
@@ -215,19 +250,33 @@ def prune_rows(db_path: str, table: str, ts_column: str, cutoff: str, *,
     timestamp predicate), and an old row past the cut waits for a later pass.
     """
     t, c = _ident(table), _ident(ts_column)
-    drop_to_owner(db_path)
-    con = sqlite3.connect(db_path, timeout=busy_s, isolation_level=None)
+    con = _open_owned(db_path, busy_s)
     try:
         lo, hi = con.execute(f"SELECT min(rowid), max(rowid) FROM {t}").fetchone()
         if lo is None:
             return PruneResult(0, True, "")
-        nxt = f"SELECT {c} FROM {t} WHERE rowid >= ? AND {c} IS NOT NULL ORDER BY rowid LIMIT 1"
+        nxt = (f"SELECT {c}, typeof({c}) FROM {t} "
+               f"WHERE rowid >= ? AND {c} IS NOT NULL ORDER BY rowid LIMIT 1")
+
+        def probe(r):
+            row = con.execute(nxt, (r,)).fetchone()
+            if row is not None and row[1] != "text":
+                raise ValueError(f"{table}.{ts_column} holds {row[1]} values, not "
+                                 f"ISO text; refusing to prune")
+            return None if row is None else row[0]
+
+        probe(lo)
+        last = con.execute(f"SELECT typeof({c}) FROM {t} WHERE {c} IS NOT NULL "
+                           f"ORDER BY rowid DESC LIMIT 1").fetchone()
+        if last is not None and last[0] != "text":
+            raise ValueError(f"{table}.{ts_column} holds {last[0]} values, not "
+                             f"ISO text; refusing to prune")
         # smallest r in [lo, hi+1] whose first non-NULL ts at rowid >= r is >= cutoff
         a, b = lo, hi + 1
         while a < b:
             mid = (a + b) // 2
-            row = con.execute(nxt, (mid,)).fetchone()
-            if row is None or row[0] >= cutoff:
+            ts = probe(mid)
+            if ts is None or ts >= cutoff:
                 b = mid
             else:
                 a = mid + 1
@@ -247,9 +296,9 @@ def prune_rows(db_path: str, table: str, ts_column: str, cutoff: str, *,
                 except sqlite3.OperationalError as exc:
                     if not _is_locked(exc):
                         raise
-                    sleep(pause_s)
                     if attempt == 5:
                         return PruneResult(deleted, False, "database locked")
+                    sleep(pause_s)
             start = end
             batches += 1
             sleep(pause_s)
@@ -266,8 +315,7 @@ def prune_rows(db_path: str, table: str, ts_column: str, cutoff: str, *,
 def incremental_vacuum(db_path: str, *, deadline: float, pages_per_step: int = 2048,
                        clock=time.monotonic) -> int:
     """Return freed pages to the filesystem; 0 unless the file is in incremental mode."""
-    drop_to_owner(db_path)
-    con = sqlite3.connect(db_path, timeout=0.25, isolation_level=None)
+    con = _open_owned(db_path, 0.25)
     try:
         if con.execute("PRAGMA auto_vacuum").fetchone()[0] != 2:
             return 0
