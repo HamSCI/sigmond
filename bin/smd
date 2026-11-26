@@ -31928,12 +31928,38 @@ def _radiod_is_stopped(unit, *, run) -> bool:
             and not props.get('Job', '').strip())
 
 
-def _radiod_revive_failed_consumers(consumers, services, *, run, say=_info) -> bool:
+#: The one radiod consumer that sigmond-recorder-watchdog restarts, once per
+#: radiod start, outside smd's own restart and revival paths.
+RECORDER_COMPONENT = 'hf-timestd'
+
+
+def _radiod_file_recorder_request(evidence, *, run) -> None:
+    """Ask sigmond-recorder-watchdog to follow radiod, then kick it.  Called
+    with the lifecycle lock released: the watchdog takes that lock to restart,
+    so a kick under it would only block.  Never raises."""
+    from sigmond import recorder_watchdog
+    try:
+        recorder_watchdog.file_request(
+            'radiod-consumers', recorder_watchdog.RADIOD, evidence,
+            request_dir=recorder_watchdog.REQUEST_DIR)
+    except (OSError, ValueError) as exc:
+        _err(f'radiod-consumers: could not file the recorder request ({exc})')
+        return
+    _info(f'radiod-consumers: asked {recorder_watchdog.SELF_SERVICE} to '
+          f'restart {recorder_watchdog.UNIT}')
+    recorder_watchdog.kick(run)
+
+
+def _radiod_revive_failed_consumers(consumers, services, *, run, say=_info,
+                                    recorder_failed=None) -> bool:
     """v3.72 #13: a consumer whose start limit was hit during an outage
     stays `failed` after the radio comes back; nothing else clears it.
     `reset-failed` + `start --no-block` every declared consumer unit whose
     ActiveState is failed (Result=start-limit-hit included), one log line
-    each.  Returns True when systemctl refused a start."""
+    each.  Returns True when systemctl refused a start.
+
+    ``RECORDER_COMPONENT`` is never revived here: a failed one is appended to
+    ``recorder_failed`` (when given) for the watchdog request instead."""
     refused = False
     for comp in sorted(consumers):
         for unit in _align_service_units(services.get(comp, [])):
@@ -31944,6 +31970,12 @@ def _radiod_revive_failed_consumers(consumers, services, *, run, say=_info) -> b
             props = dict(line.split('=', 1) for line in (r.stdout or '').splitlines()
                          if '=' in line)
             if props.get('ActiveState', '').strip() != 'failed':
+                continue
+            if comp == RECORDER_COMPONENT:
+                say(f"  {unit}: failed (Result={props.get('Result', '?').strip()}) "
+                    '— left to sigmond-recorder-watchdog')
+                if recorder_failed is not None:
+                    recorder_failed.append(comp)
                 continue
             say(f"  {unit}: failed (Result={props.get('Result', '?').strip()}) "
                 '— reset-failed and start')
@@ -31959,7 +31991,7 @@ def _radiod_revive_failed_consumers(consumers, services, *, run, say=_info) -> b
 
 
 def _radiod_restart_pass(unit, args, catalog, *, run, sleep, clock=time.monotonic,
-                         lock_deadline_at) -> tuple:
+                         lock_deadline_at, recorder_report=None) -> tuple:
     """One pass: wait for radiod to serve, take the lifecycle lock, restart
     what is stale. Returns ``(rc, radiod_start)`` — ``radiod_start`` is the
     monotonic instant this pass restarted against, or None when the pass
@@ -31973,7 +32005,12 @@ def _radiod_restart_pass(unit, args, catalog, *, run, sleep, clock=time.monotoni
     run-wide lock budget runs out (final review / R2) — the SAME instant is
     passed to every pass of one run, so time already spent waiting for the
     lock in an earlier pass is not given back.  A pass that finds the
-    budget already spent returns 3 without even trying the lock."""
+    budget already spent returns 3 without even trying the lock.
+
+    ``recorder_report``: a list the pass appends one evidence line to when
+    ``RECORDER_COMPONENT`` was stale or failed.  The pass does not restart or
+    revive it; the caller files the watchdog request after the lock is
+    released."""
 
     def _radiod_ready() -> bool:
         r = _align_run([_ALIGN_RADIOD_READY, '--unit', unit, str(args.wait_ready)],
@@ -32037,10 +32074,20 @@ def _radiod_restart_pass(unit, args, catalog, *, run, sleep, clock=time.monotoni
                 from sigmond import align_live
                 declared = {c for c in services
                             if c != align_live.RADIOD and _reads_radiod(c, catalog)}
+                failed_recorder = []
                 revive_refused = _radiod_revive_failed_consumers(
-                    declared, services, run=run)
+                    declared, services, run=run, recorder_failed=failed_recorder)
+                if failed_recorder and recorder_report is not None:
+                    recorder_report.append(f'{RECORDER_COMPONENT} failed after {unit} restarted')
             stale = _radiod_stale_consumers(
                 threshold, {'radiod_consumers': consumers, 'started_at': mono_started})
+            if RECORDER_COMPONENT in stale:
+                stale = [c for c in stale if c != RECORDER_COMPONENT]
+                if not args.dry_run and recorder_report is not None:
+                    recorder_report.append(
+                        f'{RECORDER_COMPONENT} started before {unit} settled')
+                _info(f'  {RECORDER_COMPONENT}: started before {unit} — '
+                      'left to sigmond-recorder-watchdog')
             if not stale:
                 _info(f"radiod-consumers: nothing older than {unit}'s start "
                       '— nothing to do')
@@ -32124,8 +32171,12 @@ def cmd_radiod_restart_stale_consumers(args, *, run=subprocess.run,
     worst_rc = 0
     for attempt in range(1, _RADIOD_CONSUMERS_MAX_PASSES + 1):
         _info(f'radiod-consumers: pass {attempt}/{_RADIOD_CONSUMERS_MAX_PASSES}')
+        recorder_report = []
         rc, radiod_start = _radiod_restart_pass(unit, args, catalog, run=run, sleep=sleep,
-                                                clock=clock, lock_deadline_at=lock_deadline_at)
+                                                clock=clock, lock_deadline_at=lock_deadline_at,
+                                                recorder_report=recorder_report)
+        if recorder_report:
+            _radiod_file_recorder_request('; '.join(dict.fromkeys(recorder_report)), run=run)
         worst_rc = max(worst_rc, rc)
         if radiod_start is None:
             return worst_rc

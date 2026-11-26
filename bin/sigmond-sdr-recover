@@ -136,6 +136,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)),
 from sigmond.paths import LIFECYCLE_LOCK  # noqa: E402
 from sigmond import sdr_events  # noqa: E402
 from sigmond import usb_hubs  # noqa: E402
+from sigmond import recorder_watchdog  # noqa: E402
 from sigmond.radiod_ready import READY_SETTLE_S  # noqa: E402
 
 # tomllib is Python 3.11+.  These helpers run under the system python3 (they
@@ -1124,8 +1125,51 @@ LIFECYCLE_LOCK_WAIT_S = 600
 LIFECYCLE_LOCK_POLL_S = 5
 
 
+#: sigmond-recorder-watchdog restarts timestd-core-recorder, never this
+#: helper.  restart_station() reports the recorder to it.  Under the lifecycle
+#: lock (held up to ~330 s) the report waits; the watchdog takes the same lock
+#: to restart, so a kick before release would only block it.
+RECORDER_UNIT = recorder_watchdog.UNIT
+_LOCK_DEPTH: list = []
+_PENDING_RECORDER_REPORTS: list = []
+
+
+def _report_recorder(evidence: str, stopped_recorder: bool) -> None:
+    """File the watchdog's request, then kick it.  Never raises."""
+    try:
+        recorder_watchdog.file_request(
+            "sdr-recover", recorder_watchdog.RADIOD, evidence,
+            stopped_recorder=stopped_recorder,
+            request_dir=recorder_watchdog.REQUEST_DIR)
+    except (OSError, ValueError) as exc:
+        _log(f"could not file the recorder restart request ({exc}); "
+             f"{RECORDER_UNIT} is left for the next radiod-start hook")
+        return
+    _log(f"asked {recorder_watchdog.SELF_SERVICE} to restart {RECORDER_UNIT}")
+    recorder_watchdog.kick(
+        lambda argv, **kw: _run(argv, timeout=kw.get("timeout", 30)))
+
+
+def _flush_recorder_reports() -> None:
+    while _PENDING_RECORDER_REPORTS:
+        _report_recorder(*_PENDING_RECORDER_REPORTS.pop(0))
+
+
 @contextlib.contextmanager
 def _with_lifecycle_lock():
+    """The lifecycle lock; recorder requests filed under it go out after it."""
+    _LOCK_DEPTH.append(1)
+    try:
+        with _held_lifecycle_lock():
+            yield
+    finally:
+        _LOCK_DEPTH.pop()
+        if not _LOCK_DEPTH:
+            _flush_recorder_reports()
+
+
+@contextlib.contextmanager
+def _held_lifecycle_lock():
     """Hold the same lifecycle lock `smd` uses (LIFECYCLE_LOCK, LOCK_EX) for
     the duration of the `with` block. Waits up to LIFECYCLE_LOCK_WAIT_S,
     polling every LIFECYCLE_LOCK_POLL_S. Still held at the deadline: log
@@ -1179,8 +1223,13 @@ def _unit_started_mono(unit: str) -> Optional[float]:
 
 
 def restart_station(radiod_unit: str, consumers: Sequence[str],
-                    ready_timeout_s: int = 90, consumer_timeout_s: int = 240) -> bool:
-    """radiod first, then its consumers — the only order that works."""
+                    ready_timeout_s: int = 90, consumer_timeout_s: int = 240,
+                    stopped_recorder: bool = False) -> bool:
+    """radiod first, then its consumers — the only order that works.
+
+    The core recorder is not restarted here: once radiod is ready, a request
+    goes to sigmond-recorder-watchdog (``stopped_recorder`` says this run's
+    caller had stopped it, so the watchdog reads its stop as ours)."""
     _log(f"starting {radiod_unit}")
     _run(["systemctl", "reset-failed", radiod_unit])
     if _run(["systemctl", "restart", radiod_unit]).returncode != 0:
@@ -1199,6 +1248,14 @@ def restart_station(radiod_unit: str, consumers: Sequence[str],
     # minute to stop and another to start (wspr-recorder@AI6VN: ~100 s), and
     # waiting on each in turn is what let one slow unit starve the rest.
     radiod_started = _unit_started_mono(radiod_unit)
+    recorder = RECORDER_UNIT in consumers
+    consumers = [u for u in consumers if u != RECORDER_UNIT]
+    if recorder:
+        evidence = f"{radiod_unit} restarted by sigmond-sdr-recover and ready"
+        if _LOCK_DEPTH:
+            _PENDING_RECORDER_REPORTS.append((evidence, stopped_recorder))
+        else:
+            _report_recorder(evidence, stopped_recorder)
     for unit in consumers:
         started = _unit_started_mono(unit)
         if (radiod_started is not None and started is not None
@@ -1621,7 +1678,10 @@ def manual_on(serial: Optional[str], cfg: dict,
     restored = True
     if radiod_unit:
         with _with_lifecycle_lock():
-            restored = restart_station(radiod_unit, consumers)
+            # --off stopped every held consumer, the recorder among them.
+            restored = restart_station(
+                radiod_unit, consumers,
+                **({"stopped_recorder": True} if RECORDER_UNIT in consumers else {}))
     else:
         _log("no radiod instance to start — set [radiod].unit in topology.toml")
 

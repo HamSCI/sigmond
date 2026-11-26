@@ -884,6 +884,94 @@ def test_restart_station_restarts_a_consumer_that_is_not_running(monkeypatch):
     assert ["systemctl", "restart", "--no-block", "down.service"] in calls
 
 
+# ─── v3.96: the recorder is the watchdog's, not restart_station's ───────────
+
+REC = "timestd-core-recorder.service"
+
+
+def _watchdog_fixture(monkeypatch, tmp_path, mod):
+    from sigmond import recorder_watchdog as rw
+    monkeypatch.setattr(rw, "REQUEST_DIR", tmp_path / "req")
+    return rw
+
+
+def _req(tmp_path):
+    return json.loads((tmp_path / "req" / "sdr-recover.json").read_text())
+
+
+def test_restart_station_files_a_request_for_the_recorder(monkeypatch, tmp_path):
+    mod = _load()
+    _watchdog_fixture(monkeypatch, tmp_path, mod)
+    calls = _station_run(monkeypatch, mod, {
+        "radiod@x.service": 500.0, REC: 100.0, "wspr-recorder@X.service": 100.0})
+    assert mod.restart_station("radiod@x.service", [REC, "wspr-recorder@X.service"],
+                               stopped_recorder=True)
+    restarted = [c[-1] for c in calls if c[:3] == ["systemctl", "restart", "--no-block"]]
+    assert restarted == ["wspr-recorder@X.service"]
+    assert not [c for c in calls if REC in c and c[1] in ("restart", "start", "reset-failed")]
+    body = _req(tmp_path)
+    assert body["reporter"] == "sdr-recover"
+    assert body["cause"] == "radiod-restarted"
+    assert body["stopped_recorder"] is True
+    assert isinstance(body["requested_utc"], float)
+    kicks = [c for c in calls
+             if c == ["systemctl", "start", "--no-block", "sigmond-recorder-watchdog.service"]]
+    assert len(kicks) == 1
+
+
+def test_no_request_without_the_recorder_or_without_a_ready_radiod(monkeypatch, tmp_path):
+    mod = _load()
+    _watchdog_fixture(monkeypatch, tmp_path, mod)
+    _station_run(monkeypatch, mod, {"radiod@x.service": 500.0})
+    mod.restart_station("radiod@x.service", ["wspr-recorder@X.service"])
+    assert not (tmp_path / "req").exists()
+
+
+def test_the_request_goes_out_after_the_lifecycle_lock_is_released(monkeypatch, tmp_path):
+    mod = _load()
+    _watchdog_fixture(monkeypatch, tmp_path, mod)
+    monkeypatch.setattr(mod, "LIFECYCLE_LOCK", tmp_path / "lifecycle.lock")
+    events = []
+    real_flock = mod.fcntl.flock
+
+    def spy(fd, op):
+        if op & mod.fcntl.LOCK_UN:
+            events.append("unlocked")
+        return real_flock(fd, op)
+    monkeypatch.setattr(mod.fcntl, "flock", spy)
+    calls = _station_run(monkeypatch, mod, {"radiod@x.service": 500.0, REC: 100.0})
+    real_run = mod._run
+
+    def run(cmd, timeout=60):
+        if cmd[-1] == "sigmond-recorder-watchdog.service":
+            events.append("kick")
+        return real_run(cmd, timeout=timeout)
+    monkeypatch.setattr(mod, "_run", run)
+    with mod._with_lifecycle_lock():
+        assert mod.restart_station("radiod@x.service", [REC])
+        assert "kick" not in events
+    assert events == ["unlocked", "kick"]
+    assert (tmp_path / "req" / "sdr-recover.json").exists()
+
+
+def test_manual_on_marks_the_recorder_as_stopped_by_us(monkeypatch, tmp_path):
+    mod = _load()
+    seen = {}
+    monkeypatch.setattr(mod, "restart_station",
+                        lambda unit, consumers, **kw: seen.update(kw) or True)
+    monkeypatch.setattr(mod, "HOLD_PATH", tmp_path / "hold.json")
+    monkeypatch.setattr(mod, "LIFECYCLE_LOCK", tmp_path / "lifecycle.lock")
+    (tmp_path / "hold.json").write_text(json.dumps({"RX1": {
+        "serial": "RX1", "devpath": "4-1.4", "locations": [["4-1", "4", True]],
+        "radiod_unit": "radiod@x.service", "consumers": [REC], "since": 1.0}}))
+    card = mod.Located("4-1.4", "4-1", "4", "RX1", "5000", "3-1", "4", "00f1", "7")
+    monkeypatch.setattr(mod, "wait_for_running_card", lambda *a, **k: (card, "ready"))
+    monkeypatch.setattr(mod, "_uhubctl_set", lambda *a, **k: True)
+    monkeypatch.setattr(mod, "_run", lambda cmd, timeout=60: _CP())
+    mod.manual_on("RX1", {"unit": "radiod@x.service"})
+    assert seen == {"stopped_recorder": True}
+
+
 # ─── v3.72 #3: a data-only "port reset", the wedged card, the latched return ─
 #
 # AC0G-B4 2026-10-14: both hubs report ppps and neither cuts VBUS (4.98 V

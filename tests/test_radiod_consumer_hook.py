@@ -22,6 +22,7 @@ import contextlib
 import importlib.machinery
 import importlib.util
 import io
+import json
 import os
 import subprocess
 import unittest
@@ -268,7 +269,8 @@ def _fake_run(*, ready_rc=0, ready_rcs=None, restart_rc=0, radiod_mono=200.0, mo
     return run, calls
 
 
-def _run_cmd(run, *, dry_run=False, lock=None, staleness=None, wait_ready=90):
+def _run_cmd(run, *, dry_run=False, lock=None, staleness=None, wait_ready=90,
+             services=None):
     """Invoke the real cmd_radiod_restart_stale_consumers with `_align_services`,
     `_align_staleness`, `lifecycle_lock` and `load_catalog` mocked — the
     consumer-selection math and restart machinery are exercised for real."""
@@ -279,7 +281,7 @@ def _run_cmd(run, *, dry_run=False, lock=None, staleness=None, wait_ready=90):
     else:
         st = staleness or {"radiod_consumers": {"psk-recorder", "wspr-recorder"}}
         staleness_patch = mock.patch.object(smd, "_align_staleness", return_value=st)
-    with mock.patch.object(smd, "_align_services", return_value=SERVICES), \
+    with mock.patch.object(smd, "_align_services", return_value=services or SERVICES), \
          mock.patch.object(smd, "load_catalog", return_value={}), \
          staleness_patch, \
          mock.patch.object(smd, "lifecycle_lock", lock_fn), \
@@ -485,6 +487,102 @@ class ReviveFailedConsumersTests(unittest.TestCase):
         run, calls = _failed_run({"wspr.service"})
         _run_cmd(run, dry_run=True)
         self.assertFalse([c for c in calls if c[:2] == ["systemctl", "reset-failed"]])
+
+
+HF_SERVICES = {**SERVICES, "hf-timestd": ["timestd-core-recorder.service"]}
+
+
+def _run_hf(run, tmp_path, *, dry_run=False):
+    """The verb with hf-timestd a declared radiod reader and the watchdog's
+    request directory in tmp_path."""
+    from sigmond import recorder_watchdog as rw
+    st = {"radiod_consumers": {"psk-recorder", "hf-timestd"}}
+    with mock.patch.object(smd, "_reads_radiod", return_value=True), \
+         mock.patch.object(rw, "REQUEST_DIR", tmp_path / "req"):
+        return _run_cmd(run, dry_run=dry_run, staleness=st, services=HF_SERVICES)
+
+
+def _restarted(calls):
+    return [c[-1] for c in calls if c[:2] == ["systemctl", "restart"]]
+
+
+class RecorderIsTheWatchdogsTests(unittest.TestCase):
+    """v3.96: the hook files a request for hf-timestd's recorder; it
+    restarts and revives that component no more."""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+
+    def test_the_hook_files_a_request_and_restarts_hf_timestd_no_longer(self):
+        run, calls = _fake_run(mono={"timestd-core-recorder.service": 100.0})
+        seen = []
+        real = smd._align_restart
+
+        def spy(radiod_first, components, services, **kw):
+            seen.append(list(components))
+            return real(radiod_first, components, services, **kw)
+        with mock.patch.object(smd, "_align_restart", side_effect=spy):
+            rc, out = _run_hf(run, self.tmp)
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen, [["psk-recorder"]])
+        self.assertEqual(_restarted(calls), ["psk.service"])
+        body = json.loads((self.tmp / "req" / "radiod-consumers.json").read_text())
+        self.assertEqual(body["reporter"], "radiod-consumers")
+        self.assertEqual(body["cause"], "radiod-restarted")
+        self.assertIsInstance(body["requested_utc"], float)
+        kicks = [c for c in calls if c == ["systemctl", "start", "--no-block",
+                                           "sigmond-recorder-watchdog.service"]]
+        self.assertEqual(len(kicks), 1)
+
+    def test_a_fresh_recorder_files_nothing(self):
+        run, calls = _fake_run(mono={"timestd-core-recorder.service": 300.0})
+        _run_hf(run, self.tmp)
+        self.assertFalse((self.tmp / "req").exists())
+        self.assertNotIn("sigmond-recorder-watchdog.service",
+                         [c[-1] for c in calls])
+
+    def test_the_hook_never_revives_hf_timestd(self):
+        run, calls = _failed_run({"timestd-core-recorder.service"},
+                                 mono={"timestd-core-recorder.service": 300.0})
+        _run_hf(run, self.tmp)
+        rec = "timestd-core-recorder.service"
+        self.assertFalse([c for c in calls if rec in c
+                          and c[:2] in (["systemctl", "reset-failed"],
+                                        ["systemctl", "start"],
+                                        ["systemctl", "restart"])])
+        # A failed recorder is the watchdog's to look at: it gets the request.
+        self.assertTrue((self.tmp / "req" / "radiod-consumers.json").exists())
+
+    def test_a_dry_run_files_nothing(self):
+        run, calls = _fake_run(mono={"timestd-core-recorder.service": 100.0})
+        _run_hf(run, self.tmp, dry_run=True)
+        self.assertFalse((self.tmp / "req").exists())
+
+    def test_the_request_goes_out_after_the_lock_is_released(self):
+        events = []
+        run, calls = _fake_run(mono={"timestd-core-recorder.service": 100.0})
+
+        @contextlib.contextmanager
+        def lock(reason=None, **kw):
+            events.append("locked")
+            try:
+                yield
+            finally:
+                events.append("unlocked")
+
+        def spying(argv, **kw):
+            if argv[-1] == "sigmond-recorder-watchdog.service":
+                events.append("kick")
+            return run(argv, **kw)
+        from sigmond import recorder_watchdog as rw
+        with mock.patch.object(smd, "_reads_radiod", return_value=True), \
+             mock.patch.object(rw, "REQUEST_DIR", self.tmp / "req"):
+            _run_cmd(spying, lock=lock, services=HF_SERVICES,
+                     staleness={"radiod_consumers": {"hf-timestd"}})
+        self.assertEqual(events, ["locked", "unlocked", "kick"])
 
 
 class ArrivalUnitRevivesConsumersTests(unittest.TestCase):
