@@ -762,6 +762,50 @@ A move entry stays in `deploy.toml` until a release removes it on
 purpose.  A station that skips a release and aligns later still gets
 the move.
 
+#### 5.7 Units a component stops shipping: `retired_units` (v3.96)
+
+When a component drops a unit, it names the unit in `retired_units`.
+The key goes inside `[systemd]`, before the first `[[systemd.moves]]`:
+
+```toml
+[systemd]
+units         = ["timestd-core-recorder.service", ...]
+retired_units = ["timestd-prune.timer", "timestd-prune.service"]
+```
+
+TOML files a key written after a `[[systemd.moves]]` table under that
+move, not under `[systemd]`.  sigmond refuses such a move, so the
+mistake shows up at the next align instead of passing in silence.
+
+sigmond treats a retired unit as a move with no new owner.  On every
+station, `smd align --apply` stops each retired unit (timers before
+their services), disables it, and clears what remains: wants-links, a
+link into a sigmond checkout or one that dangles.  A copied unit file
+goes to `/var/lib/sigmond/unit-moves/`, as a moved unit's does.  One
+`systemctl daemon-reload` follows.  sigmond retires its own units the
+same way, from a list in `sigmond.unit_moves` (`RETIRED_OWN`), and also
+removes the `/usr/local/sbin` helper link its install made for one.
+
+Rules:
+
+- A name must be a plain `.service` or `.timer`; a template cannot be
+  retired this way.  The same file may not list the unit in `units` or
+  `templated_units` too.
+- Topology does not gate a retire: nothing should run a unit that no
+  component ships.
+- Align leaves the unit alone, and says why, while another component
+  still lists it, while the site manages the component by hand
+  (`locally_managed`), or while the unit's entry links to a file outside
+  every sigmond checkout (an operator's own unit of that name).
+- A retire that fails reads `failed` and holds the restarts back, as a
+  failed move does.  The next align tries again.
+- The drift report faults a retired unit that stays enabled, active or
+  installed.  Its fix reads `smd align --apply`, or names the file to
+  remove by hand when the entry belongs to someone else.
+
+Keep a unit in `retired_units` for as long as a station might still
+carry it.
+
 ### 6. Talking to radiod: use `ka9q-python` (revised v0.5)
 
 Clients that consume RTP streams from a radiod instance **SHOULD**

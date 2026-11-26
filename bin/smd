@@ -9866,6 +9866,13 @@ def _align_unit_moves(apply: bool, *, base='/opt/git/sigmond', plan=None,
     back, and in the dry run it leaves the run pending, as does a target
     commit not read ("unread").
 
+    It also retires the units each component lists in `retired_units`,
+    and sigmond's own `unit_moves.RETIRED_OWN` (`unit_moves.apply_retire`).
+    Topology does not gate a retire.  It holds one while the site manages
+    the component by hand, or while another checkout still lists the unit.
+    A failed retire reads "failed" (restarts held) and retries next align;
+    the dry run prints `would retire <units> (<component>)`.
+
     ``held_out`` (a dict) receives, for each move left undone this run, its
     new unit -> the old units: bring-up's declared-units step must not
     enable a new unit beside an old one that stays enabled.
@@ -9927,7 +9934,48 @@ def _align_unit_moves(apply: bool, *, base='/opt/git/sigmond', plan=None,
             return cp.returncode == 0
         return (base / name / 'systemd' / move.to_unit).is_file()
 
+    # Who still ships each unit (working trees), read on the first retire:
+    # a retire never stops a unit another component lists.
+    shippers: dict = {}
+
+    def shipped_by(unit, owner):
+        if not shippers:
+            shippers[None] = []
+            for other in checkouts:
+                for u in drift_units.declared_units(base, other):
+                    shippers.setdefault(u, []).append(other)
+        return sorted(set(shippers.get(unit, ())) - {owner})
+
+    def retire_step(retire, *, local_hold):
+        """Retire one component's dropped units (`unit_moves.apply_retire`).
+        Topology does not gate it: a unit nobody ships should not run, and a
+        failed retire reads "failed" and retries at the next align."""
+        label = unit_moves._retire_label(retire)
+        try:
+            still = [f'{", ".join(c)} still ships {u}' for u in retire.units
+                     for c in [shipped_by(u, retire.component)] if c]
+            reason = local_hold or ('; '.join(still) if still else None)
+            if reason is not None:
+                step = unit_moves.hold_retire(retire, reason, unit_dir=_ALIGN_UNIT_DIR,
+                                              run=run)
+            else:
+                step = unit_moves.apply_retire(retire, apply=apply,
+                                               unit_dir=_ALIGN_UNIT_DIR,
+                                               backup_dir=_ALIGN_UNIT_MOVE_BACKUPS,
+                                               run=run, now=now)
+        except Exception as exc:                               # noqa: BLE001
+            step = align_apply.Step(label, 'failed', f'{type(exc).__name__}: {exc}; '
+                                    f'see systemctl status {" ".join(retire.units)}')
+        if not apply:
+            if step.outcome == 'would retire':
+                say(f'  would retire {", ".join(retire.units)} ({retire.component})')
+                say(f'      {step.detail}')
+            elif step.outcome != 'unchanged':
+                say(f'  {step.component}: {step.outcome} - {step.detail}')
+        return step
+
     for name in sorted(set(enabled) | set(checkouts)):
+        retires = []
         try:
             if name in targets:
                 probe = run(['git', '-C', str(base / name), 'cat-file', '-e',
@@ -9941,8 +9989,11 @@ def _align_unit_moves(apply: bool, *, base='/opt/git/sigmond', plan=None,
                         f'(commit not fetched)'))
                     continue
                 moves = unit_moves.declared_moves_at(base / name, name, targets[name], run=run)
+                retires = unit_moves.declared_retired_at(base / name, name, targets[name],
+                                                         run=run)
             else:
                 moves = unit_moves.declared_moves(base, [name])
+                retires = unit_moves.declared_retired(base, [name])
         except ValueError as exc:
             say(f'  unit moves: {exc}')
             steps.append(align_apply.Step(name, 'failed', f'unit moves not read: {exc}'))
@@ -10006,6 +10057,13 @@ def _align_unit_moves(apply: bool, *, base='/opt/git/sigmond', plan=None,
                     f'{step.detail.split("; ", 1)[-1]})')
             elif step.outcome != 'unchanged':
                 say(f'  {step.component}: {step.outcome} - {step.detail}')
+        for retire in retires:
+            steps.append(retire_step(retire, local_hold=(
+                f'this site manages {name} by hand (locally_managed)'
+                if name in local else None)))
+    # sigmond's own retired units: its install made them, its list names them.
+    for retire in unit_moves.RETIRED_OWN:
+        steps.append(retire_step(retire, local_hold=None))
     return steps
 
 
@@ -10906,7 +10964,7 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now,
             unit_move_steps = _align_unit_moves(True, base=base, no_restart=not _start,
                                                 held_out=held_moves)
             _align_print_steps(unit_move_steps)
-            if any(s.outcome == 'moved' for s in unit_move_steps):
+            if any(s.outcome in ('moved', 'retired') for s in unit_move_steps):
                 align_apply.record_history(rel, unit_move_steps, history=history, now=now)
             _align_print_steps(_align_device_steps(start=_start, base=base))
             _align_print_steps(_align_declared_units_steps(
@@ -11506,7 +11564,7 @@ def cmd_align(args) -> int:
     # target commit not fetched yet leaves the station unaligned;
     # "unchanged" and a held move do not.
     held_moves: dict = {}
-    moves_due = any(s.outcome in ('would move', 'failed', 'unread')
+    moves_due = any(s.outcome in ('would move', 'would retire', 'failed', 'unread')
                     for s in _align_unit_moves(False, base=base, plan=plan,
                                                no_restart=getattr(args, 'no_restart', False),
                                                held_out=held_moves))
