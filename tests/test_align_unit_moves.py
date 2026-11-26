@@ -386,3 +386,59 @@ def test_dry_run_holds_a_move_whose_new_unit_is_not_shipped(tmp_path):
     assert held == {"hamsci-physics-vtec.service": "timestd-vtec.service"}
     # The working tree ships it; the target commit does not: the target decides.
     assert (repo / "systemd" / "hamsci-physics-vtec.service").is_file()
+
+
+# I1 (v3.96 final review): an exception inside one owner's moves becomes a
+# "failed" Step; it never escapes _align_unit_moves, so align still records
+# history and reports, and _ALIGN_BLOCKING holds the restarts back.
+_LABEL = "hamsci-physics: timestd-vtec.service -> hamsci-physics-vtec.service"
+
+
+def test_link_units_that_raises_fails_the_move(tmp_path):
+    _moved_tree(tmp_path)
+    held = {}
+    with mock.patch("sigmond.unit_moves.link_units",
+                    side_effect=RuntimeError("Symlink loop from 'x'")):
+        steps, _, calls = _moves(True, tmp_path, held_out=held)
+    assert [(s.component, s.outcome) for s in steps] == [(_LABEL, "failed")]
+    assert "Symlink loop" in steps[0].detail
+    assert _stops(calls) == []
+    assert held == {"hamsci-physics-vtec.service": "timestd-vtec.service"}
+
+
+def test_a_clear_that_raises_in_align_fails_but_starts_the_new_unit(tmp_path):
+    _moved_tree(tmp_path)
+    with mock.patch("sigmond.unit_moves._clear_unit",
+                    side_effect=PermissionError(13, "Permission denied")):
+        steps, _, calls = _moves(True, tmp_path)
+    assert [s.outcome for s in steps] == ["failed"]
+    flat = [" ".join(c) for c in calls]
+    assert flat.index("systemctl stop timestd-vtec.service") < \
+        flat.index("systemctl start hamsci-physics-vtec.service")
+
+
+def test_an_owner_check_that_raises_fails_the_move(tmp_path):
+    _moved_tree(tmp_path)
+    with mock.patch("sigmond.drift.units.declared_units", side_effect=OSError("EIO")):
+        steps, lines, calls = _moves(True, tmp_path)
+    assert [(s.component, s.outcome) for s in steps] == [(_LABEL, "failed")]
+    assert "EIO" in steps[0].detail
+    assert _stops(calls) == []
+
+
+def test_dry_run_reports_a_move_that_raises(tmp_path):
+    _moved_tree(tmp_path)
+    with mock.patch("sigmond.drift.units.declared_units", side_effect=OSError("EIO")):
+        steps, lines, _ = _moves(False, tmp_path)
+    assert [s.outcome for s in steps] == ["failed"]
+    assert any("failed" in ln and "EIO" in ln for ln in lines)
+
+
+def test_a_move_that_raises_still_records_and_exits_1():
+    """The make-live path with a raised-then-failed move: history recorded,
+    nothing restarted, exit 1 (the existing _ALIGN_BLOCKING path)."""
+    failed = align_apply.Step(_LABEL, "failed", "RuntimeError: Symlink loop")
+    rc, out, m, order, _ = _order_run([failed])
+    assert rc == 1
+    m["restart"].assert_not_called()
+    assert "failed — RuntimeError: Symlink loop" in out

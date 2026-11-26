@@ -9860,7 +9860,8 @@ def _align_unit_moves(apply: bool, *, base='/opt/git/sigmond', plan=None,
     line.  A move whose old units are neither enabled nor active reads
     "unchanged" on --apply, and prints nothing in the dry run.
 
-    A malformed declaration yields a "failed" step, and so does a topology
+    A malformed declaration yields a "failed" step, and so does any move
+    whose checks, linking or apply_move raise, and a topology
     that cannot be read on --apply; on --apply that holds the restarts
     back, and in the dry run it leaves the run pending, as does a target
     commit not read ("unread").
@@ -9952,26 +9953,44 @@ def _align_unit_moves(apply: bool, *, base='/opt/git/sigmond', plan=None,
             continue
         # A main service that a move brings in cannot run before the move.
         owner_targets = {m.to_unit for m in moves}
-        hold = owner_hold(name) if moves else None
+        # Anything that raises in here (a symlink loop, a full disk, an
+        # unreadable unit file) fails that move as a Step and lets align go
+        # on: it still records history, reports, and _ALIGN_BLOCKING holds
+        # the restarts back.  An escaped exception would skip all three.
+        try:
+            hold = owner_hold(name) if moves else None
+            hold_error = None
+        except Exception as exc:                               # noqa: BLE001
+            hold, hold_error = None, f'{type(exc).__name__}: {exc}'
         for move in moves:
-            if hold is None and apply and enabled.get(name):
-                unit_moves.link_units(base / name, unit_moves.move_units(move),
-                                      unit_dir=_ALIGN_UNIT_DIR)
-                missing = [u for u in unit_moves.move_units(move)
-                           if not (_ALIGN_UNIT_DIR / u).exists()]
-                reason = (f'{", ".join(missing)} not installed yet' if missing else None)
-            elif hold is None and not apply and enabled.get(name) and not shipped(name, move):
-                reason = f'{move.to_unit} not shipped'
-            else:
-                reason = hold
-            if reason is not None:
-                step = unit_moves.hold_move(move, reason, unit_dir=_ALIGN_UNIT_DIR, run=run)
-            else:
-                step = unit_moves.apply_move(move, apply=apply,
-                                             owner_enabled=bool(enabled.get(name)),
-                                             unit_dir=_ALIGN_UNIT_DIR,
-                                             backup_dir=_ALIGN_UNIT_MOVE_BACKUPS,
-                                             run=run, now=now)
+            reason = None
+            try:
+                if hold_error is not None:
+                    raise RuntimeError(f'owner check raised {hold_error}')
+                if hold is None and apply and enabled.get(name):
+                    unit_moves.link_units(base / name, unit_moves.move_units(move),
+                                          unit_dir=_ALIGN_UNIT_DIR)
+                    missing = [u for u in unit_moves.move_units(move)
+                               if not (_ALIGN_UNIT_DIR / u).exists()]
+                    reason = (f'{", ".join(missing)} not installed yet' if missing else None)
+                elif hold is None and not apply and enabled.get(name) and not shipped(name, move):
+                    reason = f'{move.to_unit} not shipped'
+                else:
+                    reason = hold
+                if reason is not None:
+                    step = unit_moves.hold_move(move, reason, unit_dir=_ALIGN_UNIT_DIR, run=run)
+                else:
+                    step = unit_moves.apply_move(move, apply=apply,
+                                                 owner_enabled=bool(enabled.get(name)),
+                                                 unit_dir=_ALIGN_UNIT_DIR,
+                                                 backup_dir=_ALIGN_UNIT_MOVE_BACKUPS,
+                                                 run=run, now=now)
+            except Exception as exc:                           # noqa: BLE001
+                detail = (str(exc) if hold_error is not None
+                          else f'{type(exc).__name__}: {exc}')
+                step = align_apply.Step(unit_moves._label(move), 'failed',
+                                        f'{detail}; see systemctl status '
+                                        f'{", ".join(move.from_units)} {move.to_unit}')
             steps.append(step)
             if held_out is not None and step.outcome not in ('moved', 'unchanged',
                                                               'would move'):
