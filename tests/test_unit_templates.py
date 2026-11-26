@@ -27,7 +27,7 @@ ADMIN_VERBS = {
 # top-level verb with its own subverbs, beside `smd admin storage trim|...`.
 # A bare call is right only with one of the top-level verb's own subverbs.
 TOP_LEVEL_SUBVERBS = {
-    "storage": {"status", "share", "directive", "tick"},
+    "storage": {"status", "share", "directive", "tick", "expire"},
 }
 
 # Exec*=...  /usr/local/bin/smd <verb> ...   (optionally already `admin <verb>`)
