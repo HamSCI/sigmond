@@ -2352,6 +2352,53 @@ leaves it unmanaged.  `holdings` answers within 10 seconds.  `trim` and
 **Rollout.**  In v0.9 these verbs and fields are SHOULD.  One release
 later they become MUST.
 
+**Expiry (v0.10 draft).**  A `file` or `service` sink MAY carry
+`"expires": true`.  That tells sigmond the client answers `storage expire`
+for that target:
+
+```
+<client> storage expire --target T --days N [--max-seconds S] --json
+```
+
+`--max-seconds` defaults to 600.  Sigmond takes `--days` from the sink's
+`retention_days`, or from `storage.toml [retention]` when the sink names
+none.  The client prints one JSON object and exits 0:
+
+```json
+{"target": "timestd.L2_tick_phase", "days": 30, "deleted": 41200,
+ "unit": "rows", "complete": true, "refused": false, "reason": ""}
+```
+
+`unit` is `rows` or `files`.  The client deletes only its own data, and
+only data older than `N` days.  It stops at `--max-seconds`.  When it
+stops early it sets `complete` to `false`, and sigmond reads that as
+"call again".  A client with a SQLite database deletes in short batches
+that each commit, so its own writers never wait on the pass.
+
+Sigmond calls client verbs as root.  A client that runs as root MUST drop
+to the owner of the data before it opens a database, so that it never
+creates a root-owned `-wal` or `-shm` file that the client's writers
+cannot open.  The client kit's `drop_to_owner`, `prune_rows` and
+`incremental_vacuum` (`sigmond.storage.client_kit`) do this.
+
+**Compaction (v0.10 draft).**  A client with a live SQLite database MAY
+answer three verbs that let an operator shrink the file:
+
+```
+<client> storage compact --prepare --target T --json
+<client> storage compact --holders --target T --json
+<client> storage compact --swap    --target T --json
+```
+
+Each prints one JSON object with `refused` and `reason`.  `--prepare`
+writes a compact copy beside the database while every writer runs.
+`--holders` answers `{"holders": [{"pid": 123, "unit": "name.service"}]}`:
+each process that holds the database open, and its unit (`null` when it
+has none).  `--swap` runs with every holder stopped.  It catches the copy
+up with rows written since `--prepare`, checks the copy, and replaces the
+live file.  Sigmond's `smd storage compact` stops the holder units,
+calls `--swap`, and starts the units again.
+
 ### 18. Timing authority and the RTP-default fallback (v0.7)
 
 #### 18.1 Scope
@@ -2813,6 +2860,10 @@ Sigmond:
   answers `backup --to DIR`; `restore --check` stays optional.  SHOULD in
   v0.10, MUST one release later.  v0.9 clients pass unchanged: sigmond
   falls back to its built-in backup list for them.
+
+  The same release adds two optional verbs in §17.7: `storage expire`
+  (a sink MAY carry `"expires": true`) and the three `storage compact`
+  verbs.  Both start as MAY.
 
 ---
 

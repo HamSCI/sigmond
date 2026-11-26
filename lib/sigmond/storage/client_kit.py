@@ -10,6 +10,9 @@ the standard library and `sigmond.storage.model.CLASSES`.
 from __future__ import annotations
 
 import json
+import os
+import re
+import sqlite3
 import time
 from dataclasses import dataclass
 from typing import Callable, Optional, Sequence
@@ -88,10 +91,10 @@ def _emit(obj: dict) -> int:
 def add_storage_verbs(subparsers, *, list_items: Callable[[], list],
                       delete: Callable[[Item], None], floor_bytes: int,
                       final_policy: str,
-                      apply_policy: Optional[Callable[[str, int], dict]] = None
+                      apply_policy: Optional[Callable[[str, int], dict]] = None,
+                      expire: Optional[Callable[[str, int, int], dict]] = None
                       ) -> None:
-    storage = subparsers.add_parser("storage", help="storage capacity verbs (contract 17.7)")
-    verbs = storage.add_subparsers(dest="storage_cmd")
+    verbs = _storage_verbs(subparsers)
 
     def do_holdings(args) -> int:
         items = list_items()
@@ -136,3 +139,143 @@ def add_storage_verbs(subparsers, *, list_items: Callable[[], list],
     p.add_argument("--policy", default=None)
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=do_final)
+    if expire is not None:
+        add_expire_verb(subparsers, expire=expire)
+
+
+def _storage_verbs(subparsers):
+    """The `storage` verb action, created on first use and reused after."""
+    storage = subparsers.choices.get("storage") if subparsers.choices else None
+    if storage is None:
+        storage = subparsers.add_parser("storage", help="storage capacity verbs (contract 17.7)")
+        storage._sigmond_verbs = storage.add_subparsers(dest="storage_cmd")
+    return storage._sigmond_verbs
+
+
+def add_expire_verb(subparsers, *, expire: Callable[[str, int, int], dict]) -> None:
+    """Add `storage expire --target T --days N [--max-seconds S] --json`."""
+    verbs = _storage_verbs(subparsers)
+
+    def do_expire(args) -> int:
+        return _emit(expire(args.target, args.days, args.max_seconds))
+
+    p = verbs.add_parser("expire")
+    p.add_argument("--target", required=True)
+    p.add_argument("--days", type=int, required=True)
+    p.add_argument("--max-seconds", type=int, default=600)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=do_expire)
+
+
+# ---- row pruning ----------------------------------------------------------
+
+_IDENT = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+@dataclass(frozen=True)
+class PruneResult:
+    deleted: int
+    complete: bool
+    reason: str
+
+
+def cutoff_iso(now: float, days: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now - days * 86400))
+
+
+def drop_to_owner(path: str) -> None:
+    """When root, become the owner of `path` so no root-owned -wal/-shm appears."""
+    if os.geteuid() != 0:
+        return
+    st = os.stat(path)
+    os.setgroups([])
+    os.setgid(st.st_gid)
+    os.setuid(st.st_uid)
+
+
+def _ident(name: str) -> str:
+    if not _IDENT.match(name):
+        raise ValueError(f"unsafe SQL identifier: {name!r}")
+    return f'"{name}"'
+
+
+def _is_locked(exc: sqlite3.OperationalError) -> bool:
+    m = str(exc).lower()
+    return "locked" in m or "busy" in m
+
+
+def prune_rows(db_path: str, table: str, ts_column: str, cutoff: str, *,
+               deadline: float, batch_rows: int = 2000, pause_s: float = 0.05,
+               busy_s: float = 0.25, clock=time.monotonic,
+               sleep=time.sleep) -> PruneResult:
+    """Delete rows with ts < cutoff in short batches that each commit on their own.
+
+    The cut comes from a binary search over rowid, so rows written out of time
+    order are safe: a new row at a low rowid survives (the DELETE keeps the
+    timestamp predicate), and an old row past the cut waits for a later pass.
+    """
+    t, c = _ident(table), _ident(ts_column)
+    drop_to_owner(db_path)
+    con = sqlite3.connect(db_path, timeout=busy_s, isolation_level=None)
+    try:
+        lo, hi = con.execute(f"SELECT min(rowid), max(rowid) FROM {t}").fetchone()
+        if lo is None:
+            return PruneResult(0, True, "")
+        nxt = f"SELECT {c} FROM {t} WHERE rowid >= ? AND {c} IS NOT NULL ORDER BY rowid LIMIT 1"
+        # smallest r in [lo, hi+1] whose first non-NULL ts at rowid >= r is >= cutoff
+        a, b = lo, hi + 1
+        while a < b:
+            mid = (a + b) // 2
+            row = con.execute(nxt, (mid,)).fetchone()
+            if row is None or row[0] >= cutoff:
+                b = mid
+            else:
+                a = mid + 1
+        boundary = a
+        deleted, start, batches = 0, lo, 0
+        while start < boundary:
+            if clock() >= deadline:
+                return PruneResult(deleted, False, "deadline")
+            end = min(start + batch_rows, boundary)
+            for attempt in range(6):
+                try:
+                    cur = con.execute(
+                        f"DELETE FROM {t} WHERE rowid >= ? AND rowid < ? AND {c} < ?",
+                        (start, end, cutoff))
+                    deleted += cur.rowcount
+                    break
+                except sqlite3.OperationalError as exc:
+                    if not _is_locked(exc):
+                        raise
+                    sleep(pause_s)
+                    if attempt == 5:
+                        return PruneResult(deleted, False, "database locked")
+            start = end
+            batches += 1
+            sleep(pause_s)
+            if batches % 50 == 0:
+                try:
+                    con.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchall()
+                except sqlite3.OperationalError:
+                    pass
+        return PruneResult(deleted, True, "")
+    finally:
+        con.close()
+
+
+def incremental_vacuum(db_path: str, *, deadline: float, pages_per_step: int = 2048,
+                       clock=time.monotonic) -> int:
+    """Return freed pages to the filesystem; 0 unless the file is in incremental mode."""
+    drop_to_owner(db_path)
+    con = sqlite3.connect(db_path, timeout=0.25, isolation_level=None)
+    try:
+        if con.execute("PRAGMA auto_vacuum").fetchone()[0] != 2:
+            return 0
+        before = con.execute("PRAGMA freelist_count").fetchone()[0]
+        while clock() < deadline:
+            if con.execute("PRAGMA freelist_count").fetchone()[0] == 0:
+                break
+            con.execute(f"PRAGMA incremental_vacuum({int(pages_per_step)})").fetchall()
+        return before - con.execute("PRAGMA freelist_count").fetchone()[0]
+    finally:
+        con.close()
