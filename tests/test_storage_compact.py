@@ -271,6 +271,69 @@ def test_marker_is_removed_after_a_refusal(tmp_path):
     assert not rig.r.marker_path.exists()
 
 
+def test_a_second_signal_does_not_cut_cleanup_short(tmp_path):
+    # SIGHUP, then SIGTERM inside the start loop: the second must not cut
+    # cleanup short, and a cleanup that was cut short must keep the marker.
+    import os, signal
+    rig = Rig()
+    rig.r.marker_path = tmp_path / "m.json"
+    def swap(b, t):
+        os.kill(os.getpid(), signal.SIGHUP)
+    rig.r.swap = swap
+    orig = rig._systemctl
+    def sysctl(verb, unit):
+        if verb == "start" and unit == REC:
+            os.kill(os.getpid(), signal.SIGTERM)       # ignored: one exit only
+        return orig(verb, unit)
+    rig.r.systemctl = sysctl
+    with pytest.raises(SystemExit):
+        c.compact_client("hf-timestd", "timestd", apply=True, r=rig.r)
+    assert ("start", MET) in _sysctl(rig)               # cleanup ran whole
+    assert not rig.r.marker_path.exists()
+
+
+def test_a_cleanup_cut_short_keeps_the_marker(tmp_path):
+    # Mutation check: clear the marker whatever the cleanup did.
+    rig = Rig()
+    rig.r.marker_path = tmp_path / "m.json"
+    orig = rig._systemctl
+    def sysctl(verb, unit):
+        if verb == "start" and unit == REC:
+            raise KeyboardInterrupt
+        return orig(verb, unit)
+    rig.r.systemctl = sysctl
+    with pytest.raises(KeyboardInterrupt):
+        c.compact_client("hf-timestd", "timestd", apply=True, r=rig.r)
+    d = json.loads(rig.r.marker_path.read_text())
+    assert d["units"] == [REC, MET] and d["timer_was_active"] is True
+
+
+def test_a_second_run_refuses_over_a_dead_runs_marker(tmp_path):
+    # Mutation check: overwrite the marker.
+    import subprocess as sp
+    p = sp.Popen(["true"]); p.wait()
+    rig = Rig()
+    rig.r.marker_path = tmp_path / "m.json"
+    text = json.dumps({"pid": p.pid, "units": [REC, MET], "timer": c.EXPIRE_TIMER,
+                       "timer_was_active": True})
+    rig.r.marker_path.write_text(text)
+    assert c.compact_client("hf-timestd", "timestd", apply=True, r=rig.r) == 1
+    assert rig.r.marker_path.read_text() == text          # untouched
+    assert _sysctl(rig) == [] and "earlier compaction died" in rig.says()
+
+
+def test_a_second_run_refuses_while_another_runs(tmp_path):
+    import os
+    rig = Rig()
+    rig.r.marker_path = tmp_path / "m.json"
+    from sigmond import recorder_watchdog as w
+    rig.r.marker_path.write_text(json.dumps({"pid": os.getpid(),
+                                             "pid_start": w.proc_start(os.getpid())}))
+    assert c.compact_client("hf-timestd", "timestd", apply=True, r=rig.r) == 1
+    assert "another compaction is running" in rig.says()
+    assert rig.r.marker_path.exists() and _sysctl(rig) == []
+
+
 # --- the real expire flock -------------------------------------------------
 
 def test_the_real_expire_lock_waits_for_a_running_pass(tmp_path):

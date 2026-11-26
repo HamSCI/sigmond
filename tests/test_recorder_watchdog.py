@@ -862,6 +862,49 @@ def test_no_marker_does_nothing(tmp_path):
     assert rw.restore_interrupted_compaction(tmp_path / "none", _rec_run([]), 1e9) == []
 
 
+@contextlib.contextmanager
+def _nolock(reason="", wait_s=0):
+    yield
+
+
+def test_restore_does_nothing_while_the_lifecycle_lock_is_held(tmp_path):
+    # Mutation check: restore without taking the lock.
+    m = _marker(tmp_path, _dead_pid())
+    def busy(reason, wait_s=0):
+        raise RuntimeError("lifecycle lock still held")
+    calls = []
+    assert rw.restore_interrupted_compaction(m, _rec_run(calls), 1e9, lock=busy,
+                                             say=lambda s: None) == []
+    assert calls == [] and m.exists()
+
+
+def test_restore_rereads_the_marker_under_the_lock(tmp_path):
+    # A new compaction claims the marker while the watchdog waits for the lock.
+    m = _marker(tmp_path, _dead_pid())
+    @contextlib.contextmanager
+    def lock(reason, wait_s=0):
+        _marker(tmp_path, os.getpid())
+        yield
+    calls = []
+    rw.restore_interrupted_compaction(m, _rec_run(calls), 1e9, lock=lock,
+                                      say=lambda s: None)
+    assert calls == [] and m.exists()
+
+
+def test_a_reused_pid_with_another_start_time_is_dead(tmp_path):
+    # Mutation check: compare the pid only.
+    m = tmp_path / "compact.json"
+    d = {"pid": os.getpid(), "pid_start": "1", "units": ["a.service"],
+         "timer_was_active": False}
+    assert not rw.marker_pid_alive(d)
+    d["pid_start"] = rw.proc_start(os.getpid())
+    assert rw.marker_pid_alive(d)
+    m.write_text(json.dumps({**d, "pid_start": "1"}))
+    calls = []
+    rw.restore_interrupted_compaction(m, _rec_run(calls), 1e9, say=lambda s: None)
+    assert [c[2] for c in calls] == ["a.service"]
+
+
 def test_tick_restores_and_records_in_the_ledger(tmp_path):
     m = _marker(tmp_path, _dead_pid())
     calls = []
@@ -874,7 +917,7 @@ def test_tick_restores_and_records_in_the_ledger(tmp_path):
                      state=tmp_path / "state.json", compact_marker=m)
     rw.tick(paths=paths, run=run, wall=lambda: 1e9, mono=lambda: 100_000.0,
             radiod_unit=lambda: None, t6=lambda st, now: None,
-            ledger_stopped=lambda: False, lock=contextlib.nullcontext, say=lambda s: None)
+            ledger_stopped=lambda: False, lock=_nolock, say=lambda s: None)
     assert not m.exists()
     assert ["systemctl", "start", "a.service"] in calls
     rows = [json.loads(l) for l in paths.ledger.read_text().splitlines()]

@@ -779,20 +779,64 @@ def _pid_alive(pid) -> bool:
     return True
 
 
+def proc_start(pid) -> Optional[str]:
+    """Field 22 of /proc/<pid>/stat (start time in ticks), or None."""
+    try:
+        raw = Path(f"/proc/{int(pid)}/stat").read_text()
+        return raw[raw.rindex(")") + 2:].split()[19]
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def marker_pid_alive(d) -> bool:
+    """The marker's process still runs: its pid exists and, when the marker
+    records a start time, that start time still matches (a reused pid differs)."""
+    if not isinstance(d, dict) or not _pid_alive(d.get("pid")):
+        return False
+    want = d.get("pid_start")
+    return want is None or proc_start(d["pid"]) == want
+
+
+def _read_marker(marker: Path):
+    """(found, dict | None)"""
+    try:
+        return True, json.loads(Path(marker).read_text())
+    except FileNotFoundError:
+        return False, None
+    except (OSError, ValueError):
+        return True, None
+
+
 def restore_interrupted_compaction(marker: Path, run: Callable, now: float, *,
-                                   dry_run: bool = False,
+                                   dry_run: bool = False, lock: Optional[Callable] = None,
                                    say: Callable[[str], None] = print) -> list:
     """If a compaction marker outlives its pid, start the units it stopped (in
     order) and its expire timer, remove the marker, and return ledger rows.
     Undoes a tool's own stop, so no cooldown or cap applies."""
-    try:
-        d = json.loads(Path(marker).read_text())
-    except FileNotFoundError:
-        return []
-    except (OSError, ValueError):
-        d = None
-    if isinstance(d, dict) and _pid_alive(d.get("pid")):
-        return []                # compaction is running; leave its units alone
+    found, d = _read_marker(marker)
+    if not found or marker_pid_alive(d):
+        return []                # none, or compaction is running: leave its units alone
+    if lock is not None and not dry_run:
+        # Under the lifecycle lock, re-read: a new compaction may have claimed
+        # the marker meanwhile.
+        try:
+            held = lock("recorder-watchdog: restore after an interrupted compaction",
+                        wait_s=LOCK_WAIT_S)
+            held.__enter__()
+        except (SystemExit, Exception) as exc:            # noqa: BLE001
+            say(f"  compaction marker kept: lifecycle lock not taken: {exc}")
+            return []
+        try:
+            found, d = _read_marker(marker)
+            if not found or marker_pid_alive(d):
+                return []
+            return _restore(marker, d, run, now, dry_run, say)
+        finally:
+            held.__exit__(None, None, None)
+    return _restore(marker, d, run, now, dry_run, say)
+
+
+def _restore(marker, d, run, now, dry_run, say) -> list:
     if not isinstance(d, dict):
         say(f"WARNING: {marker} is unreadable; removing it, restoring nothing")
         if not dry_run:
@@ -841,7 +885,7 @@ def tick(*, paths: Paths = Paths(), run: Callable = subprocess.run,
     now = wall()
     st = load_state(paths.state)
     restore_rows = restore_interrupted_compaction(paths.compact_marker, run, now,
-                                                  dry_run=dry_run, say=say)
+                                                  dry_run=dry_run, lock=lock, say=say)
     dropped: list = []
     reqs = take_requests(paths.request_dir, now, dropped=dropped, consume=not dry_run)
     rows = restore_rows + [{"utc": _iso(now), "agent": AGENT, "action": "dropped",

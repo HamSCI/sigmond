@@ -230,7 +230,8 @@ def _signals_raise():
     saved = {}
 
     def handler(signum, frame):
-        signal.signal(signum, signal.SIG_IGN)
+        for other in (signal.SIGTERM, signal.SIGHUP):    # one exit; cleanup runs whole
+            signal.signal(other, signal.SIG_IGN)
         raise SystemExit(128 + signum)
     try:
         for sig in (signal.SIGTERM, signal.SIGHUP):
@@ -244,15 +245,39 @@ def _signals_raise():
             signal.signal(sig, old)
 
 
+def _marker_text(timer_was_active, units, started) -> str:
+    from ..recorder_watchdog import proc_start
+    return json.dumps({"pid": os.getpid(), "pid_start": proc_start(os.getpid()),
+                       "started": started, "units": list(units), "timer": EXPIRE_TIMER,
+                       "timer_was_active": bool(timer_was_active)})
+
+
+def _claim_marker(r, timer_was_active, started) -> None:
+    """Create the marker exclusively; refuse while another one stands."""
+    if r.marker_path is None:
+        return
+    from ..recorder_watchdog import _read_marker, marker_pid_alive
+    path = Path(r.marker_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        _, d = _read_marker(path)
+        if marker_pid_alive(d):
+            raise CompactError("another compaction is running") from None
+        raise CompactError(
+            "an earlier compaction died and left its units stopped; the recorder "
+            "watchdog restores them on its next tick; run this again after that") from None
+    with os.fdopen(fd, "w") as fh:
+        fh.write(_marker_text(timer_was_active, [], started))
+
+
 def _write_marker(r, timer_was_active, units, started) -> None:
     if r.marker_path is None:
         return
     path = Path(r.marker_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps({"pid": os.getpid(), "started": started,
-                               "units": list(units), "timer": EXPIRE_TIMER,
-                               "timer_was_active": bool(timer_was_active)}))
+    tmp.write_text(_marker_text(timer_was_active, units, started))
     os.replace(tmp, path)
 
 
@@ -273,15 +298,22 @@ def _apply_guarded(client, target, binary, r) -> int:
     timer_was_active = r.is_active(EXPIRE_TIMER)
     started = time.time()
     # The marker comes before the first stop; the recorder watchdog restores
-    # the listed units if this process dies without cleaning up.
-    _write_marker(r, timer_was_active, [], started)
+    # the listed units if this process dies without cleaning up.  A standing
+    # marker (another run, or a dead one not yet restored) refuses this run.
+    try:
+        _claim_marker(r, timer_was_active, started)
+    except CompactError as exc:
+        _log(r, client, target, f"refused: {exc}", "<4>")
+        r.say(f"refused: {exc}")
+        return 1
+    state = {"incomplete": False}
     if timer_was_active:
         r.systemctl("stop", EXPIRE_TIMER)
         _log(r, client, target, f"stopped {EXPIRE_TIMER}")
     mark = lambda units: _write_marker(r, timer_was_active, units, started)
     try:
         with r.expire_lock():
-            return _holders_and_swap(client, target, binary, r, mark)
+            return _holders_and_swap(client, target, binary, r, mark, state)
     except CompactError as exc:
         _log(r, client, target, f"refused: {exc}", "<4>")
         r.say(f"refused: {exc}")
@@ -291,10 +323,15 @@ def _apply_guarded(client, target, binary, r) -> int:
             rc = r.systemctl("start", EXPIRE_TIMER)
             _log(r, client, target, f"started {EXPIRE_TIMER} (exit {rc})",
                  "<6>" if rc == 0 else "<3>")
-        _clear_marker(r)
+        # Only a cleanup that attempted every start removes the marker; if it
+        # was cut short, the watchdog restores the listed units.
+        if not state["incomplete"]:
+            _clear_marker(r)
 
 
-def _holders_and_swap(client, target, binary, r, mark=lambda units: None) -> int:
+def _holders_and_swap(client, target, binary, r, mark=lambda units: None,
+                      state=None) -> int:
+    state = state if state is not None else {}
     ans = r.holders(binary, target)
     _log(r, client, target, f"holders: ok={ans.ok} refused={ans.refused} {ans.reason}")
     if not ans.ok or ans.refused:
@@ -310,6 +347,7 @@ def _holders_and_swap(client, target, binary, r, mark=lambda units: None) -> int
     mark(order)
     with r.lifecycle_lock(f"storage compact {client} {target}"):
         stopped = []
+        state["incomplete"] = True      # until every stopped unit's start was tried
         try:
             for unit in reversed(order):
                 stopped.append(unit)        # a failed stop may still have half-stopped it
@@ -331,6 +369,7 @@ def _holders_and_swap(client, target, binary, r, mark=lambda units: None) -> int
                      "<6>" if rc == 0 else "<3>")
                 if rc != 0:
                     failed.append(unit)
+            state["incomplete"] = False
             if failed:
                 r.say("could not start: " + ", ".join(failed))
     return 0 if swap_ok and not failed else 1
