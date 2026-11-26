@@ -9910,6 +9910,22 @@ def _align_unit_moves(apply: bool, *, base='/opt/git/sigmond', plan=None,
             return '--no-restart; the move waits for an align without --no-restart'
         return None
 
+    def shipped(name, move) -> bool:
+        """The dry run's "can --apply install the new unit": it sits in the
+        unit directory already, or the owner ships systemd/<to> (at the
+        plan's target commit when align moves the checkout)."""
+        if (_ALIGN_UNIT_DIR / move.to_unit).exists():
+            return True
+        if name in targets:
+            try:
+                cp = run(['git', '-C', str(base / name), 'cat-file', '-e',
+                          f'{targets[name]}:systemd/{move.to_unit}'],
+                         capture_output=True, text=True, timeout=60)
+            except (OSError, subprocess.SubprocessError):
+                return False
+            return cp.returncode == 0
+        return (base / name / 'systemd' / move.to_unit).is_file()
+
     for name in sorted(set(enabled) | set(checkouts)):
         try:
             if name in targets:
@@ -9944,6 +9960,8 @@ def _align_unit_moves(apply: bool, *, base='/opt/git/sigmond', plan=None,
                 missing = [u for u in unit_moves.move_units(move)
                            if not (_ALIGN_UNIT_DIR / u).exists()]
                 reason = (f'{", ".join(missing)} not installed yet' if missing else None)
+            elif hold is None and not apply and enabled.get(name) and not shipped(name, move):
+                reason = f'{move.to_unit} not shipped'
             else:
                 reason = hold
             if reason is not None:
@@ -9964,6 +9982,9 @@ def _align_unit_moves(apply: bool, *, base='/opt/git/sigmond', plan=None,
                 say(f'  would move {", ".join(move.from_units)} -> {move.to_unit} '
                     f'({move.component})')
                 say(f'      {step.detail}')
+            elif reason == f'{move.to_unit} not shipped' and step.outcome == 'ran':
+                say(f'  would hold: {move.to_unit} not shipped ({move.component}; '
+                    f'{step.detail.split("; ", 1)[-1]})')
             elif step.outcome != 'unchanged':
                 say(f'  {step.component}: {step.outcome} - {step.detail}')
     return steps

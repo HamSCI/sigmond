@@ -14,9 +14,8 @@ from sigmond import align, align_apply
 import tests.test_align_cli as tac
 from tests.test_align_cli import smd
 
-_NO_MOVE = ('[systemd]\nunits = ["hamsci-physics-fusion.service", "hamsci-physics-vtec.service"]\n'
-            '[[install.steps]]\nkind = "link"\nsrc = "systemd/hamsci-physics-vtec.service"\n'
-            'dst = "/etc/systemd/system/hamsci-physics-vtec.service"\n')
+# hamsci-physics's shape: no unit link steps; the unit ships in systemd/.
+_NO_MOVE = '[systemd]\nunits = ["hamsci-physics-fusion.service", "hamsci-physics-vtec.service"]\n'
 _MOVE = (_NO_MOVE + '[[systemd.moves]]\nfrom = ["timestd-vtec.service"]\n'
          'to = "hamsci-physics-vtec.service"\n')
 
@@ -366,3 +365,24 @@ def test_bringup_gets_the_moves_left_undone():
         mock.patch.object(smd, "_align_bringup",
                           lambda **kw: got.append(kw.get("held_moves")) or [])])
     assert got == [{"timestd-iri-update.timer": "hamsci-physics-iri-update.timer"}]
+
+
+# --- Fix round 2 -------------------------------------------------------------
+
+def test_dry_run_holds_a_move_whose_new_unit_is_not_shipped(tmp_path):
+    old, new = _physics_repo(tmp_path)
+    repo = tmp_path / "hamsci-physics"
+    _git(repo, "checkout", "-q", new)
+    _git(repo, "rm", "-q", "systemd/hamsci-physics-vtec.service")
+    _git(repo, "commit", "-q", "-m", "unshipped")
+    unshipped = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", old)
+    held = {}
+    steps, lines, calls = _moves(False, tmp_path, held_out=held,
+                                 plan=[align.Item("hamsci-physics", "move", old, unshipped)])
+    assert ("  would hold: hamsci-physics-vtec.service not shipped "
+            "(hamsci-physics; timestd-vtec.service keeps running)") in lines
+    assert not [ln for ln in lines if "would move" in ln]
+    assert held == {"hamsci-physics-vtec.service": "timestd-vtec.service"}
+    # The working tree ships it; the target commit does not: the target decides.
+    assert (repo / "systemd" / "hamsci-physics-vtec.service").is_file()

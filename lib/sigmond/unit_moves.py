@@ -314,40 +314,56 @@ def move_units(move: UnitMove) -> tuple:
     return (move.to_unit,)
 
 
-def link_units(repo: Path, units: Iterable[str], *, unit_dir: Path) -> list:
-    """Link ``units`` the way the component's deploy.toml links them.
+def _link(entry: Path, src: Path) -> bool:
+    """Point ``entry`` at ``src``; leave a regular file alone.  True when
+    ``entry`` now resolves to ``src``."""
+    if entry.is_symlink() and entry.resolve() == src:
+        return True
+    if entry.exists() and not entry.is_symlink():
+        return False
+    if entry.is_symlink():
+        entry.unlink()
+    entry.symlink_to(src)
+    return True
 
-    This is the unit part of ``installer.apply_deploy_toml_links``: a
-    ``kind = "link"`` step whose ``dst`` sits in /etc/systemd/system and
-    names one of ``units`` becomes ``<unit_dir>/<unit>`` -> ``<repo>/<src>``.
-    It replaces a missing entry or a symlink that points elsewhere, and
-    leaves a regular file alone.  Returns the units it linked; an unreadable
-    deploy.toml links nothing."""
+
+def link_units(repo: Path, units: Iterable[str], *, unit_dir: Path) -> list:
+    """Link ``units`` the way ``installer.apply_deploy_toml_links`` links them.
+
+    First the explicit steps: a ``kind = "link"`` step whose ``dst`` sits in
+    /etc/systemd/system and names one of ``units`` becomes
+    ``<unit_dir>/<unit>`` -> ``<repo>/<src>``.  Then, like the installer, a
+    unit no step names links from ``<repo>/systemd/<unit>`` when that file
+    exists (hamsci-physics declares no unit link steps).  It replaces a
+    missing entry or a symlink that points elsewhere, and leaves a regular
+    file alone.  Returns the units now linked into the repo."""
+    repo = Path(repo)
     try:
-        with open(Path(repo) / "deploy.toml", "rb") as fh:
+        with open(repo / "deploy.toml", "rb") as fh:
             deploy = tomllib.load(fh)
     except (OSError, tomllib.TOMLDecodeError):
-        return []
+        deploy = {}
     wanted = set(units)
     linked = []
+    stepped = set()
     for step in (deploy.get("install") or {}).get("steps") or ():
         if not isinstance(step, dict) or step.get("kind") != "link":
             continue
         dst = Path(str(step.get("dst") or ""))
         if dst.parent != SYSTEM_UNIT_DIR or dst.name not in wanted:
             continue
-        src = (Path(repo) / str(step.get("src") or "")).resolve()
+        src = (repo / str(step.get("src") or "")).resolve()
         if not step.get("src") or not src.is_file():
             continue
-        entry = Path(unit_dir) / dst.name
-        if entry.is_symlink() and entry.resolve() == src:
+        stepped.add(dst.name)
+        if _link(Path(unit_dir) / dst.name, src):
+            linked.append(dst.name)
+    for unit in sorted(wanted - stepped):
+        shipped = repo / "systemd" / unit
+        if not shipped.is_file():
             continue
-        if entry.exists() and not entry.is_symlink():
-            continue
-        if entry.is_symlink():
-            entry.unlink()
-        entry.symlink_to(src)
-        linked.append(dst.name)
+        if _link(Path(unit_dir) / unit, shipped.resolve()):
+            linked.append(unit)
     return linked
 
 

@@ -726,9 +726,10 @@ migrate = ["/opt/git/sigmond/hamsci-physics/venv/bin/hamsci-physics", "vtec", "a
 `smd align --apply` runs each move after the checkouts move and before
 bring-up.  It follows this order:
 
-1. It links the new unit (and, for a timer, its service) from the
-   owner's `[[install.steps]]` link entries.  If the unit file still does
-   not exist, it holds the move and stops nothing.
+1. It links the new unit (and, for a timer, its service) the way an
+   install does: from an `[[install.steps]]` link entry, else from the
+   owner's `systemd/<unit>` file.  If the unit file still does not exist,
+   it holds the move and stops nothing.
 2. It runs `migrate`.  A non-zero exit stops the move, and the old unit
    keeps running.
 3. It stops and disables each old unit, and removes any link the old
@@ -740,6 +741,9 @@ A move whose old units neither run nor stand enabled changes nothing.
 The dry run lists each move as `would move <old> -> <new> (<owner>)`.
 It reads a component that align would move at its target commit.  When
 the checkout lacks that commit, the dry run says so and fetches nothing.
+When the owner does not ship the new unit (no `systemd/<unit>` at that
+commit, and none installed), the dry run says `would hold: <unit> not
+shipped`.
 
 Align holds a move, and leaves the old unit running, in these cases:
 

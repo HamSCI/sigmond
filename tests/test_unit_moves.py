@@ -381,3 +381,33 @@ def test_link_units_leaves_a_regular_file_alone(tmp_path):
     move = um.UnitMove("c", ("o.timer",), "n.timer")
     assert um.link_units(repo, um.move_units(move), unit_dir=unit_dir) == ["n.timer"]
     assert (unit_dir / "n.service").read_text() == "operator's"
+
+
+def test_link_units_links_from_the_systemd_dir_without_steps(tmp_path):
+    # hamsci-physics's shape: no unit link steps, the unit in systemd/.
+    repo = tmp_path / "c"; (repo / "systemd").mkdir(parents=True)
+    (repo / "systemd" / "hamsci-physics-vtec.service").write_text("x")
+    (repo / "deploy.toml").write_text('[systemd]\nunits = ["hamsci-physics-vtec.service"]\n')
+    unit_dir = tmp_path / "u"; unit_dir.mkdir()
+    assert um.link_units(repo, um.move_units(MOVE), unit_dir=unit_dir) == [
+        "hamsci-physics-vtec.service"]
+    assert (unit_dir / "hamsci-physics-vtec.service").resolve() == \
+        (repo / "systemd" / "hamsci-physics-vtec.service").resolve()
+
+
+def test_link_units_links_a_timer_and_its_service(tmp_path):
+    repo = tmp_path / "hf-timestd"; (repo / "systemd").mkdir(parents=True)
+    for u in ("timestd-iri-update.timer", "timestd-iri-update.service"):
+        (repo / "systemd" / u).write_text("x")
+    unit_dir = tmp_path / "u"; unit_dir.mkdir()
+    move = um.UnitMove("hf-timestd", ("hamsci-physics-iri-update.timer",),
+                       "timestd-iri-update.timer")
+    assert sorted(um.link_units(repo, um.move_units(move), unit_dir=unit_dir)) == [
+        "timestd-iri-update.service", "timestd-iri-update.timer"]
+
+
+def test_link_units_links_nothing_absent_from_both(tmp_path):
+    repo = tmp_path / "c"; (repo / "systemd").mkdir(parents=True)
+    unit_dir = tmp_path / "u"; unit_dir.mkdir()
+    assert um.link_units(repo, ("n.service",), unit_dir=unit_dir) == []
+    assert list(unit_dir.iterdir()) == []
