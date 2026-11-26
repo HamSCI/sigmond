@@ -2428,7 +2428,9 @@ none.  The client prints one JSON object and exits 0:
 `unit` is `rows` or `files`.  The client deletes only its own data, and
 only data older than `N` days.  It stops at `--max-seconds`.  When it
 stops early it sets `complete` to `false`, and sigmond reads that as
-"call again".  A client with a SQLite database deletes in short batches
+"call again".  A table the database lacks holds nothing to expire: the
+client answers `complete: true`, 0 deleted, reason `no such table`, and
+sigmond logs that once at INFO.  A client with a SQLite database deletes in short batches
 that each commit, so its own writers never wait on the pass.
 
 Sigmond calls client verbs as root.  A client that runs as root MUST drop
@@ -2452,8 +2454,12 @@ writes a compact copy beside the database while every writer runs.
 each process that holds the database open, and its unit (`null` when it
 has none).  `--swap` runs with every holder stopped.  It catches the copy
 up with rows written since `--prepare`, checks the copy, and replaces the
-live file.  Sigmond's `smd storage compact` stops the holder units,
-calls `--swap`, and starts the units again.
+live file.  Just before the replace it lists the holders again, and
+refuses if any came back.  Sigmond's `smd storage compact` stops the
+client's active timers and the holder units, calls `--swap`, and starts
+the units and timers again.  While it works it keeps a marker,
+`/run/sigmond/compact-in-progress.json`.  A client's own watchdog MUST
+restart nothing while that file exists.
 
 ### 18. Timing authority and the RTP-default fallback (v0.7)
 

@@ -31,6 +31,26 @@ what has run on real hardware.  A release that no station has yet installed says
   (`hamsci-physics-vtec`, `timestd-ionex-download`, `timestd-iri-update`) stay off
   radiod's cores.
 
+### Rolling back to v3.95
+
+An align back to v3.95 works, but it leaves two v3.96 timers enabled, and both then
+fail.  `sigmond-recorder-watchdog.timer` runs a helper that v3.95's checkout lacks.
+`sigmond-storage-expire.timer` runs `smd storage expire`, a verb v3.95's smd lacks.
+Neither restarts or deletes anything.  After the align, switch both off on the station:
+
+```
+systemctl disable --now sigmond-recorder-watchdog.timer sigmond-storage-expire.timer
+```
+
+- v3.96 retired `timestd-prune` and `sigmond-t6-stuck-watchdog`.  The rollback does not
+  undo that by itself.  `sigmond-t6-stuck-watchdog.timer` comes back only where v3.95's
+  install.sh runs again and enables it.  `timestd-prune.timer` stays off until an
+  operator enables it (`systemctl enable --now timestd-prune.timer`).  Under v3.95
+  nothing else trims old rows from `timestd.db`, so enable it.
+- The rollback loses one partial raw chunk per channel.  v3.95's recorder writes the
+  open chunk to `/dev/shm` again.  About 21 minutes after it starts, its mover moves
+  that chunk onto the disk, where it replaces the partial chunk v3.96 wrote.
+
 ---
 
 ## sigmond v3.95 — blessed 2026-11-25

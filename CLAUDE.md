@@ -337,24 +337,33 @@ ClickHouse install, use `smd admin storage migrate-to-sqlite` to clean it up.
     `docs/superpowers/specs/2026-11-04-storage-capacity-design.md`.
     Two verbs delete. `smd storage expire` runs hourly
     (`sigmond-storage-expire.timer`) and asks each client to delete its own
-    rows by age; sigmond deletes nothing itself. hf-timestd keeps science
+    rows by age; sigmond deletes no client rows or files itself. hf-timestd keeps science
     tables 30 days, timing tables 90 days, `authority_history` 30 days and six
     retired-product tables 30 days. hamsci-physics keeps `L3_dtec_timeseries`,
     `L3_dtec_diff` and `L3_gnss_vtec` 30 days and its other L3 tables 365 days.
     `smd storage compact <client> <target>` returns free pages to the disk.
-    An operator runs it; v3.96 enables it on AC0G-B4 only. Without `--apply`
-    it runs read-only. With `--apply` it stops the processes that hold the
-    database, swaps in a compact copy and starts them again. It writes a
-    marker while it works; if the run dies, `sigmond-recorder-watchdog`
-    restores the stopped units from that marker. A client's own emergency net
-    (hf-timestd's resource guardian) acts only at 98 % disk use under the
-    ledger and 95 % on an unmanaged station.
+    An operator runs it; v3.96 runs it on AC0G-B4 only. Without `--apply`
+    it runs read-only. With `--apply` it stops the client's active timers
+    (hf-timestd's pipeline watchdog would otherwise restart a stopped writer
+    mid-swap), stops the processes that hold the database, swaps in a compact
+    copy, and starts the processes and timers again. It writes a marker,
+    `/run/sigmond/compact-in-progress.json`, while it works. hf-timestd's
+    pipeline and HPPS watchdogs check nothing while the marker stands. If the
+    run dies, `sigmond-recorder-watchdog` restores the stopped units and
+    timers from that marker. A client's own emergency net (hf-timestd's
+    resource guardian) acts only at 98 % disk use under the ledger and 95 % on
+    an unmanaged station. It pauses writes first, and deletes files only
+    after a 600 s grace.
 
 ### Who restarts the recorder
 
 Two agents restart `timestd-core-recorder`: systemd, and
 `sigmond-recorder-watchdog` (`lib/sigmond/recorder_watchdog.py`, run by
-`sigmond-recorder-watchdog.timer` every minute). No other agent restarts it.
+`sigmond-recorder-watchdog.timer` every minute). No other agent restarts it
+in answer to a fault. Deploy and config paths still restart it through their
+own code, outside the watchdog's ledger: `smd align`, `sigmond-site-timing`
+when it arms the timing tiers or T6, and hf-timestd's
+`install.sh --restart-all` and `deploy.sh`.
 
 Reporters ask. hf-timestd's pipeline watchdog, hf-timestd's HPPS watchdog,
 `sigmond-sdr-recover` and the radiod-consumer hook in `smd` each write one
@@ -362,17 +371,22 @@ request file in `/run/sigmond/recorder-restart`, named for the reporter. The
 watchdog reads the files each tick and decides. It records an HPPS request and
 does not act on it.
 
-The watchdog keeps three limits for every cause. A fresh recorder gets 1320 s
-(two 600 s chunks plus 120 s) before anyone judges it. One 30-minute cooldown
-separates restarts. A cap of 6 restarts a day applies. Two restarts stand
-outside the cooldown and the cap: a restart that follows a radiod restart,
-since the recorder holds a stale anchor until it follows radiod, and
-systemd's own restarts. The watchdog never undoes an operator's
-`systemctl stop` or the storage ledger's stop.
+The watchdog keeps three limits. A fresh recorder gets 1320 s (two 600 s
+chunks plus 120 s) before anyone judges it. One 30-minute cooldown separates
+restarts. A cap of 6 restarts a day applies. Two restarts stand outside the
+cooldown and the cap: a restart that follows a radiod restart, since the
+recorder holds a stale anchor until it follows radiod, and systemd's own
+restarts. The watchdog revives a recorder that systemd gave up on without
+waiting out the cooldown, but that revival counts against the cap and starts
+a new cooldown. The watchdog never undoes an operator's `systemctl stop` or
+the storage ledger's stop. hf-timestd's pipeline watchdog revives metrology
+and fusion only while the recorder runs, because metrology's `Requires=`
+would start a stopped recorder again.
 
 The watchdog writes every action, refusal and systemd restart to one restart
 ledger, `/var/lib/sigmond/recorder-restarts.jsonl`. Read that file to learn
-why the recorder restarted. `sigmond-t6-stuck-watchdog` and `timestd-prune`
+why the watchdog or systemd restarted the recorder; a deploy's restart does
+not appear there. `sigmond-t6-stuck-watchdog` and `timestd-prune`
 are retired units; `smd align --apply` stops them (CLIENT-CONTRACT 5.7).
 
 ## Uniform routing through wsprdaemon.org

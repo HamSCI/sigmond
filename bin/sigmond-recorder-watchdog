@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """sigmond-recorder-watchdog: the one agent besides systemd that restarts
-timestd-core-recorder.  The rules, the request format and the ledger are
+timestd-core-recorder on a fault.  The rules, the request format and the ledger are
 described in lib/sigmond/recorder_watchdog.py.
 
 Usage: sigmond-recorder-watchdog [--dry-run]

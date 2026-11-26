@@ -1,5 +1,5 @@
 [Unit]
-Description=The one agent besides systemd that restarts timestd-core-recorder
+Description=Restarts timestd-core-recorder on a fault (the one agent besides systemd)
 Documentation=https://github.com/HamSCI/sigmond
 After=timestd-core-recorder.service
 
