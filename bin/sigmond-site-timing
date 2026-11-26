@@ -574,22 +574,43 @@ if [ -d "$MC" ]; then
 fi
 
 # ── 4. local GNSS stream (UBX or RTCM3) → [gnss_vtec] ───────────────────────
-# timestd-vtec reads either: u-blox UBX (sync b5 62) or RTCM3 (preamble 0xD3,
-# MSM/1004 -- the Quectel LG290P at AC0G-ND).  Probing for UBX alone left
+# hamsci-physics-vtec reads either: u-blox UBX (sync b5 62) or RTCM3 (preamble
+# 0xD3, MSM/1004 -- the Quectel LG290P at AC0G-ND).  Probing for UBX alone left
 # ND's VTEC off on every flash.
 # The stream is wired only from the trust record (lan-trust.toml [gnss]); a
 # stream the scan finds is OFFERED.  A host already in [gnss_vtec] stays.
+# VTEC is wired when [gnss_vtec] is enabled and names a real host OR a real
+# device.  A USB receiver (N8UR) keeps a placeholder host beside its device;
+# such a station is never scanned and never rewritten.
+GCFG=${GNSS_VTEC_TOML:-/etc/hamsci-physics/gnss-vtec.toml}
+PHYSICS_DIR=/opt/git/sigmond/hamsci-physics
 GNSS_TRUSTED=$(lan_trust get-gnss 2>/dev/null)
-if [ -f "$CFG" ] && ! grep -q '<YOUR_GNSS_HOST>' "$CFG"; then
-    _gh=$(python3 -c 'import sys, tomllib; g = tomllib.load(open(sys.argv[1], "rb")).get("gnss_vtec", {}); print(g.get("host", "") if g.get("enabled") else "")' "$CFG" 2>/dev/null)
-    if [ -n "$_gh" ] && [ "$_gh" != "$GNSS_TRUSTED" ] && lan_noted_once gnss; then
-        say "GNSS stream host $_gh was set before the trust record existed - kept, as trusted.  To record: sudo sigmond-site-timing --trust-gnss <addr> --no-run"
-    fi
+GSTATE=none; _gh=""
+if [ -f "$GCFG" ]; then
+    # prints "<state> <host>"; state is wired-host, wired-device or none
+    read -r GSTATE _gh <<<"$(python3 -c '
+import sys, tomllib
+try:
+    g = tomllib.load(open(sys.argv[1], "rb")).get("gnss_vtec", {})
+except Exception:
+    g = {}
+def real(v):
+    v = str(v or "").strip()
+    return v if v and "<" not in v and ">" not in v else ""
+h, d = real(g.get("host")), real(g.get("device"))
+if not g.get("enabled"): print("none")
+elif d: print("wired-device", h)
+elif h: print("wired-host", h)
+else: print("none")' "$GCFG" 2>/dev/null)"
+    GSTATE=${GSTATE:-none}
+fi
+if [ "$GSTATE" = wired-host ] && [ -n "$_gh" ] && [ "$_gh" != "$GNSS_TRUSTED" ] && lan_noted_once gnss; then
+    say "GNSS stream host $_gh was set before the trust record existed - kept, as trusted.  To record: sudo sigmond-site-timing --trust-gnss <addr> --no-run"
 fi
 GHOST=""
-if [ -f "$CFG" ] && grep -q '<YOUR_GNSS_HOST>' "$CFG" && [ -n "$GNSS_TRUSTED" ]; then
+if [ "$GSTATE" = none ] && [ -n "$GNSS_TRUSTED" ]; then
     GHOST=$GNSS_TRUSTED
-elif [ -n "$SUBNET" ] && [ -f "$CFG" ] && grep -q '<YOUR_GNSS_HOST>' "$CFG"; then
+elif [ "$GSTATE" = none ] && [ -n "$SUBNET" ]; then
     GFOUND=$(python3 - "$SUBNET" <<'PYEOF'
 import ipaddress, socket, sys, concurrent.futures
 net = ipaddress.ip_network(sys.argv[1], strict=False)
@@ -630,22 +651,34 @@ PYEOF
         say "no local GNSS stream (UBX/RTCM3) on :9000 - vtec stays off"
     fi
 fi
-if [ -n "$GHOST" ]; then
-    cp -p "$CFG" "$CFG.bak-site-timing"
-    python3 - "$CFG" "$GHOST" <<'PYEOF'
-import re, sys
+if [ -n "$GHOST" ] && [ ! -d "$PHYSICS_DIR" ]; then
+    say "GNSS host trusted, but hamsci-physics is not installed - VTEC stays off"
+elif [ -n "$GHOST" ]; then
+    mkdir -p "$(dirname "$GCFG")"
+    python3 - "$GCFG" "$GHOST" <<'PYEOF'
+import os, re, sys
 p, host = sys.argv[1], sys.argv[2]
-s = open(p).read()
-def sub(s, key, val):
-    pat = re.compile(r"(\[gnss_vtec\].*?)(^" + key + r"\s*=\s*[^\n]*)", re.S | re.M)
-    return pat.sub(lambda m: m.group(1) + key + " = " + val, s, count=1)
-s = sub(s, "enabled", "true  # wired by sigmond-site-timing from lan-trust.toml")
-s = sub(s, "host", '"%s"' % host)
+table = (
+    "[gnss_vtec]\n"
+    "enabled = true  # wired by sigmond-site-timing from lan-trust.toml\n"
+    'host = "%s"\n'
+    "port = 9000\n"
+    'protocol = "auto"\n'
+    'ephemeris_dir = "data/brdc"\n'
+    "save_csv = false\n" % host)
+if os.path.exists(p):
+    # keep any other table (a [station], say); replace only [gnss_vtec]
+    s = open(p).read()
+    pat = re.compile(r"^\[gnss_vtec\][^\n]*\n.*?(?=^\[|\Z)", re.S | re.M)
+    s = pat.sub(lambda m: table + "\n", s, count=1) if pat.search(s) else s.rstrip("\n") + "\n\n" + table
+else:
+    s = table
 open(p, "w").write(s)
+os.chmod(p, 0o644)
 PYEOF
     say "trusted GNSS stream wired: $GHOST:9000 - gnss_vtec enabled"
-    # an already-running vtec service read the config before this edit
-    systemctl try-restart timestd-vtec 2>/dev/null
+    # restart, not try-restart: the unit may be stopped (its condition was unmet)
+    systemctl restart hamsci-physics-vtec 2>/dev/null
 fi
 
 # ── 4.5 meteor-scatter (MSK144) — dasi2 appliance policy: ON ────────────────

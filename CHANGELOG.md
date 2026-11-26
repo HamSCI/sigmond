@@ -24,6 +24,12 @@ what has run on real hardware.  A release that no station has yet installed says
   ran.  Two copies never run.  When topology disables the new owner, align leaves
   the old unit running, and the drift report faults it with the fix
   `smd enable <owner>`.  A move that fails holds the restarts back.
+- **`sigmond-site-timing` wires a trusted GNSS stream into hamsci-physics.**  It writes
+  `/etc/hamsci-physics/gnss-vtec.toml` and restarts `hamsci-physics-vtec`.  A station
+  counts as wired when that file enables VTEC with a real host or a real `device`, so a
+  USB receiver (N8UR) is never scanned for or rewritten.  The three new units
+  (`hamsci-physics-vtec`, `timestd-ionex-download`, `timestd-iri-update`) stay off
+  radiod's cores.
 
 ---
 

@@ -138,9 +138,12 @@ def env(tmp_path):
         'LTS': tmp_path / 'local-timeservers.conf',
         'WIZ': tmp_path / '10-sigmond-ntp.conf',
         'CFG': tmp_path / 'timestd-config.toml',
+        'GCFG': tmp_path / 'gnss-vtec.toml',
+        'PHYS': tmp_path / 'hamsci-physics',
         'say': tmp_path / 'say.log',
     }
     (tmp_path / 'bin').mkdir()
+    d['PHYS'].mkdir()
     sc = tmp_path / 'bin' / 'systemctl'
     sc.write_text(f'#!/bin/bash\necho "$*" >> {tmp_path}/systemctl.log\n')
     sc.chmod(0o755)
@@ -149,7 +152,9 @@ def env(tmp_path):
 
 def run_step(env, body, subnet='127.0.0.0/29', port=None, gport=None):
     body = (body.replace('/etc/chrony/conf.d/local-timeservers.conf', str(env['LTS']))
-                .replace('/etc/chrony/conf.d/10-sigmond-ntp.conf', str(env['WIZ'])))
+                .replace('/etc/chrony/conf.d/10-sigmond-ntp.conf', str(env['WIZ']))
+                .replace('/etc/hamsci-physics/gnss-vtec.toml', str(env['GCFG']))
+                .replace('/opt/git/sigmond/hamsci-physics', str(env['PHYS'])))
     if port:
         body = body.replace("s.connect((ip, 123))", f"s.connect((ip, {port}))")
         assert f'{port}' in body
@@ -271,36 +276,78 @@ def test_step_2b_reads_the_wizard_file_as_a_candidate():
 
 # --- GNSS: offer, trust, keep --------------------------------------------------
 
-CFG_PLACEHOLDER = '[gnss_vtec]\nenabled = false\nhost = "<YOUR_GNSS_HOST>"\nport = 9000\n'
 UBX = b'\xb5\x62\x01\x07' + b'\0' * 100
+N8UR = ('[gnss_vtec]\nenabled = true\nhost = "<YOUR_GNSS_HOST>"\nport = 9000\n'
+        'device = "/dev/serial/by-id/usb-u-blox_AG_-_www.u-blox.com_u-blox_GNSS_receiver-if00"\n')
 
 
 def test_gnss_stream_is_offered_not_wired(env):
-    env['CFG'].write_text(CFG_PLACEHOLDER)
     gport = _free_port()
     srv = FakeGNSS('127.0.0.3', gport, UBX)
     try:
         said = run_step(env, STEP4, gport=gport)
     finally:
         srv.close()
-    assert env['CFG'].read_text() == CFG_PLACEHOLDER
+    assert not env['GCFG'].exists()
     assert 'GNSS stream OFFER: 127.0.0.3:9000 (UBX)' in said
     assert 'sudo sigmond-site-timing --trust-gnss 127.0.0.3' in said
 
 
 def test_trusted_gnss_host_is_wired(env):
-    env['CFG'].write_text(CFG_PLACEHOLDER)
     trust(env, '--trust-gnss', '192.168.8.50')
     said = run_step(env, STEP4, subnet='')
-    text = env['CFG'].read_text()
+    text = env['GCFG'].read_text()
     assert 'host = "192.168.8.50"' in text and 'enabled = true' in text
+    assert 'port = 9000' in text and 'protocol = "auto"' in text
+    assert oct(env['GCFG'].stat().st_mode & 0o777) == '0o644'
+    assert 'restart hamsci-physics-vtec' in (env['T'] / 'systemctl.log').read_text().splitlines()
     assert 'trusted GNSS stream wired: 192.168.8.50' in said
+
+
+def test_trusted_host_fills_an_unwired_file_and_keeps_its_station(env):
+    env['GCFG'].write_text('[station]\ngrid = "EN15"\n\n[gnss_vtec]\nenabled = false\n'
+                           'host = "<YOUR_GNSS_HOST>"\nport = 9000\n')
+    trust(env, '--trust-gnss', '192.168.8.50')
+    run_step(env, STEP4, subnet='')
+    text = env['GCFG'].read_text()
+    assert 'host = "192.168.8.50"' in text and 'grid = "EN15"' in text
+    assert 'YOUR_GNSS_HOST' not in text
 
 
 def test_existing_gnss_host_stays_and_is_noted_once(env):
     cfg = '[gnss_vtec]\nenabled = true\nhost = "192.168.8.60"\nport = 9000\n'
-    env['CFG'].write_text(cfg)
+    env['GCFG'].write_text(cfg)
     said = run_step(env, STEP4)
-    assert env['CFG'].read_text() == cfg
+    assert env['GCFG'].read_text() == cfg
     assert 'GNSS stream host 192.168.8.60 was set before the trust record' in said
     assert 'before the trust record' not in run_step(env, STEP4)
+
+
+def test_no_hamsci_physics_no_file(env):
+    env['PHYS'].rmdir()
+    trust(env, '--trust-gnss', '192.168.8.50')
+    said = run_step(env, STEP4, subnet='')
+    assert not env['GCFG'].exists() and 'hamsci-physics is not installed' in said
+    assert not (env['T'] / 'systemctl.log').exists()
+
+
+def test_usb_receiver_with_placeholder_host_is_wired(env):
+    """N8UR: a real device counts, whatever the host says."""
+    env['GCFG'].write_text(N8UR)
+    trust(env, '--trust-gnss', '192.168.8.50')
+    said = run_step(env, STEP4)
+    assert env['GCFG'].read_text() == N8UR
+    assert 'wired' not in said and 'OFFER' not in said and 'no local GNSS' not in said
+    assert not (env['T'] / 'systemctl.log').exists()
+
+
+def test_usb_receiver_is_never_scanned(env):
+    env['GCFG'].write_text(N8UR)
+    gport = _free_port()
+    srv = FakeGNSS('127.0.0.3', gport, UBX)
+    try:
+        said = run_step(env, STEP4, gport=gport)
+    finally:
+        srv.close()
+    assert env['GCFG'].read_text() == N8UR
+    assert said == ''

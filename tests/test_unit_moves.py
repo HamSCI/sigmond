@@ -411,3 +411,10 @@ def test_link_units_links_nothing_absent_from_both(tmp_path):
     unit_dir = tmp_path / "u"; unit_dir.mkdir()
     assert um.link_units(repo, ("n.service",), unit_dir=unit_dir) == []
     assert list(unit_dir.iterdir()) == []
+
+
+def test_new_units_stay_off_radiods_cores():
+    from sigmond.cpu import AFFINITY_UNITS
+    for u in ("hamsci-physics-vtec.service", "timestd-ionex-download.service",
+              "timestd-iri-update.service"):
+        assert AFFINITY_UNITS.get(u) == "other", u
