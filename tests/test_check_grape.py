@@ -1,7 +1,8 @@
 """`smd check` GRAPE and storage lines (tasks/spec-smd-check-v372.md §4).
 
 GRAPE reads the channel list from hf-timestd's config and the newest file
-under raw_buffer/<channel>/<YYYYMMDD>/, in the RAM tier and on disk."""
+under the on-disk raw_buffer/<channel>/<YYYYMMDD>/.  Only finished chunks
+(*.bin.zst) count; the RAM tier holds only the open chunk's .scratch file."""
 import os
 import tempfile
 import unittest
@@ -38,12 +39,11 @@ class GrapeChannelTests(unittest.TestCase):
         self.assertEqual(check.grape_channels(cfg),
                          ['WWV_10000', 'WWVH_10000', 'BPM_10000', 'WWV_20000'])
 
-    def test_roots_follow_tiered_storage(self):
+    def test_the_only_root_is_the_disk_raw_buffer_either_way(self):
         root = Path('/r')
-        self.assertEqual(check.grape_roots(config(root)),
-                         [root / 'shm' / 'raw_buffer', root / 'var' / 'raw_buffer'])
+        self.assertEqual(check.grape_roots(config(root)), [root / 'var' / 'raw_buffer'])
         self.assertEqual(check.grape_roots(config(root, tiered=False)),
-                         [root / 'var' / 'raw_buffer', root / 'var'])
+                         [root / 'var' / 'raw_buffer'])
 
 
 class GrapeLineTests(unittest.TestCase):
@@ -53,12 +53,12 @@ class GrapeLineTests(unittest.TestCase):
         self.root = Path(d.name)
         self.cfg = config(self.root)
 
-    def put(self, channel, age_s, tier='shm', now=NOW):
+    def put(self, channel, age_s, tier='var', now=NOW, name=None):
         t = now - age_s
         day = datetime.fromtimestamp(t, tz=timezone.utc).strftime('%Y%m%d')
         d = self.root / tier / 'raw_buffer' / channel / day
         d.mkdir(parents=True, exist_ok=True)
-        f = d / f'{int(t)}.bin.zst'
+        f = d / (name or f'{int(t)}.bin.zst')
         f.write_text('x')
         os.utime(f, (t, t))
 
@@ -70,10 +70,20 @@ class GrapeLineTests(unittest.TestCase):
             self.put(c, 300)
         self.assertEqual(self.line(), check.Line(OK, 'GRAPE', 'all 6 channels wrote a file in the last 11 min'))
 
-    def test_a_file_already_moved_to_disk_counts(self):
+    def test_a_fresh_scratch_in_ram_cannot_hide_a_stale_disk(self):
+        # v3.96: the open chunk's .scratch stays fresh while every flush fails.
         for c in SIX:
-            self.put(c, 300, tier='var')
-        self.assertEqual(self.line().mark, OK)
+            self.put(c, 11 * 60 + 60)
+            self.put(c, 5, tier='shm', name='1700000000.WWV.0.scratch')
+        line = self.line()
+        self.assertEqual(line.mark, FAIL)
+
+    def test_only_finished_chunks_count(self):
+        for c in SIX:
+            self.put(c, 11 * 60 + 60)
+            for n in ('a.bin.zst.tmp', 'a.bin.zst.drain', 'a.scratch', 'a.json'):
+                self.put(c, 5, name=n)
+        self.assertEqual(self.line().mark, FAIL)
 
     def test_a_stale_channel_fails_by_name(self):
         for c in SIX[:-1]:

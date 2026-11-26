@@ -444,9 +444,10 @@ class Reader:
                 raise Unreadable(path)
             return sorted(x for x in out.splitlines() if x)
 
-    def newest_mtime(self, path) -> Optional[float]:
-        """The newest modification time of a plain file directly in `path`,
-        or None when `path` is absent or holds no file."""
+    def newest_mtime(self, path, suffix: str = '') -> Optional[float]:
+        """The newest modification time of a plain file directly in `path`
+        whose name ends in `suffix` (any name when empty), or None when
+        `path` is absent or holds no such file."""
         try:
             best = None
             with os.scandir(path) as it:
@@ -454,6 +455,8 @@ class Reader:
                     # hf-timestd moves files from the hot tier to disk while
                     # we scan; one that vanished must not hide the rest.
                     try:
+                        if suffix and not entry.name.endswith(suffix):
+                            continue
                         if not entry.is_file(follow_symlinks=False):
                             continue
                         m = entry.stat(follow_symlinks=False).st_mtime
@@ -465,6 +468,7 @@ class Reader:
             return None
         except PermissionError:
             out = self._sudo(['find', '--', str(path), '-maxdepth', '1', '-type', 'f',
+                              *(['-name', '*' + suffix] if suffix else []),
                               '-printf', '%T@\\n'])
             if out is None:
                 raise Unreadable(path)
@@ -1009,18 +1013,17 @@ def grape_channels(cfg: dict) -> List[str]:
 
 
 def grape_roots(cfg: dict) -> List[Path]:
-    """Where hf-timestd writes raw IQ.  With tiered storage (the shipped
-    default) a file lands first in <hot_buffer_root>/raw_buffer and moves to
-    <data_root>/raw_buffer minutes later; without it the writer uses
-    <data_root>/<channel> (binary_archive_writer.py archive_dir)."""
+    """Where hf-timestd keeps finished raw IQ chunks: <data_root>/raw_buffer on
+    disk.  Since v3.96 the writer puts every finished chunk there at once,
+    with or without tiered storage.  The RAM folder holds only the open
+    chunk's `.scratch` file, which stays fresh while every flush fails, so the
+    check never looks there."""
     rec = cfg.get('recorder', {}) or {}
     data_root = Path(rec.get('production_data_root', '/var/lib/timestd'))
-    roots = [data_root / 'raw_buffer']
-    if rec.get('tiered_storage', False):
-        roots.insert(0, Path(rec.get('hot_buffer_root', '/dev/shm/timestd')) / 'raw_buffer')
-    else:
-        roots.append(data_root)
-    return roots
+    return [data_root / 'raw_buffer']
+
+
+GRAPE_CHUNK_SUFFIX = '.bin.zst'
 
 
 def grape_line(env: Env) -> Line:
@@ -1050,7 +1053,7 @@ def grape_line(env: Env) -> Line:
         newest = None
         for root in grape_roots(cfg):
             for day in days:
-                m = env.reader.newest_mtime(root / ch / day)
+                m = env.reader.newest_mtime(root / ch / day, GRAPE_CHUNK_SUFFIX)
                 if m is not None:
                     newest = m if newest is None else max(newest, m)
         if newest is None or env.now - newest > GRAPE_FRESH_S:
