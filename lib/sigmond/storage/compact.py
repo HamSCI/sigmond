@@ -8,13 +8,16 @@ runs this, and starts them again.
 Sequence (apply):
   1. refuse under an active hands-off;
   2. `--prepare`, while every writer still runs;
-  3. stop sigmond-storage-expire.timer and take the expire pass's lock (a pass
+  3. stop sigmond-storage-expire.timer and every active timer of the client
+     (its deploy.toml lists them; hf-timestd's pipeline watchdog would restart
+     a stopped holder mid-swap), and take the expire pass's lock (a pass
      already running finishes first), so no pass touches the database mid-swap;
   4. `--holders`; refuse if a holder has no unit or is radiod, ka9q-* or sigmond*;
   5. take the lifecycle lock, stop the holder units in reverse start order;
   6. `--swap`;
   7. start the same units in start order, whatever the swap answered;
-  8. release the expire lock and restart the timer, on every exit path.
+  8. release the expire lock and restart the client's timers and the expire
+     timer, on every exit path.
 
 The recorder watchdog leaves the stop alone: a `systemctl stop` reads as an
 operator's stop, and the watchdog also waits on the lifecycle lock.
@@ -59,6 +62,7 @@ class CompactRunners:
     journal: Callable             # (line) -> None
     say: Callable                 # (line) -> None
     marker_path: Path = None      # in-progress marker; None writes none
+    client_timers: Callable = None  # (client) -> [timer unit, ...]; None: none
 
 
 def never_stopped(unit: str) -> bool:
@@ -113,6 +117,9 @@ def default_runners() -> CompactRunners:
             return ""
         return cfg.hands_off_unknown or f"until {cfg.hands_off_until} ({cfg.hands_off_reason})"
 
+    def client_timers(client: str) -> list:
+        return [u.unit for u in _units_of(client) if u.kind == "timer"]
+
     def start_order(client: str) -> list:
         refs = [u for u in _units_of(client) if u.kind == "service"]
         return [u.unit for u in lifecycle.order_units(refs)]
@@ -152,7 +159,8 @@ def default_runners() -> CompactRunners:
         prepare=clientcall.call_compact_prepare, holders=clientcall.call_compact_holders,
         swap=clientcall.call_compact_swap, start_order=start_order, systemctl=systemctl,
         is_active=is_active, expire_lock=make_expire_lock(), lifecycle_lock=lifecycle_lock,
-        journal=_journal, say=print, marker_path=COMPACT_MARKER)
+        journal=_journal, say=print, marker_path=COMPACT_MARKER,
+        client_timers=client_timers)
 
 
 def _log(r: CompactRunners, client: str, target: str, msg: str, sev: str = "<6>") -> None:
@@ -211,6 +219,8 @@ def _dry_run(client, target, binary, r) -> int:
                     if u and not u.startswith("sigmond-storage-expire")], r.start_order(client))
     r.say("holder units, to stop in reverse order: "
           + (", ".join(reversed(units)) or "none"))
+    r.say("client timers, to stop first: "
+          + (", ".join(_active_client_timers(client, r)) or "none"))
     for pid, unit in ans.holders:
         if unit is None:
             r.say(f"  pid {pid} has no unit; an apply would refuse")
@@ -245,14 +255,15 @@ def _signals_raise():
             signal.signal(sig, old)
 
 
-def _marker_text(timer_was_active, units, started) -> str:
+def _marker_text(timer_was_active, units, started, client_timers=()) -> str:
     from ..recorder_watchdog import proc_start
     return json.dumps({"pid": os.getpid(), "pid_start": proc_start(os.getpid()),
                        "started": started, "units": list(units), "timer": EXPIRE_TIMER,
-                       "timer_was_active": bool(timer_was_active)})
+                       "timer_was_active": bool(timer_was_active),
+                       "client_timers": list(client_timers)})
 
 
-def _claim_marker(r, timer_was_active, started) -> None:
+def _claim_marker(r, timer_was_active, started, client_timers=()) -> None:
     """Create the marker exclusively; refuse while another one stands."""
     if r.marker_path is None:
         return
@@ -269,15 +280,15 @@ def _claim_marker(r, timer_was_active, started) -> None:
             "an earlier compaction died and left its units stopped; the recorder "
             "watchdog restores them on its next tick; run this again after that") from None
     with os.fdopen(fd, "w") as fh:
-        fh.write(_marker_text(timer_was_active, [], started))
+        fh.write(_marker_text(timer_was_active, [], started, client_timers))
 
 
-def _write_marker(r, timer_was_active, units, started) -> None:
+def _write_marker(r, timer_was_active, units, started, client_timers=()) -> None:
     if r.marker_path is None:
         return
     path = Path(r.marker_path)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(_marker_text(timer_was_active, units, started))
+    tmp.write_text(_marker_text(timer_was_active, units, started, client_timers))
     os.replace(tmp, path)
 
 
@@ -294,24 +305,42 @@ def _apply(client, target, binary, r) -> int:
         return _apply_guarded(client, target, binary, r)
 
 
+def _active_client_timers(client, r) -> list:
+    if r.client_timers is None:
+        return []
+    return [t for t in r.client_timers(client) if t != EXPIRE_TIMER and r.is_active(t)]
+
+
 def _apply_guarded(client, target, binary, r) -> int:
     timer_was_active = r.is_active(EXPIRE_TIMER)
+    # The client's own timers stop too: hf-timestd's pipeline watchdog would
+    # otherwise restart a stopped metrology or fusion in the middle of the swap.
+    timers = _active_client_timers(client, r)
     started = time.time()
     # The marker comes before the first stop; the recorder watchdog restores
-    # the listed units if this process dies without cleaning up.  A standing
-    # marker (another run, or a dead one not yet restored) refuses this run.
+    # the listed units and timers if this process dies without cleaning up.
+    # A standing marker (another run, or a dead one not yet restored) refuses
+    # this run.
     try:
-        _claim_marker(r, timer_was_active, started)
+        _claim_marker(r, timer_was_active, started, timers)
     except CompactError as exc:
         _log(r, client, target, f"refused: {exc}", "<4>")
         r.say(f"refused: {exc}")
         return 1
     state = {"incomplete": False}
-    if timer_was_active:
-        r.systemctl("stop", EXPIRE_TIMER)
-        _log(r, client, target, f"stopped {EXPIRE_TIMER}")
-    mark = lambda units: _write_marker(r, timer_was_active, units, started)
+    stopped_timers = []
+    mark = lambda units: _write_marker(r, timer_was_active, units, started, timers)
     try:
+        if timer_was_active:
+            r.systemctl("stop", EXPIRE_TIMER)
+            _log(r, client, target, f"stopped {EXPIRE_TIMER}")
+        for t in timers:
+            stopped_timers.append(t)       # a failed stop may still have half-stopped it
+            rc = r.systemctl("stop", t)
+            _log(r, client, target, f"stop {t}: exit {rc}", "<6>" if rc == 0 else "<3>")
+            if rc != 0:
+                raise CompactError(f"systemctl stop {t} failed (exit {rc}); "
+                                   "no holder stopped")
         with r.expire_lock():
             return _holders_and_swap(client, target, binary, r, mark, state)
     except CompactError as exc:
@@ -319,6 +348,9 @@ def _apply_guarded(client, target, binary, r) -> int:
         r.say(f"refused: {exc}")
         return 1
     finally:
+        for t in stopped_timers:
+            rc = r.systemctl("start", t)
+            _log(r, client, target, f"start {t}: exit {rc}", "<6>" if rc == 0 else "<3>")
         if timer_was_active:
             rc = r.systemctl("start", EXPIRE_TIMER)
             _log(r, client, target, f"started {EXPIRE_TIMER} (exit {rc})",

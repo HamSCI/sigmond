@@ -396,3 +396,74 @@ def test_swap_passes_the_target_and_flag():
         return SimpleNamespace(returncode=0, stdout='{"refused": false}')
     assert call_compact_swap("/b", "timestd", run).ok
     assert seen[0] == ["/b", "storage", "compact", "--swap", "--target", "timestd", "--json"]
+
+
+# --- the client's own timers (final review C1) --------------------------------
+
+PWD = "timestd-pipeline-watchdog.timer"
+HPPS = "timestd-hpps-watchdog.timer"
+
+
+def _rig_with_timers(**kw):
+    rig = Rig(**kw)
+    rig.r.client_timers = lambda cl: [PWD, HPPS]
+    return rig
+
+
+def test_the_clients_timers_stop_before_the_holders_and_start_after():
+    # Mutation check: leave the client's timers running (client_timers unused).
+    rig = _rig_with_timers()
+    assert c.compact_client("hf-timestd", "timestd", apply=True, r=rig.r) == 0
+    s = _sysctl(rig)
+    assert s.index(("stop", PWD)) < s.index(("stop", MET))
+    assert s.index(("stop", HPPS)) < s.index(("stop", MET))
+    assert s.index(("start", PWD)) > s.index(("start", MET))
+    assert ("start", HPPS) in s
+
+
+def test_an_inactive_client_timer_is_left_alone():
+    rig = _rig_with_timers()
+    rig.r.is_active = lambda u: u != HPPS
+    c.compact_client("hf-timestd", "timestd", apply=True, r=rig.r)
+    assert all(e[1] != HPPS for e in _sysctl(rig))
+
+
+def test_the_clients_timers_come_back_after_a_refusal_or_failure():
+    for kw in (dict(swap_ok=False), dict(stop_fail={MET}), dict(holders=((9, None),)),
+               dict(holders_refused=True), dict(expire_busy=True)):
+        rig = _rig_with_timers(**kw)
+        assert c.compact_client("hf-timestd", "timestd", apply=True, r=rig.r) == 1
+        s = _sysctl(rig)
+        assert ("start", PWD) in s and ("start", HPPS) in s, kw
+
+
+def test_a_failed_timer_stop_stops_no_holder_and_restarts_the_timers():
+    rig = _rig_with_timers(stop_fail={HPPS})
+    assert c.compact_client("hf-timestd", "timestd", apply=True, r=rig.r) == 1
+    s = _sysctl(rig)
+    assert ("stop", MET) not in s and ("holders",) not in rig.calls()
+    assert ("start", PWD) in s and ("start", HPPS) in s
+
+
+def test_the_marker_lists_the_clients_timers(tmp_path):
+    rig = _rig_with_timers()
+    rig.r.marker_path = tmp_path / "m.json"
+    seen = {}
+    orig = rig._systemctl
+    def spy(verb, unit):
+        if verb == "stop" and unit == PWD:
+            seen["m"] = json.loads(rig.r.marker_path.read_text())
+        return orig(verb, unit)
+    rig.r.systemctl = spy
+    assert c.compact_client("hf-timestd", "timestd", apply=True, r=rig.r) == 0
+    assert seen["m"]["client_timers"] == [PWD, HPPS]
+    assert not rig.r.marker_path.exists()
+
+
+def test_the_default_runner_lists_the_clients_timer_units(monkeypatch):
+    from sigmond.storage import tick
+    refs = [SimpleNamespace(unit=REC, kind="service"),
+            SimpleNamespace(unit=PWD, kind="timer"),
+            SimpleNamespace(unit="timestd-metrology.target", kind="target")]
+    monkeypatch.setattr(tick, "_units_of", lambda cl: refs)
+    assert c.default_runners().client_timers("hf-timestd") == [PWD]

@@ -1,5 +1,5 @@
 """sigmond-recorder-watchdog: the one agent besides systemd that restarts
-timestd-core-recorder.
+timestd-core-recorder on a fault.
 
 Before v3.96 four agents restarted the recorder, each with its own clock and
 its own budget: sigmond-t6-stuck-watchdog, sigmond-sdr-recover, the
@@ -29,9 +29,14 @@ pure ``decide`` what to do.  ``decide`` applies one fresh-start grace
 (GRACE_S), one cooldown shared by every cause (COOLDOWN_S) and one daily
 cap (MAX_PER_DAY).  Two restarts stand outside the budget: one that follows
 a radiod restart (the recorder holds a stale RTP anchor until it follows
-radiod, every time) and systemd's own.  The watchdog writes every action,
-every refused or dropped request and every restart systemd made to one
-ledger (LEDGER), so every restart of the recorder shows in one file.
+radiod, every time) and systemd's own.  A revival of a failed recorder does
+not wait out the cooldown, but counts against the cap and starts a new
+cooldown.  The watchdog writes every action, every refused or dropped
+request and every restart systemd made to one ledger (LEDGER), so every
+watchdog or systemd restart of the recorder shows in one file.  Deploy and
+config paths (`smd align`, sigmond-site-timing, hf-timestd's install.sh
+--restart-all and deploy.sh) restart it through their own code, outside
+the ledger.
 
 Causes: ``t6-stuck`` and ``failed`` come from the watchdog's own rules;
 ``radiod-restarted``, ``no-output`` and ``hpps-stale`` come from requests.
@@ -811,7 +816,8 @@ def restore_interrupted_compaction(marker: Path, run: Callable, now: float, *,
                                    dry_run: bool = False, lock: Optional[Callable] = None,
                                    say: Callable[[str], None] = print) -> list:
     """If a compaction marker outlives its pid, start the units it stopped (in
-    order) and its expire timer, remove the marker, and return ledger rows.
+    order), the client timers it stopped and its expire timer, remove the
+    marker, and return ledger rows.
     Undoes a tool's own stop, so no cooldown or cap applies."""
     found, d = _read_marker(marker)
     if not found or marker_pid_alive(d):
@@ -847,8 +853,9 @@ def _restore(marker, d, run, now, dry_run, say) -> list:
         return [{"utc": _iso(now), "agent": AGENT, "action": "compaction-restore",
                  "ok": False, "reason": "marker unreadable"}]
     units = [u for u in (d.get("units") or []) if isinstance(u, str)]
+    client_timers = [u for u in (d.get("client_timers") or []) if isinstance(u, str)]
     timer = d.get("timer") if d.get("timer_was_active") else None
-    todo = units + ([timer] if isinstance(timer, str) else [])
+    todo = units + client_timers + ([timer] if isinstance(timer, str) else [])
     if dry_run:
         say(f"  DRY-RUN: would restore after an interrupted compaction: {', '.join(todo)}")
         return []

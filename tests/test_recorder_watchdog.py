@@ -922,3 +922,16 @@ def test_tick_restores_and_records_in_the_ledger(tmp_path):
     assert ["systemctl", "start", "a.service"] in calls
     rows = [json.loads(l) for l in paths.ledger.read_text().splitlines()]
     assert sum(r["action"] == "compaction-restore" for r in rows) == 3
+
+
+def test_dead_compaction_marker_restarts_the_clients_timers(tmp_path):
+    # Mutation check: restore only "units" and the expire timer.
+    m = tmp_path / "compact.json"
+    m.write_text(json.dumps({"pid": _dead_pid(), "units": ["a.service"],
+                             "client_timers": ["timestd-pipeline-watchdog.timer"],
+                             "timer": "sigmond-storage-expire.timer",
+                             "timer_was_active": True}))
+    calls = []
+    rw.restore_interrupted_compaction(m, _rec_run(calls), 1e9, say=lambda s: None)
+    assert [c[2] for c in calls] == ["a.service", "timestd-pipeline-watchdog.timer",
+                                     "sigmond-storage-expire.timer"]
