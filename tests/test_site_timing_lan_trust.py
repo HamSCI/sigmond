@@ -351,3 +351,39 @@ def test_usb_receiver_is_never_scanned(env):
         srv.close()
     assert env['GCFG'].read_text() == N8UR
     assert said == ''
+
+
+OFF_HOST = '[gnss_vtec]\nenabled = false\nhost = "192.168.8.60"\nport = 9000\n'
+OFF_DEV = ('[gnss_vtec]\nenabled = false\nhost = "<YOUR_GNSS_HOST>"\n'
+           'device = "/dev/serial/by-id/usb-u-blox_AG_-_www.u-blox.com_u-blox_GNSS_receiver-if00"\n')
+
+
+@pytest.mark.parametrize('cfg', [OFF_HOST, OFF_DEV])
+def test_disabled_real_host_or_device_is_the_operators_off(env, cfg):
+    env['GCFG'].write_text(cfg)
+    trust(env, '--trust-gnss', '192.168.8.50')
+    said = run_step(env, STEP4)
+    assert env['GCFG'].read_text() == cfg
+    assert not (env['T'] / 'systemctl.log').exists()
+    assert f'gnss-vtec kept off by the operator ({env["GCFG"]})' in said
+    assert 'kept off' not in run_step(env, STEP4)
+
+
+def test_disabled_real_device_is_never_scanned(env):
+    env['GCFG'].write_text(OFF_DEV)
+    gport = _free_port()
+    srv = FakeGNSS('127.0.0.3', gport, UBX)
+    try:
+        said = run_step(env, STEP4, gport=gport)
+    finally:
+        srv.close()
+    assert env['GCFG'].read_text() == OFF_DEV
+    assert 'OFFER' not in said
+
+
+def test_b2_disabled_placeholder_still_wires(env):
+    env['GCFG'].write_text('[gnss_vtec]\nenabled = false\nhost = "<YOUR_GNSS_HOST>"\nport = 9000\n')
+    trust(env, '--trust-gnss', '192.168.8.50')
+    run_step(env, STEP4, subnet='')
+    assert 'host = "192.168.8.50"' in env['GCFG'].read_text()
+    assert not list(env['T'].glob('*.tmp-site-timing'))

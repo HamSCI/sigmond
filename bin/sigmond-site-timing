@@ -587,7 +587,9 @@ PHYSICS_DIR=/opt/git/sigmond/hamsci-physics
 GNSS_TRUSTED=$(lan_trust get-gnss 2>/dev/null)
 GSTATE=none; _gh=""
 if [ -f "$GCFG" ]; then
-    # prints "<state> <host>"; state is wired-host, wired-device or none
+    # prints "<state> <host>"; state is wired-host, wired-device, off (the
+    # operator disabled a real host or device: theirs to turn on) or none
+    # (absent or placeholders only: the trust record may fill it)
     read -r GSTATE _gh <<<"$(python3 -c '
 import sys, tomllib
 try:
@@ -598,14 +600,17 @@ def real(v):
     v = str(v or "").strip()
     return v if v and "<" not in v and ">" not in v else ""
 h, d = real(g.get("host")), real(g.get("device"))
-if not g.get("enabled"): print("none")
+if not (d or h): print("none")
+elif not g.get("enabled"): print("off")
 elif d: print("wired-device", h)
-elif h: print("wired-host", h)
-else: print("none")' "$GCFG" 2>/dev/null)"
+else: print("wired-host", h)' "$GCFG" 2>/dev/null)"
     GSTATE=${GSTATE:-none}
 fi
 if [ "$GSTATE" = wired-host ] && [ -n "$_gh" ] && [ "$_gh" != "$GNSS_TRUSTED" ] && lan_noted_once gnss; then
     say "GNSS stream host $_gh was set before the trust record existed - kept, as trusted.  To record: sudo sigmond-site-timing --trust-gnss <addr> --no-run"
+fi
+if [ "$GSTATE" = off ] && lan_noted_once gnssoff; then
+    say "gnss-vtec kept off by the operator ($GCFG)"
 fi
 GHOST=""
 if [ "$GSTATE" = none ] && [ -n "$GNSS_TRUSTED" ]; then
@@ -673,8 +678,11 @@ if os.path.exists(p):
     s = pat.sub(lambda m: table + "\n", s, count=1) if pat.search(s) else s.rstrip("\n") + "\n\n" + table
 else:
     s = table
-open(p, "w").write(s)
-os.chmod(p, 0o644)
+tmp = p + ".tmp-site-timing"
+with open(tmp, "w") as f:
+    f.write(s)
+os.chmod(tmp, 0o644)
+os.replace(tmp, p)
 PYEOF
     say "trusted GNSS stream wired: $GHOST:9000 - gnss_vtec enabled"
     # restart, not try-restart: the unit may be stopped (its condition was unmet)
