@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Optional
 
 from .config import CONFIG_PATH, load_storage_config
+from .client_kit import NO_SUCH_TABLE
 
 EXPIRE_STATE = Path("/var/lib/sigmond/storage/expire-state.json")
 EXPIRE_STATUS = Path("/run/sigmond/storage-expire.json")
@@ -174,6 +175,7 @@ def _locked(now, r, config_path, state_path, status_path, budget_s, per_job_s, u
             if isinstance(until, (int, float)) and t < until:
                 continue
             unsupported.pop(k, None)
+            prev_reason = (last.get(k) or {}).get("reason")
             entry = {"deleted": 0, "complete": False, "reason": "", "last_run_utc": _iso(now)}
             binary = r.binary_for(job.client)
             if not binary:
@@ -196,6 +198,10 @@ def _locked(now, r, config_path, state_path, status_path, budget_s, per_job_s, u
             elif ans.deleted > 0:
                 r.journal(f"<6>storage expire: {job.client} {job.target}: deleted "
                           f"{ans.deleted}, {'complete' if ans.complete else 'more remains'}")
+            elif ans.reason == NO_SUCH_TABLE and prev_reason != NO_SUCH_TABLE:
+                # An absent table reads complete; say so once, not every hour.
+                r.journal(f"<6>storage expire: {job.client} {job.target}: the table "
+                          "does not exist; nothing to expire")
             if ans.ok and ans.complete and not ans.refused:
                 since.pop(k, None)
                 warned.discard(k)

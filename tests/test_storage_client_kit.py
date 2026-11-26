@@ -246,6 +246,16 @@ def test_prune_of_an_empty_table_is_complete(tmp_path):
     assert (r.deleted, r.complete) == (0, True)
 
 
+def test_prune_of_an_absent_table_is_complete_and_deletes_nothing(tmp_path):
+    # Mutation check: drop the sqlite_master check ("no such table" raises).
+    db = _db(tmp_path, [(1, _day(50))])
+    r = client_kit.prune_rows(db, "L2_decoder_comparison", "timestamp_utc",
+                              client_kit.cutoff_iso(NOW, 30),
+                              deadline=time.monotonic() + 30)
+    assert (r.deleted, r.complete, r.reason) == (0, True, client_kit.NO_SUCH_TABLE)
+    assert _q(db, "SELECT count(*) FROM L2_tick_phase") == [(1,)]
+
+
 def test_prune_stops_at_the_deadline_and_says_incomplete(tmp_path):
     db = _db(tmp_path, [(i, _day(60)) for i in range(1, 5001)])
     r = _prune(db, deadline=time.monotonic() - 1)

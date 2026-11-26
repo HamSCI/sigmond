@@ -239,6 +239,9 @@ def _is_locked(exc: sqlite3.OperationalError) -> bool:
     return "locked" in m or "busy" in m
 
 
+NO_SUCH_TABLE = "no such table"
+
+
 def prune_rows(db_path: str, table: str, ts_column: str, cutoff: str, *,
                deadline: float, batch_rows: int = 2000, pause_s: float = 0.05,
                busy_s: float = 0.25, clock=time.monotonic,
@@ -248,10 +251,16 @@ def prune_rows(db_path: str, table: str, ts_column: str, cutoff: str, *,
     The cut comes from a binary search over rowid, so rows written out of time
     order are safe: a new row at a low rowid survives (the DELETE keeps the
     timestamp predicate), and an old row past the cut waits for a later pass.
+
+    An absent table holds nothing to expire: the answer reads complete, with 0
+    deleted and the reason NO_SUCH_TABLE.
     """
     t, c = _ident(table), _ident(ts_column)
     con = _open_owned(db_path, busy_s)
     try:
+        if con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                       (table,)).fetchone() is None:
+            return PruneResult(0, True, NO_SUCH_TABLE)
         lo, hi = con.execute(f"SELECT min(rowid), max(rowid) FROM {t}").fetchone()
         if lo is None:
             return PruneResult(0, True, "")

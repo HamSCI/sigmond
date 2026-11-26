@@ -197,3 +197,16 @@ def test_the_units_name_the_expire_pass():
     assert "ExecStart=/usr/local/bin/smd storage expire" in svc
     assert "IOSchedulingClass=idle" in svc and "Nice=10" in svc and "TimeoutStartSec=1800" in svc
     assert "OnBootSec=900" in tmr and "OnCalendar=hourly" in tmr and "RandomizedDelaySec=300" in tmr
+
+
+def test_an_absent_table_reads_complete_and_is_logged_once_at_info(tmp_path):
+    # Mutation check: log the absent table on every pass (or never).
+    views = _views({"c": [_sink("service", "t1", 30, True)]})
+    f = Fake(tmp_path, views, answers={"t1": ExpireAnswer(True, 0, True,
+                                                          reason="no such table")})
+    for d in (0, 1, 2, 8):
+        f.run(now=T0 + timedelta(days=d))
+    absent = [l for l in f.lines if "does not exist" in l]
+    assert len(absent) == 1 and absent[0].startswith("<6>")
+    assert not any(l.startswith("<4>") for l in f.lines)      # no refusal, no 7-day warning
+    assert f.status()["jobs"][0]["complete"] is True
