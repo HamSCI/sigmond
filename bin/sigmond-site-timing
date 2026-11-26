@@ -585,12 +585,12 @@ fi
 GCFG=${GNSS_VTEC_TOML:-/etc/hamsci-physics/gnss-vtec.toml}
 PHYSICS_DIR=/opt/git/sigmond/hamsci-physics
 GNSS_TRUSTED=$(lan_trust get-gnss 2>/dev/null)
-GSTATE=none; _gh=""
-if [ -f "$GCFG" ]; then
-    # prints "<state> <host>"; state is wired-host, wired-device, off (the
-    # operator disabled a real host or device: theirs to turn on) or none
-    # (absent or placeholders only: the trust record may fill it)
-    read -r GSTATE _gh <<<"$(python3 -c '
+# gnss_state FILE prints "<state> <host>" for FILE's [gnss_vtec]; state is
+# wired-host, wired-device, off (the operator disabled a real host or device:
+# theirs to turn on) or none (absent or placeholders only: the trust record
+# may fill it).
+gnss_state() {
+    python3 -c '
 import sys, tomllib
 try:
     g = tomllib.load(open(sys.argv[1], "rb")).get("gnss_vtec", {})
@@ -603,14 +603,46 @@ h, d = real(g.get("host")), real(g.get("device"))
 if not (d or h): print("none")
 elif not g.get("enabled"): print("off")
 elif d: print("wired-device", h)
-else: print("wired-host", h)' "$GCFG" 2>/dev/null)"
+else: print("wired-host", h)' "$1" 2>/dev/null
+}
+# v3.96 moved VTEC from hf-timestd's timestd-vtec.service to
+# hamsci-physics-vtec.service, and smd align carries the move out.  Align
+# holds it on some stations (--no-restart, a locally_managed owner,
+# hamsci-physics stopped or disabled).  There the old unit still reads the
+# receiver, and a serial port tolerates one reader: while timestd-vtec is
+# enabled, running or failed, this step neither wires the new file from
+# nothing nor starts the new unit.
+old_vtec_live() {
+    case "$(systemctl is-enabled timestd-vtec.service 2>/dev/null)" in enabled*) return 0 ;; esac
+    case "$(systemctl is-active timestd-vtec.service 2>/dev/null)" in
+        active|activating|reloading|failed) return 0 ;;
+    esac
+    # a wants-link left behind by a unit file that went with its checkout
+    ls /etc/systemd/system/*.wants/timestd-vtec.service >/dev/null 2>&1
+}
+GSTATE=none; _gh=""
+if [ -f "$GCFG" ]; then
+    read -r GSTATE _gh <<<"$(gnss_state "$GCFG")"
     GSTATE=${GSTATE:-none}
+elif old_vtec_live; then
+    GSTATE=pending
+elif [ -f "$CFG" ] && [ "$(gnss_state "$CFG" | cut -d' ' -f1)" = off ]; then
+    # The move's adoption copies only an enabled [gnss_vtec]; an operator's
+    # "off" in the legacy file must not be undone by the trust record.
+    GSTATE=legacy-off
 fi
 if [ "$GSTATE" = wired-host ] && [ -n "$_gh" ] && [ "$_gh" != "$GNSS_TRUSTED" ] && lan_noted_once gnss; then
     say "GNSS stream host $_gh was set before the trust record existed - kept, as trusted.  To record: sudo sigmond-site-timing --trust-gnss <addr> --no-run"
 fi
 if [ "$GSTATE" = off ] && lan_noted_once gnssoff; then
     say "gnss-vtec kept off by the operator ($GCFG)"
+fi
+if [ "$GSTATE" = legacy-off ] && lan_noted_once gnssoff; then
+    say "gnss-vtec kept off by the operator ($CFG [gnss_vtec])"
+fi
+if [ "$GSTATE" = pending ]; then
+    say "gnss-vtec not wired: timestd-vtec.service still runs, so its move to"
+    say "  hamsci-physics-vtec is pending.  smd align --apply finishes it."
 fi
 GHOST=""
 if [ "$GSTATE" = none ] && [ -n "$GNSS_TRUSTED" ]; then
@@ -685,8 +717,12 @@ os.chmod(tmp, 0o644)
 os.replace(tmp, p)
 PYEOF
     say "trusted GNSS stream wired: $GHOST:9000 - gnss_vtec enabled"
-    # restart, not try-restart: the unit may be stopped (its condition was unmet)
-    systemctl restart hamsci-physics-vtec 2>/dev/null
+    if old_vtec_live; then
+        say "  hamsci-physics-vtec not restarted: timestd-vtec.service still runs (move pending)"
+    else
+        # restart, not try-restart: the unit may be stopped (its condition was unmet)
+        systemctl restart hamsci-physics-vtec 2>/dev/null
+    fi
 fi
 
 # ── 4.5 meteor-scatter (MSK144) — dasi2 appliance policy: ON ────────────────

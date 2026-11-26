@@ -145,7 +145,18 @@ def env(tmp_path):
     (tmp_path / 'bin').mkdir()
     d['PHYS'].mkdir()
     sc = tmp_path / 'bin' / 'systemctl'
-    sc.write_text(f'#!/bin/bash\necho "$*" >> {tmp_path}/systemctl.log\n')
+    # Queries answer from systemctl.state ("<verb> <unit> <word>" lines) and
+    # are not logged; every other verb is logged.
+    sc.write_text(
+        '#!/bin/bash\n'
+        'if [ "$1" = is-enabled ] || [ "$1" = is-active ]; then\n'
+        f'  w=$(awk -v v="$1" -v u="$2" \'$1==v && $2==u {{print $3}}\' {tmp_path}/systemctl.state 2>/dev/null)\n'
+        '  [ -z "$w" ] && [ "$1" = is-active ] && w=inactive\n'
+        '  [ -n "$w" ] && echo "$w"\n'
+        '  case "$w" in enabled*|active) exit 0;; *) exit 1;; esac\n'
+        'fi\n'
+        f'echo "$*" >> {tmp_path}/systemctl.log\n')
+    (tmp_path / 'units').mkdir()
     sc.chmod(0o755)
     return d
 
@@ -154,7 +165,8 @@ def run_step(env, body, subnet='127.0.0.0/29', port=None, gport=None):
     body = (body.replace('/etc/chrony/conf.d/local-timeservers.conf', str(env['LTS']))
                 .replace('/etc/chrony/conf.d/10-sigmond-ntp.conf', str(env['WIZ']))
                 .replace('/etc/hamsci-physics/gnss-vtec.toml', str(env['GCFG']))
-                .replace('/opt/git/sigmond/hamsci-physics', str(env['PHYS'])))
+                .replace('/opt/git/sigmond/hamsci-physics', str(env['PHYS']))
+                .replace('/etc/systemd/system', str(env['T'] / 'units')))
     if port:
         body = body.replace("s.connect((ip, 123))", f"s.connect((ip, {port}))")
         assert f'{port}' in body
@@ -387,3 +399,93 @@ def test_b2_disabled_placeholder_still_wires(env):
     run_step(env, STEP4, subnet='')
     assert 'host = "192.168.8.50"' in env['GCFG'].read_text()
     assert not list(env['T'].glob('*.tmp-site-timing'))
+
+
+# --- I3 (v3.96 final review): no second VTEC reader, and the operator's off
+# in the legacy config holds -------------------------------------------------
+
+def _old_vtec(env, enabled='disabled', active='inactive'):
+    (env['T'] / 'systemctl.state').write_text(
+        f'is-enabled timestd-vtec.service {enabled}\n'
+        f'is-active timestd-vtec.service {active}\n')
+
+
+def _log(env):
+    p = env['T'] / 'systemctl.log'
+    return p.read_text().splitlines() if p.exists() else []
+
+
+@pytest.mark.parametrize('enabled,active', [('enabled', 'active'), ('enabled', 'inactive'),
+                                            ('disabled', 'active'), ('disabled', 'failed'),
+                                            ('disabled', 'activating')])
+def test_held_move_writes_nothing_while_the_old_unit_runs(env, enabled, active):
+    _old_vtec(env, enabled, active)
+    trust(env, '--trust-gnss', '192.168.8.50')
+    said = run_step(env, STEP4, subnet='')
+    assert not env['GCFG'].exists()
+    assert 'restart hamsci-physics-vtec' not in _log(env)
+    assert 'timestd-vtec.service still runs' in said and 'pending' in said
+
+
+def test_held_move_counts_a_dangling_wants_link(env):
+    wants = env['T'] / 'units' / 'multi-user.target.wants'
+    wants.mkdir()
+    (wants / 'timestd-vtec.service').symlink_to('/nonexistent/timestd-vtec.service')
+    trust(env, '--trust-gnss', '192.168.8.50')
+    run_step(env, STEP4, subnet='')
+    assert not env['GCFG'].exists()
+    assert 'restart hamsci-physics-vtec' not in _log(env)
+
+
+@pytest.mark.parametrize('legacy', [OFF_HOST, OFF_DEV])
+def test_legacy_off_is_the_operators_off(env, legacy):
+    env['CFG'].write_text('[station]\ncallsign = "AC0G"\n\n' + legacy)
+    trust(env, '--trust-gnss', '192.168.8.50')
+    said = run_step(env, STEP4, subnet='')
+    assert not env['GCFG'].exists()
+    assert 'restart hamsci-physics-vtec' not in _log(env)
+    assert f'gnss-vtec kept off by the operator ({env["CFG"]} [gnss_vtec])' in said
+
+
+def test_legacy_off_is_never_scanned(env):
+    env['CFG'].write_text(OFF_HOST)
+    gport = _free_port()
+    srv = FakeGNSS('127.0.0.3', gport, UBX)
+    try:
+        said = run_step(env, STEP4, gport=gport)
+    finally:
+        srv.close()
+    assert not env['GCFG'].exists() and 'OFFER' not in said
+
+
+B2_LEGACY = '[gnss_vtec]\nenabled = false\nhost = "<YOUR_GNSS_HOST>"\nport = 9000\n'
+
+
+def test_b2_legacy_placeholder_wires_once_no_old_unit_runs(env):
+    env['CFG'].write_text(B2_LEGACY)
+    _old_vtec(env)
+    trust(env, '--trust-gnss', '192.168.8.50')
+    run_step(env, STEP4, subnet='')
+    assert 'host = "192.168.8.50"' in env['GCFG'].read_text()
+    assert 'restart hamsci-physics-vtec' in _log(env)
+
+
+def test_b2_legacy_placeholder_waits_while_the_old_unit_runs(env):
+    env['CFG'].write_text(B2_LEGACY)
+    _old_vtec(env, 'enabled', 'active')
+    trust(env, '--trust-gnss', '192.168.8.50')
+    run_step(env, STEP4, subnet='')
+    assert not env['GCFG'].exists()
+    assert 'restart hamsci-physics-vtec' not in _log(env)
+
+
+def test_never_restarts_beside_a_running_old_unit(env):
+    """A placeholder file already present is filled in, but the new unit is
+    not restarted while timestd-vtec still runs."""
+    env['GCFG'].write_text(B2_LEGACY)
+    _old_vtec(env, 'enabled', 'active')
+    trust(env, '--trust-gnss', '192.168.8.50')
+    said = run_step(env, STEP4, subnet='')
+    assert 'host = "192.168.8.50"' in env['GCFG'].read_text()
+    assert 'restart hamsci-physics-vtec' not in _log(env)
+    assert 'hamsci-physics-vtec not restarted' in said
