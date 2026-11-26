@@ -329,7 +329,7 @@ class RenderAnnotationQualityBodyTests(unittest.TestCase):
             None, ERR_NOT_FOUND, None, None, None, [],
         )
         self.assertIn("hf-timestd authority unavailable", out)
-        self.assertIn("timestd-fusion", out)
+        self.assertIn("timestd-authority-manager", out)
         # Should not crash trying to render the rest.
         self.assertNotIn("Per-consumer", out)
 

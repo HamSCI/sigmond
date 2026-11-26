@@ -943,7 +943,7 @@ def render_annotation_quality_body(
         )
         lines.append("Per-stream σ cannot be rendered without it.")
         lines.append("")
-        lines.append("[dim]Check: sudo systemctl status timestd-fusion.service[/]")
+        lines.append("[dim]Check: sudo systemctl status timestd-authority-manager.service[/]")
         return "\n".join(lines)
     if auth_error == ERR_UNREADABLE:
         lines.append(

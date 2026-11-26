@@ -56,7 +56,7 @@ EOF
     PATH="$T/bin:$PATH" CFG="$T/cfg.toml" bash -c "say(){ echo \"\$*\" >> $T/say.log; }; source $T/step.sh"
     local got restarted=no
     got=$(python3 -c "import tomllib,sys; t=tomllib.load(open(sys.argv[1],'rb')).get('timing',{}).get('authority_manager',{}).get('t4',{}); print(','.join(t.get('peers',[])) or '-')" "$T/cfg.toml")
-    grep -q 'try-restart timestd-fusion' "$T/systemctl.log" 2>/dev/null && restarted=yes
+    grep -q 'try-restart timestd-authority-manager' "$T/systemctl.log" 2>/dev/null && restarted=yes
     if [ "$got" = "$want" ] && [ "$restarted" = "$wantr" ]; then echo "  ok   $name"
     else echo "  FAIL $name: peers=$got (want $want) restart=$restarted (want $wantr); say: $(cat "$T/say.log" 2>/dev/null)"; fail=1; fi
 }

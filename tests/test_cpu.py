@@ -1226,3 +1226,8 @@ def test_layout_reserve_one_unchanged():   # today's values for the 5560U, verba
     assert two['radiod_pairs'] == [[3, 9], [4, 10]]
     assert two['worker_cpus'] == [0, 6, 1, 7, 2, 8]
     assert two['isolcpus'] == [0, 1, 2, 3, 4, 6, 7, 8, 9, 10]
+
+
+def test_authority_manager_is_placed_with_the_other_timestd_units():
+    from sigmond.cpu import AFFINITY_UNITS
+    assert AFFINITY_UNITS["timestd-authority-manager.service"] == "other"

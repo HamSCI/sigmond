@@ -258,7 +258,7 @@ fi
 # from 2026-10-04 until T4 was declared by hand on 2026-10-05.  Read the
 # servers from local-timeservers.conf -- whether step 2 wrote it just now or a
 # site-restore replayed it -- and ADD any missing one; never remove an
-# operator's peer.  The authority runner lives in timestd-fusion.
+# operator's peer.  The authority runner lives in timestd-authority-manager.
 # ⛔ Declare only a server chrony ITSELF vouches for.  Step 2 accepts any
 # host whose reply carries stratum 1; T4 outranks T3, so an unvetted
 # responder (a router claiming stratum 1, an unsynchronised box) would
@@ -386,8 +386,8 @@ print('ADDED ' + ' '.join(missing))
 PYEOF
 )
         case "$T4ADD" in
-            ADDED*) say "T4 peers declared to hf-timestd: ${T4ADD#ADDED } - restarting timestd-fusion"
-                    systemctl try-restart timestd-fusion 2>/dev/null ;;
+            ADDED*) say "T4 peers declared to hf-timestd: ${T4ADD#ADDED } - restarting timestd-authority-manager"
+                    systemctl try-restart timestd-authority-manager 2>/dev/null ;;
             "")     ;;
             *)      say "T4 declaration FAILED, config untouched: $(printf '%s' "$T4ADD" | tail -1)" ;;
         esac
@@ -1107,8 +1107,8 @@ out('ARMED', 'T6 armed from %s: frequency_hz = %d (TX %d Hz folded at %d sps); %
 PYEOF
 )
     case "$T6LAN" in
-        ARMED*)   say "${T6LAN#ARMED } - restarting timestd-core-recorder, timestd-fusion"
-                  systemctl try-restart timestd-core-recorder timestd-fusion 2>/dev/null ;;
+        ARMED*)   say "${T6LAN#ARMED } - restarting timestd-core-recorder, timestd-authority-manager"
+                  systemctl try-restart timestd-core-recorder timestd-authority-manager 2>/dev/null ;;
         OFFER*)   say "T6 OFFER, config untouched: ${T6LAN#OFFER }" ;;
         WAIT*)    say "T6 NOT armed this run: ${T6LAN#WAIT }" ;;
         SKIP*)    say "T6: ${T6LAN#SKIP }" ;;

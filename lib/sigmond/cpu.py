@@ -73,6 +73,7 @@ AFFINITY_UNITS = {
     'ka9q-web@.service':        'other',
     # hf-timestd / grape group
     'timestd-core-recorder.service':     'other',
+    'timestd-authority-manager.service': 'other',
     'timestd-fusion.service':            'other',
     'timestd-l2-calibration.service':    'other',
     'timestd-metrology@.service':        'other',

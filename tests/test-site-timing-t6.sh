@@ -55,7 +55,7 @@ run_case() {  # run_case <name> <cfg> <want-enabled> <want-freq> <want-restart y
         bash -c "say(){ echo \"\$*\" >> $T/say.log; }; source $T/step.sh"
     local got restarted=no browsed=no nsay
     got=$(python3 -c "import tomllib,sys; t=tomllib.load(open(sys.argv[1],'rb')).get('timing',{}).get('t6_pps',{}); print(str(t.get('enabled')).lower(), t.get('frequency_hz'))" "$T/cfg.toml")
-    grep -q 'try-restart timestd-core-recorder timestd-fusion' "$T/systemctl.log" 2>/dev/null && restarted=yes
+    grep -q 'try-restart timestd-core-recorder timestd-authority-manager' "$T/systemctl.log" 2>/dev/null && restarted=yes
     [ -f "$T/browse.log" ] && browsed=yes
     nsay=$(wc -l < "$T/say.log" 2>/dev/null || echo 0)
     local ok=1

@@ -50,6 +50,10 @@ systemctl disable --now sigmond-recorder-watchdog.timer sigmond-storage-expire.t
 - The rollback loses one partial raw chunk per channel.  v3.95's recorder writes the
   open chunk to `/dev/shm` again.  About 21 minutes after it starts, its mover moves
   that chunk onto the disk, where it replaces the partial chunk v3.96 wrote.
+- v3.96 moved the timing authority out of fusion into `timestd-authority-manager.service`.
+  Rolling back to v3.95 removes that unit file with the hf-timestd checkout, and v3.95's
+  fusion hosts the authority again.  If the unit lingers, switch it off:
+  `systemctl disable --now timestd-authority-manager.service`.
 
 ---
 
