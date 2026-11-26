@@ -263,17 +263,27 @@ This goes into `docs/CLIENT-CONTRACT.md` as the next version. In outline:
 
 ## Existing pieces to fold in
 
-*(Designer's call on the hand-over: hf-timestd's guardian keeps its own 95 %-of-`df` eviction
-during migration, as a last-resort net only. Once hf-timestd takes allotments, that net moves to
-98 %, above the ledger's final stage, so the two never act on the same numbers.)*
+*(The hand-over is done. hf-timestd's guardian acts only in an emergency: at 98 % of `df`, above
+the ledger's final stage, when the ledger manages the client, and at 95 % on a standalone
+install. Routine retention runs through the ledger, so the two never act on the same numbers.)*
 
-| Piece | Today | Under the ledger |
-|---|---|---|
-| hf-timestd `resource_guardian.py` / `quota_manager.py` | budgets the raw ring against guest `df`; evicts oldest whole days at 95 % | becomes hf-timestd's side of the contract: reports its classes, trims to the allotment sigmond gives it |
-| sigmond `storage_trim.py` | TTL delete on the shared `sink.db` queue | `sink.db` gets an owner and an allotment; rows confirmed sent count as the lowest class |
-| `smd archive add` + the planned archiver | archive drive at `/var/lib/sigmond/archive`, its own 90 % high-water mark | the drive becomes a store; its high-water mark becomes that store's headroom |
-| `timestd-prune.timer` | separate retention pruning | folded into hf-timestd's trim, driven by its allotment |
-| §17 `data_sinks` with `retention_days`, `mb_per_day` | declared, not enforced | the registration the ledger works from |
+| Piece | Under the ledger |
+|---|---|
+| hf-timestd `resource_guardian.py` / `quota_manager.py` | The guardian is the emergency net described above. hf-timestd answers the ledger's trim request and deletes its own rows by age. |
+| sigmond `storage_trim.py` | `sink.db` has an owner and an allotment; rows confirmed sent count as the lowest class. |
+| `smd archive add` + the planned archiver | The archive drive is a store; its high-water mark is that store's headroom. |
+| `timestd-prune.timer` | Retired. hf-timestd's retention takes its work, and `retired_units` in `deploy.toml` makes `smd align` stop the old units. |
+| §17 `data_sinks` with `retention_days`, `mb_per_day` | The registration the ledger works from. |
+
+### Retention by days: `expire`
+
+The hourly `smd storage expire` asks each client to delete its own rows older than that
+client's retention in days. sigmond deletes nothing. hf-timestd keeps science tables 30 days,
+timing tables 90 days, `authority_history` 30 days and six retired-product tables 30 days.
+hamsci-physics keeps `L3_dtec_timeseries`, `L3_dtec_diff` and `L3_gnss_vtec` 30 days and its
+other L3 tables 365 days. Each client's verb drops to the database owner before it opens the
+file, deletes in short batches and yields to the writers between batches.
+`smd storage compact` returns the freed pages to the disk when an operator asks for it.
 
 ## Decided by Michael
 
