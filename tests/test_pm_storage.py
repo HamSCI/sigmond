@@ -295,6 +295,8 @@ class FakeHost:
         self.radiods = {100: ["radiod@B4.service"]}   # vmid -> active radiod units; None = agent deaf
         self.fail_systemctl = set()  # (vmid, action) that fail
         self.fail_snapshot = False
+        self.no_discard = set()      # vmids whose running disk lacks discard=on
+        self.pending = {}            # vmid -> scsi0 value waiting for a stop and start
 
     def calls_of(self, kind):
         return [c for c in self.calls if c[0] == kind]
@@ -335,7 +337,17 @@ class FakeHost:
 
     def qm_config(self, vmid):
         sid = self.pool_of.get(vmid, "local-lvm")
-        return f"boot: order=scsi0\nscsi0: {sid}:vm-{vmid}-disk-0,size=255G\n"
+        opts = "" if vmid in self.no_discard else ",discard=on,ssd=1"
+        return f"boot: order=scsi0\nscsi0: {sid}:vm-{vmid}-disk-0,size=255G{opts}\n"
+
+    def qm_config_pending(self, vmid):
+        if vmid in self.pending:
+            return f"boot: order=scsi0\nscsi0: {self.pending[vmid]}\n"
+        return self.qm_config(vmid)
+
+    def qm_set(self, vmid, key, value):
+        self.calls.append(("qm_set", vmid, key, value))
+        return pm.RunResult(0, "", "")
 
     def list_snapshots(self, vmid):
         return json.dumps([{"name": "current"}] + self.snaps.get(vmid, []))
@@ -932,3 +944,86 @@ def test_snapshot_include_data_disks_flag_allows():
     host.qm_config = lambda vmid: base(vmid) + "scsi1: local-lvm:vm-100-disk-9,backup=0,size=240G\n"
     assert pm.main(["snapshot", "100", "x", "--include-data-disks", "--live"], host) == 0
     assert len(host.calls_of("snapshot")) == 1
+
+
+# ---------------------------------------------------------------------------
+# discard: a thin disk without it never hands the guest's trims to the pool
+# ---------------------------------------------------------------------------
+
+def test_undiscarded_disks_names_live_thin_disks_without_discard():
+    cfg = ("boot: order=scsi0\n"
+           "scsi0: local-lvm:vm-100-disk-0,size=255G\n"
+           "scsi1: local-lvm:vm-100-disk-1,discard=on,size=10G\n"
+           "scsi2: local-lvm:vm-100-disk-2,discard=ignore,size=10G\n"
+           "ide2: local-lvm:vm-100-cloudinit,media=cdrom\n"
+           "scsi3: other:vm-100-disk-3,size=10G\n"
+           "\n[pre-v396]\nscsi4: local-lvm:vm-100-disk-4,size=1G\n")
+    found = pm.undiscarded_disks(cfg, pm.parse_storage_cfg(STORAGE_CFG))
+    assert [k for k, _ in found] == ["scsi0", "scsi2"]
+
+
+def test_with_discard_keeps_options_and_adds_ssd_except_on_virtio():
+    assert (pm.with_discard("scsi0", "local-lvm:vm-100-disk-0,size=255G")
+            == "local-lvm:vm-100-disk-0,size=255G,discard=on,ssd=1")
+    assert (pm.with_discard("scsi0", "local-lvm:vm-100-disk-0,discard=ignore,ssd=0,size=1G")
+            == "local-lvm:vm-100-disk-0,discard=on,ssd=0,size=1G")
+    assert (pm.with_discard("virtio0", "local-lvm:vm-100-disk-0,size=1G")
+            == "local-lvm:vm-100-disk-0,size=1G,discard=on")
+
+
+def test_report_alarms_a_thin_disk_without_discard_and_tells_the_guest():
+    host = _fake_host()
+    host.no_discard = {100}
+    pm.main(["report"], host)
+    lines = [l for l in host.logged if "discard" in l]
+    assert len(lines) == 1 and "VM 100" in lines[0] and "pm-storage.py discard 100 --apply" in lines[0]
+    to_100 = [c[3] for c in host.calls_of("file_write") if c[1] == 100]
+    assert "VM 100 disk scsi0" in to_100[0]           # the pool's report: every VM on it
+
+
+def test_report_is_quiet_when_every_thin_disk_discards():
+    host = _fake_host()
+    pm.main(["report"], host)
+    assert not [l for l in host.logged if "discard" in l]
+
+
+def test_discard_without_apply_changes_nothing(capsys):
+    host = _fake_host()
+    host.no_discard = {100}
+    assert pm.main(["discard", "100"], host) == 0
+    assert host.calls_of("qm_set") == []
+    assert "discard=on,ssd=1" in capsys.readouterr().out
+
+
+def test_discard_apply_sets_the_disk_and_names_the_restart(capsys):
+    host = _fake_host()
+    host.no_discard = {100}
+    assert pm.main(["discard", "100", "--apply"], host) == 0
+    assert host.calls_of("qm_set") == [
+        ("qm_set", 100, "scsi0", "local-lvm:vm-100-disk-0,size=255G,discard=on,ssd=1")]
+    out = capsys.readouterr().out
+    assert "qm reboot 100" in out and "fstrim" in out
+
+
+def test_discard_already_pending_sets_nothing_and_says_restart(capsys):
+    host = _fake_host()
+    host.no_discard = {100}
+    host.pending = {100: "local-lvm:vm-100-disk-0,size=255G,discard=on,ssd=1"}
+    assert pm.main(["discard", "100", "--apply"], host) == 0
+    assert host.calls_of("qm_set") == []
+    assert "qm reboot 100" in capsys.readouterr().out
+
+
+def test_discard_on_a_vm_that_already_discards_is_a_no_op(capsys):
+    host = _fake_host()
+    assert pm.main(["discard", "100", "--apply"], host) == 0
+    assert host.calls_of("qm_set") == []
+    assert "already" in capsys.readouterr().out
+
+
+def test_discard_reports_a_failed_set(capsys):
+    host = _fake_host()
+    host.no_discard = {100}
+    host.qm_set = lambda vmid, key, value: pm.RunResult(2, "", "VM is locked (backup)")
+    assert pm.main(["discard", "100", "--apply"], host) == 1
+    assert "VM is locked" in capsys.readouterr().err

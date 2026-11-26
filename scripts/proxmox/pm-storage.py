@@ -29,6 +29,13 @@ What it does
     (``/run/sigmond/host-pool.json``, schema 1, through the guest agent);
   * logs its alarms to the journal, one line per episode.
 
+``discard <vmid> [--apply]`` sets ``discard=on`` (and ``ssd=1`` where the
+bus allows it) on each of the VM's thin-pool disks that lack it.  Without
+it the guest's trims stop at QEMU, and every block the guest ever wrote
+stays allocated in the pool: on B4 (2026-11-26) the pool held 246 GiB for a
+guest using 195 GiB.  The change waits for the VM's next stop and start;
+``report`` alarms each such disk until it runs.
+
 ``snapshot <vmid> <name> [--hours N]`` takes a labelled snapshot whose
 lifetime follows the pool's projected time to full, or refuses one the
 pool cannot carry.
@@ -201,6 +208,38 @@ def pool_for_vm(qm_config_text: str, storage_map: dict) -> Optional[tuple]:
         if sep and sid in storage_map:
             return storage_map[sid]
     return None
+
+
+def _live_disks(qm_config_text: str) -> list:
+    """(key, value) of the live config's disks; a snapshot section ends it."""
+    out = []
+    for line in qm_config_text.splitlines():
+        if line.startswith("["):
+            break
+        key, sep, value = line.partition(":")
+        key, value = key.strip(), value.strip()
+        if sep and _DISK_KEY.match(key) and "media=cdrom" not in value \
+                and "cloudinit" not in value:
+            out.append((key, value))
+    return out
+
+
+def undiscarded_disks(qm_config_text: str, storage_map: dict) -> list:
+    """(key, value) of each live disk on a thin pool that lacks discard=on."""
+    return [(key, value) for key, value in _live_disks(qm_config_text)
+            if value.split(",")[0].partition(":")[0] in storage_map
+            and "discard=on" not in value.split(",")[1:]]
+
+
+def with_discard(key: str, value: str) -> str:
+    """The disk value with discard=on; ssd=1 too, unless set or on virtio."""
+    head, *opts = value.split(",")
+    opts = ["discard=on" if o.startswith("discard=") else o for o in opts]
+    if "discard=on" not in opts:
+        opts.append("discard=on")
+    if not key.startswith("virtio") and not any(o.startswith("ssd=") for o in opts):
+        opts.append("ssd=1")
+    return ",".join([head] + opts)
 
 
 def read_pool(lvs_json: str, vg: str, pool: str) -> dict:
@@ -376,7 +415,7 @@ def _history(state: dict, name: str, now: datetime) -> list:
 
 def _vm_keys(vmid) -> tuple:
     """(exact keys, key prefixes) of the alarms that belong to one VM."""
-    return ({f"guest:{vmid}", f"snaplist:{vmid}", f"config:{vmid}"},
+    return ({f"guest:{vmid}", f"snaplist:{vmid}", f"config:{vmid}", f"discard:{vmid}"},
             (f"snap:{vmid}:", f"reap:{vmid}:"))
 
 
@@ -478,19 +517,23 @@ def _report_body(host, now, state, items, pools_state, unmeasured) -> int:
             pools_state[name] = {"history": _history(state, name, now)}
         return 1
 
-    by_pool, running = {}, set()
+    by_pool, running, no_discard = {}, set(), {}
     for vm in vms:
         vmid = int(vm["vmid"])
         if vm.get("status") == "running":
             running.add(vmid)
         try:
-            where = pool_for_vm(host.qm_config(vmid), smap)
+            cfg = host.qm_config(vmid)
+            where = pool_for_vm(cfg, smap)
         except Exception:                           # noqa: BLE001
             items.append((f"config:{vmid}", "x", 4, f"config of VM {vmid} unreadable"))
             unmeasured.add_vm(vmid)                 # its snapshots and guest went unseen
             continue
         if where:
             by_pool.setdefault(where, []).append(vmid)
+            bare = [key for key, _ in undiscarded_disks(cfg, smap)]
+            if bare:
+                no_discard[vmid] = bare
 
     # Measure every pool and list its snapshots.
     measured = []      # [name, pool, members, snaps, churn, local_items]
@@ -514,6 +557,13 @@ def _report_body(host, now, state, items, pools_state, unmeasured) -> int:
         pools_state[name] = {**pool, "pool_pct": fill, "vms": members, "history": history,
                              "churn_bytes_per_h": churn}
         snaps, local = [], []
+        for vmid in members:
+            if vmid in no_discard:
+                local.append((f"discard:{vmid}", ",".join(no_discard[vmid]), 4,
+                              f"VM {vmid} disk {', '.join(no_discard[vmid])} on pool {name} "
+                              f"runs without discard=on: the guest's trims never reach the "
+                              f"pool, so its use only grows; fix: pm-storage.py discard "
+                              f"{vmid} --apply, then qm reboot {vmid}"))
         for vmid in members:
             try:
                 snaps += parse_snapshots(host.list_snapshots(vmid), vmid)
@@ -605,6 +655,39 @@ def data_disks(qm_config_text: str) -> list:
             disks.append(key)
     boot = boot or ("scsi0" if "scsi0" in disks else (disks[0] if disks else None))
     return [d for d in disks if d != boot]
+
+
+def _discard(host, vmid: int, apply: bool) -> int:
+    """Set discard=on on the VM's thin disks; the change waits for a stop and start."""
+    smap = parse_storage_cfg(host.storage_cfg())
+    running = undiscarded_disks(host.qm_config(vmid), smap)
+    if not running:
+        print(f"VM {vmid}: every thin-pool disk already runs with discard=on")
+        return 0
+    pending = dict(undiscarded_disks(host.qm_config_pending(vmid), smap))
+    todo = [(key, value) for key, value in running if key in pending]
+    restart = (f"It takes effect at the VM's next stop and start: qm reboot {vmid} "
+               f"(a reboot inside the guest is not enough; it restarts radiod).  "
+               f"Then, in the guest: fstrim -av")
+    if not todo:
+        print(f"VM {vmid}: discard=on already set, waiting for a restart.  {restart}")
+        return 0
+    rc = 0
+    for key, value in todo:
+        new = with_discard(key, value)
+        if not apply:
+            print(f"VM {vmid} {key}: would set {new}  (re-run with --apply)")
+            continue
+        res = host.qm_set(vmid, key, new)
+        if res.rc != 0:
+            print(f"pm-storage: qm set {vmid} --{key} failed: "
+                  f"{(res.stderr or res.stdout).strip()}", file=sys.stderr)
+            rc = 1
+            continue
+        print(f"VM {vmid} {key}: set {new}")
+    if apply and rc == 0:
+        print(restart)
+    return rc
 
 
 def _refuse(msg: str) -> int:
@@ -799,7 +882,14 @@ class RealHost:
         return _out(["pvesh", "get", f"/nodes/{self._node}/qemu", "--output-format", "json"])
 
     def qm_config(self, vmid):
+        """The running config: a change that waits for a restart does not count."""
+        return _out(["qm", "config", str(int(vmid)), "--current"])
+
+    def qm_config_pending(self, vmid):
         return _out(["qm", "config", str(int(vmid))])
+
+    def qm_set(self, vmid, key, value):
+        return _run(["qm", "set", str(int(vmid)), f"--{key}", value])
 
     def list_snapshots(self, vmid):
         return _out(["pvesh", "get", f"/nodes/{self._node}/qemu/{int(vmid)}/snapshot",
@@ -893,12 +983,17 @@ def main(argv=None, host=None) -> int:
                     help="leave radiod running (it may silently lose ~0.1-0.2 s of samples)")
     sp.add_argument("--include-data-disks", action="store_true",
                     help="snapshot even with a data disk attached (it pins the data disk's blocks)")
+    dp = sub.add_parser("discard", help="let the guest's trims reach the thin pool")
+    dp.add_argument("vmid", type=int)
+    dp.add_argument("--apply", action="store_true", help="run qm set (else show it)")
     args = ap.parse_args(argv)
     if host is None:
         host = RealHost()
         signal.signal(signal.SIGTERM, _on_sigterm)
     if args.cmd == "report":
         return _report(host)
+    if args.cmd == "discard":
+        return _discard(host, args.vmid, args.apply)
     return _snapshot(host, args.vmid, args.name, args.hours, live=args.live,
                      include_data_disks=args.include_data_disks)
 

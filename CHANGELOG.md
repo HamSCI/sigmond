@@ -31,6 +31,19 @@ what has run on real hardware.  A release that no station has yet installed says
   (`hamsci-physics-vtec`, `timestd-ionex-download`, `timestd-iri-update`) stay off
   radiod's cores.
 
+### Disk space the guest frees goes back to the host
+
+- **New stations attach the VM disk with `discard=on,ssd=1`.**  Before, QEMU
+  dropped every trim the guest sent, so space the guest freed stayed allocated in
+  the host's thin pool.  On AC0G-B4 the pool held 246 GiB for a guest that used
+  195 GiB, and the pool crossed the 70 % line above which no snapshot may be taken.
+  Every appliance host but KFS-OMNI ran this way.
+- **`pm-storage.py` alarms a VM disk without `discard=on`**, in the host journal
+  and in the guest's pool report, and **`pm-storage.py discard <vmid> --apply`**
+  sets it on an existing station.  The change waits for the VM's next stop and
+  start (`qm reboot <vmid>`; a reboot inside the guest does not apply it), and
+  that restarts radiod.  Then `fstrim -av` in the guest hands the freed space back.
+
 ### Rolling back to v3.95
 
 An align back to v3.95 works, but it leaves two v3.96 timers enabled, and both then
