@@ -160,6 +160,11 @@ STATUS = Path(_env("RWD_STATUS", "/var/lib/timestd/status/core-recorder-status.j
 #: unreadable DB is reported rather than silently treated as unhealthy.
 AUTH_DB = _env("RWD_AUTH_DB", "/var/lib/timestd/authority_history.db")
 
+#: `smd storage compact --apply` writes this before it stops anything and
+#: removes it after it has started everything again.  A marker whose pid is dead
+#: means the run was killed mid-way; tick() starts the listed units again.
+COMPACT_MARKER = Path(_env("RWD_COMPACT_MARKER", "/run/sigmond/compact-in-progress.json"))
+
 T6_STUCK, FAILED = "t6-stuck", "failed"
 RADIOD, NO_OUTPUT, HPPS = "radiod-restarted", "no-output", "hpps-stale"
 REQUEST_CAUSES = (RADIOD, NO_OUTPUT, HPPS)
@@ -718,6 +723,7 @@ class Paths:
     request_dir: Path = REQUEST_DIR
     ledger: Path = LEDGER
     state: Path = STATE
+    compact_marker: Path = COMPACT_MARKER
 
 
 @contextlib.contextmanager
@@ -761,6 +767,65 @@ def _act(d: Decision, run: Callable) -> tuple:
                                 + (f" ({tail})" if tail else ""))
 
 
+def _pid_alive(pid) -> bool:
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True            # EPERM: it exists
+    return True
+
+
+def restore_interrupted_compaction(marker: Path, run: Callable, now: float, *,
+                                   dry_run: bool = False,
+                                   say: Callable[[str], None] = print) -> list:
+    """If a compaction marker outlives its pid, start the units it stopped (in
+    order) and its expire timer, remove the marker, and return ledger rows.
+    Undoes a tool's own stop, so no cooldown or cap applies."""
+    try:
+        d = json.loads(Path(marker).read_text())
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError):
+        d = None
+    if isinstance(d, dict) and _pid_alive(d.get("pid")):
+        return []                # compaction is running; leave its units alone
+    if not isinstance(d, dict):
+        say(f"WARNING: {marker} is unreadable; removing it, restoring nothing")
+        if not dry_run:
+            try:
+                Path(marker).unlink()
+            except OSError:
+                pass
+        return [{"utc": _iso(now), "agent": AGENT, "action": "compaction-restore",
+                 "ok": False, "reason": "marker unreadable"}]
+    units = [u for u in (d.get("units") or []) if isinstance(u, str)]
+    timer = d.get("timer") if d.get("timer_was_active") else None
+    todo = units + ([timer] if isinstance(timer, str) else [])
+    if dry_run:
+        say(f"  DRY-RUN: would restore after an interrupted compaction: {', '.join(todo)}")
+        return []
+    rows, bad = [], []
+    for u in todo:
+        cp = _systemctl(run, "start", u, timeout=ACT_TIMEOUT_S)
+        ok = cp.returncode == 0
+        if not ok:
+            bad.append(u)
+        rows.append({"utc": _iso(now), "agent": AGENT, "action": "compaction-restore",
+                     "unit": u, "ok": ok, "exempt": True,
+                     "reason": f"compaction (pid {d.get('pid')}) died; started {u}"})
+    try:
+        Path(marker).unlink()
+    except OSError:
+        pass
+    say(f"WARNING: compaction interrupted; restored {len(todo) - len(bad)} units"
+        + (f"; COULD NOT START {', '.join(bad)}" if bad else ""))
+    return rows
+
+
 def tick(*, paths: Paths = Paths(), run: Callable = subprocess.run,
          wall: Callable[[], float] = time.time, mono: Callable[[], float] = time.monotonic,
          radiod_unit: Optional[Callable] = None, t6: Optional[Callable] = None,
@@ -775,10 +840,12 @@ def tick(*, paths: Paths = Paths(), run: Callable = subprocess.run,
 
     now = wall()
     st = load_state(paths.state)
+    restore_rows = restore_interrupted_compaction(paths.compact_marker, run, now,
+                                                  dry_run=dry_run, say=say)
     dropped: list = []
     reqs = take_requests(paths.request_dir, now, dropped=dropped, consume=not dry_run)
-    rows = [{"utc": _iso(now), "agent": AGENT, "action": "dropped", "reporter": name,
-             "reason": why} for name, why in dropped]
+    rows = restore_rows + [{"utc": _iso(now), "agent": AGENT, "action": "dropped",
+                            "reporter": name, "reason": why} for name, why in dropped]
 
     rec = unit_state(UNIT, run)
     if rec is None:

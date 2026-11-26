@@ -806,3 +806,76 @@ def test_an_unknown_radiod_unit_warns_once_per_request(tmp_path):
     _, rows, _, _, _ = _tick(tmp_path, sysd, radiod=None, said=said)
     assert [r["action"] for r in rows] == ["deferred"]          # the first tick's row only
     assert not any("WARNING" in m for m in said)
+
+
+# --- a compaction killed mid-way (marker) ------------------------------------
+
+def _marker(tmp_path, pid, units=("a.service", "b.service"), timer=True):
+    m = tmp_path / "compact.json"
+    m.write_text(json.dumps({"pid": pid, "units": list(units),
+                             "timer": "sigmond-storage-expire.timer",
+                             "timer_was_active": timer}))
+    return m
+
+
+def _dead_pid():
+    p = subprocess.Popen(["true"])
+    p.wait()
+    return p.pid
+
+
+def _rec_run(calls):
+    def run(argv, **kw):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    return run
+
+
+def test_dead_compaction_marker_starts_its_units_in_order(tmp_path):
+    # Mutation check: ignore the marker.
+    m = _marker(tmp_path, _dead_pid())
+    calls, said = [], []
+    rows = rw.restore_interrupted_compaction(m, _rec_run(calls), 1e9, say=said.append)
+    assert [c[2] for c in calls] == ["a.service", "b.service",
+                                     "sigmond-storage-expire.timer"]
+    assert not m.exists()
+    assert len(rows) == 3 and all(r["action"] == "compaction-restore" for r in rows)
+    assert any("compaction interrupted; restored 3 units" in s for s in said)
+
+
+def test_live_compaction_marker_is_left_alone(tmp_path):
+    # Mutation check: act while the pid is alive.
+    m = _marker(tmp_path, os.getpid())
+    calls = []
+    assert rw.restore_interrupted_compaction(m, _rec_run(calls), 1e9) == []
+    assert calls == [] and m.exists()
+
+
+def test_the_timer_is_not_started_if_it_was_not_active(tmp_path):
+    m = _marker(tmp_path, _dead_pid(), timer=False)
+    calls = []
+    rw.restore_interrupted_compaction(m, _rec_run(calls), 1e9, say=lambda s: None)
+    assert [c[2] for c in calls] == ["a.service", "b.service"]
+
+
+def test_no_marker_does_nothing(tmp_path):
+    assert rw.restore_interrupted_compaction(tmp_path / "none", _rec_run([]), 1e9) == []
+
+
+def test_tick_restores_and_records_in_the_ledger(tmp_path):
+    m = _marker(tmp_path, _dead_pid())
+    calls = []
+    def run(argv, **kw):
+        calls.append(argv)
+        out = ("ActiveState=active\nResult=success\nNRestarts=0\n"
+               if argv[1] == "show" else "")
+        return subprocess.CompletedProcess(argv, 0, out, "")
+    paths = rw.Paths(request_dir=tmp_path / "req", ledger=tmp_path / "ledger.jsonl",
+                     state=tmp_path / "state.json", compact_marker=m)
+    rw.tick(paths=paths, run=run, wall=lambda: 1e9, mono=lambda: 100_000.0,
+            radiod_unit=lambda: None, t6=lambda st, now: None,
+            ledger_stopped=lambda: False, lock=contextlib.nullcontext, say=lambda s: None)
+    assert not m.exists()
+    assert ["systemctl", "start", "a.service"] in calls
+    rows = [json.loads(l) for l in paths.ledger.read_text().splitlines()]
+    assert sum(r["action"] == "compaction-restore" for r in rows) == 3

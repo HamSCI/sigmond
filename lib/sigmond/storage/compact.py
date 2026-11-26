@@ -25,7 +25,9 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
 import os
+import signal
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,6 +47,7 @@ class CompactError(Exception):
 class CompactRunners:
     hands_off: Callable           # () -> str ; "" when clear, else why
     binary_for: Callable          # (client) -> str | None
+    estimate: Callable            # (binary, target) -> CompactAnswer; read-only
     prepare: Callable             # (binary, target) -> CompactAnswer
     holders: Callable             # (binary, target) -> CompactAnswer
     swap: Callable                # (binary, target) -> CompactAnswer
@@ -55,6 +58,7 @@ class CompactRunners:
     lifecycle_lock: Callable      # (reason) -> context manager; raises CompactError
     journal: Callable             # (line) -> None
     say: Callable                 # (line) -> None
+    marker_path: Path = None      # in-progress marker; None writes none
 
 
 def never_stopped(unit: str) -> bool:
@@ -99,6 +103,7 @@ def default_runners() -> CompactRunners:
     from .. import lifecycle
     from . import clientcall
     from .config import CONFIG_PATH, hands_off_held, load_storage_config
+    from ..recorder_watchdog import COMPACT_MARKER
     from .tick import _binary_for, _journal, _units_of
 
     def hands_off() -> str:
@@ -128,18 +133,26 @@ def default_runners() -> CompactRunners:
 
     @contextlib.contextmanager
     def lifecycle_lock(reason: str):
+        cm = lifecycle.lifecycle_lock(reason)
         try:
-            with lifecycle.lifecycle_lock(reason):
-                yield
-        except SystemExit as exc:
+            cm.__enter__()
+        except SystemExit as exc:           # refused: only the entering
             raise CompactError(f"lifecycle lock: {exc}") from None
+        try:
+            yield
+        except BaseException:
+            if not cm.__exit__(*__import__("sys").exc_info()):
+                raise
+        else:
+            cm.__exit__(None, None, None)
 
     return CompactRunners(
         hands_off=hands_off, binary_for=_binary_for,
+        estimate=clientcall.call_compact_estimate,
         prepare=clientcall.call_compact_prepare, holders=clientcall.call_compact_holders,
         swap=clientcall.call_compact_swap, start_order=start_order, systemctl=systemctl,
         is_active=is_active, expire_lock=make_expire_lock(), lifecycle_lock=lifecycle_lock,
-        journal=_journal, say=print)
+        journal=_journal, say=print, marker_path=COMPACT_MARKER)
 
 
 def _log(r: CompactRunners, client: str, target: str, msg: str, sev: str = "<6>") -> None:
@@ -169,41 +182,106 @@ def compact_client(client: str, target: str, *, apply: bool, r: CompactRunners) 
     binary = r.binary_for(client)
     if not binary:
         return refuse(f"no binary found for {client}")
+    if not apply:
+        return _dry_run(client, target, binary, r)
     prep = r.prepare(binary, target)
     _log(r, client, target, f"prepare: ok={prep.ok} refused={prep.refused} {prep.reason}")
     if not prep.ok or prep.refused:
         return refuse(f"prepare: {prep.reason or 'failed'}")
     r.say(f"prepare: {_sizes(prep.data)}")
-    if not apply:
-        return _dry_run(client, target, binary, r)
     return _apply(client, target, binary, r)
 
 
 def _dry_run(client, target, binary, r) -> int:
+    """Builds no copy: asks the client's read-only `--estimate`, then holders."""
+    est = r.estimate(binary, target)
+    if est.unsupported:
+        r.say("estimate: the client does not support --estimate (older client)")
+    elif not est.ok:
+        r.say(f"estimate: {est.reason or 'failed'}")
+    else:
+        r.say(f"estimate: {_sizes(est.data)}")
+        if est.refused or est.data.get("would_refuse") is True:
+            r.say(f"  prepare would refuse: {est.reason or est.data.get('reason', '')}")
     ans = r.holders(binary, target)
     if not ans.ok or ans.refused:
         r.say(f"holders: {ans.reason or 'failed'}")
         return 1
-    units = _order([u for _, u in ans.holders if u], r.start_order(client))
+    units = _order([u for _, u in ans.holders
+                    if u and not u.startswith("sigmond-storage-expire")], r.start_order(client))
     r.say("holder units, to stop in reverse order: "
           + (", ".join(reversed(units)) or "none"))
     for pid, unit in ans.holders:
         if unit is None:
             r.say(f"  pid {pid} has no unit; an apply would refuse")
+        elif unit.startswith("sigmond-storage-expire"):
+            r.say(f"  an expire pass is running ({unit}); an apply waits for it")
         elif never_stopped(unit):
             r.say(f"  {unit} is never stopped; an apply would refuse")
-    r.say("dry run: nothing stopped; add --apply to compact")
+    _log(r, client, target, "dry run: built no copy, stopped nothing")
+    r.say("dry run: nothing stopped, no copy built; add --apply to compact")
     return 0
 
 
+@contextlib.contextmanager
+def _signals_raise():
+    """SIGTERM and SIGHUP raise SystemExit, once, so the cleanup `finally`
+    blocks run; a second signal during cleanup is ignored."""
+    saved = {}
+
+    def handler(signum, frame):
+        signal.signal(signum, signal.SIG_IGN)
+        raise SystemExit(128 + signum)
+    try:
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            saved[sig] = signal.signal(sig, handler)
+    except ValueError:           # not the main thread
+        saved = {}
+    try:
+        yield
+    finally:
+        for sig, old in saved.items():
+            signal.signal(sig, old)
+
+
+def _write_marker(r, timer_was_active, units, started) -> None:
+    if r.marker_path is None:
+        return
+    path = Path(r.marker_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps({"pid": os.getpid(), "started": started,
+                               "units": list(units), "timer": EXPIRE_TIMER,
+                               "timer_was_active": bool(timer_was_active)}))
+    os.replace(tmp, path)
+
+
+def _clear_marker(r) -> None:
+    if r.marker_path is not None:
+        try:
+            Path(r.marker_path).unlink()
+        except OSError:
+            pass
+
+
 def _apply(client, target, binary, r) -> int:
+    with _signals_raise():
+        return _apply_guarded(client, target, binary, r)
+
+
+def _apply_guarded(client, target, binary, r) -> int:
     timer_was_active = r.is_active(EXPIRE_TIMER)
+    started = time.time()
+    # The marker comes before the first stop; the recorder watchdog restores
+    # the listed units if this process dies without cleaning up.
+    _write_marker(r, timer_was_active, [], started)
     if timer_was_active:
         r.systemctl("stop", EXPIRE_TIMER)
         _log(r, client, target, f"stopped {EXPIRE_TIMER}")
+    mark = lambda units: _write_marker(r, timer_was_active, units, started)
     try:
         with r.expire_lock():
-            return _holders_and_swap(client, target, binary, r)
+            return _holders_and_swap(client, target, binary, r, mark)
     except CompactError as exc:
         _log(r, client, target, f"refused: {exc}", "<4>")
         r.say(f"refused: {exc}")
@@ -213,9 +291,10 @@ def _apply(client, target, binary, r) -> int:
             rc = r.systemctl("start", EXPIRE_TIMER)
             _log(r, client, target, f"started {EXPIRE_TIMER} (exit {rc})",
                  "<6>" if rc == 0 else "<3>")
+        _clear_marker(r)
 
 
-def _holders_and_swap(client, target, binary, r) -> int:
+def _holders_and_swap(client, target, binary, r, mark=lambda units: None) -> int:
     ans = r.holders(binary, target)
     _log(r, client, target, f"holders: ok={ans.ok} refused={ans.refused} {ans.reason}")
     if not ans.ok or ans.refused:
@@ -228,6 +307,7 @@ def _holders_and_swap(client, target, binary, r) -> int:
             raise CompactError(f"{unit} holds the database and is never stopped; "
                                "nothing stopped")
     order = _order([u for _, u in ans.holders], r.start_order(client))
+    mark(order)
     with r.lifecycle_lock(f"storage compact {client} {target}"):
         stopped = []
         try:

@@ -218,5 +218,12 @@ def call_compact_holders(binary: str, target: str, run=subprocess.run) -> Compac
     return _compact(binary, "--holders", target, HOLDINGS_TIMEOUT_S * 3, run)
 
 
+def call_compact_estimate(binary: str, target: str, run=subprocess.run) -> CompactAnswer:
+    """Read-only: what a compaction would do, without building the copy.  The
+    client answers (all optional) live_bytes, expected_bytes, free_bytes and
+    would_refuse (bool, with `reason`) -- kept whole in `data`."""
+    return _compact(binary, "--estimate", target, HOLDINGS_TIMEOUT_S * 3, run)
+
+
 def call_compact_swap(binary: str, target: str, run=subprocess.run) -> CompactAnswer:
     return _compact(binary, "--swap", target, COMPACT_TIMEOUT_S, run)

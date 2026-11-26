@@ -22,6 +22,9 @@ class Rig:
     def __init__(self, holders=((1, REC), (2, MET)), swap_ok=True, hands_off="",
                  stop_fail=(), timer_active=True, expire_busy=False, holders_refused=False):
         self.ev = []
+        self.estimate_ans = CompactAnswer(True, data={"live_bytes": 100,
+                                                      "expected_bytes": 40})
+        self.marker = None
         self.holders_ans = holders
         self.swap_ok, self.stop_fail = swap_ok, set(stop_fail)
         self.timer_active, self.expire_busy = timer_active, expire_busy
@@ -29,6 +32,7 @@ class Rig:
         self.r = c.CompactRunners(
             hands_off=lambda: hands_off,
             binary_for=lambda cl: "/bin/hf",
+            estimate=lambda b, t: self._rec("estimate", self.estimate_ans),
             prepare=lambda b, t: self._rec("prepare", CompactAnswer(
                 True, data={"db_bytes": 100, "compact_bytes": 40})),
             holders=lambda b, t: self._rec("holders", CompactAnswer(
@@ -42,7 +46,8 @@ class Rig:
             expire_lock=self._expire_lock,
             lifecycle_lock=self._lifecycle,
             journal=lambda line: self.ev.append(("journal", line)),
-            say=lambda line: self.ev.append(("say", line)))
+            say=lambda line: self.ev.append(("say", line)),
+            marker_path=None)
 
     def _rec(self, name, ans):
         self.ev.append((name,))
@@ -85,9 +90,39 @@ def test_dry_run_stops_nothing():
     rig = Rig()
     assert c.compact_client("hf-timestd", "timestd", apply=False, r=rig.r) == 0
     assert _sysctl(rig) == [] and ("swap",) not in rig.calls()
-    assert ("prepare",) in rig.calls()
+    assert ("prepare",) not in rig.calls()      # mutation: prepare in the dry run
+    assert ("estimate",) in rig.calls() and ("holders",) in rig.calls()
     out = rig.says()
-    assert "db_bytes=100" in out and REC in out and MET in out
+    assert "live_bytes=100" in out and REC in out and MET in out
+
+
+def test_dry_run_says_so_when_estimate_is_unsupported_and_still_lists_holders():
+    rig = Rig()
+    rig.estimate_ans = CompactAnswer(False, reason="verb not supported (older client)",
+                                     unsupported=True)
+    assert c.compact_client("hf-timestd", "timestd", apply=False, r=rig.r) == 0
+    assert "does not support --estimate" in rig.says() and REC in rig.says()
+    assert ("prepare",) not in rig.calls()
+
+
+def test_dry_run_reports_a_would_refuse_estimate():
+    rig = Rig()
+    rig.estimate_ans = CompactAnswer(True, data={"would_refuse": True, "reason": "no space",
+                                                 "free_bytes": 5})
+    c.compact_client("hf-timestd", "timestd", apply=False, r=rig.r)
+    assert "would refuse: no space" in rig.says()
+
+
+def test_dry_run_with_a_running_expire_says_apply_waits():
+    rig = Rig(holders=((1, REC), (4, "sigmond-storage-expire.service")))
+    c.compact_client("hf-timestd", "timestd", apply=False, r=rig.r)
+    assert "apply waits" in rig.says() and "would refuse" not in rig.says()
+
+
+def test_apply_still_prepares():
+    rig = Rig()
+    c.compact_client("hf-timestd", "timestd", apply=True, r=rig.r)
+    assert ("prepare",) in rig.calls() and ("estimate",) not in rig.calls()
 
 
 def test_apply_stops_holders_swaps_and_starts_them_in_order():
@@ -130,7 +165,7 @@ def test_a_holder_without_a_unit_refuses_before_stopping_anything():
 def test_hands_off_refuses():
     rig = Rig(hands_off="until tomorrow")
     assert c.compact_client("hf-timestd", "timestd", apply=True, r=rig.r) == 1
-    assert rig.calls() == [] or all(e[0] not in ("prepare", "stop") for e in rig.calls())
+    assert rig.calls() == []
 
 
 @pytest.mark.parametrize("unit", ["radiod@main.service", "ka9q-web.service",
@@ -177,6 +212,63 @@ def test_a_stopped_timer_is_not_started_by_compaction():
     rig = Rig(timer_active=False)
     c.compact_client("hf-timestd", "timestd", apply=True, r=rig.r)
     assert all(e[1] != c.EXPIRE_TIMER for e in _sysctl(rig))
+
+
+# --- interruption -----------------------------------------------------------
+
+def test_sigterm_mid_swap_still_starts_units_and_timer():
+    import os, signal
+    rig = Rig()
+    def swap(b, t):
+        rig.ev.append(("swap",))
+        os.kill(os.getpid(), signal.SIGTERM)
+        rig.ev.append(("after-signal",))      # not reached
+        return CompactAnswer(True)
+    rig.r.swap = swap
+    before = signal.getsignal(signal.SIGTERM)
+    with pytest.raises(SystemExit) as e:
+        c.compact_client("hf-timestd", "timestd", apply=True, r=rig.r)
+    assert e.value.code == 128 + signal.SIGTERM
+    assert ("after-signal",) not in rig.calls()
+    assert [x for x in _sysctl(rig) if x[0] == "start"] == [
+        ("start", REC), ("start", MET), ("start", c.EXPIRE_TIMER)]
+    assert signal.getsignal(signal.SIGTERM) is before      # handler restored
+
+
+def test_sighup_is_handled_too():
+    import os, signal
+    rig = Rig()
+    def swap(b, t):
+        os.kill(os.getpid(), signal.SIGHUP)
+        return CompactAnswer(True)
+    rig.r.swap = swap
+    with pytest.raises(SystemExit):
+        c.compact_client("hf-timestd", "timestd", apply=True, r=rig.r)
+    assert ("start", REC) in _sysctl(rig)
+
+
+def test_marker_is_written_before_the_first_stop_and_removed_after(tmp_path):
+    rig = Rig()
+    rig.r.marker_path = tmp_path / "run" / "compact.json"
+    seen = {}
+    orig = rig._systemctl
+    def spy(verb, unit):
+        if verb == "stop" and unit == MET:
+            seen["m"] = json.loads(rig.r.marker_path.read_text())
+        return orig(verb, unit)
+    rig.r.systemctl = spy
+    assert c.compact_client("hf-timestd", "timestd", apply=True, r=rig.r) == 0
+    import os
+    assert seen["m"]["pid"] == os.getpid() and seen["m"]["units"] == [REC, MET]
+    assert seen["m"]["timer_was_active"] is True
+    assert not rig.r.marker_path.exists()
+
+
+def test_marker_is_removed_after_a_refusal(tmp_path):
+    rig = Rig(holders=((1, None),))
+    rig.r.marker_path = tmp_path / "m.json"
+    c.compact_client("hf-timestd", "timestd", apply=True, r=rig.r)
+    assert not rig.r.marker_path.exists()
 
 
 # --- the real expire flock -------------------------------------------------
