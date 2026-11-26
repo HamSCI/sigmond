@@ -12,14 +12,18 @@ REPOS = Path(__file__).resolve().parents[2]
 
 class FakeSystemd:
     """Answers systemctl from a dict of states and records every argv."""
-    def __init__(self, states, migrate_rc=0, after=("active", "yes")):
+    def __init__(self, states, migrate_rc=0, after=("active", "yes", "loaded"), rcs=None,
+                 migrate_err=""):
         self.states, self.calls, self.migrate_rc, self.after = states, [], migrate_rc, after
+        self.rcs, self.migrate_err = rcs or {}, migrate_err
     def __call__(self, argv, **kw):
         self.calls.append(list(argv))
         out, rc = "", 0
         if argv[0] != "systemctl":
             rc = self.migrate_rc
-        elif argv[1] == "is-enabled":
+            return subprocess.CompletedProcess(argv, rc, "", self.migrate_err)
+        rc = self.rcs.get(argv[1], 0)
+        if argv[1] == "is-enabled":
             out = self.states.get(argv[2], ("", ""))[0]
         elif argv[1] == "is-active":
             out = self.states.get(argv[2], ("", "inactive"))[1]
@@ -75,13 +79,13 @@ def test_dangling_old_unit_is_cleared(tmp_path):
 
 
 def test_condition_skip_counts_as_moved(tmp_path):
-    fake = FakeSystemd({"timestd-vtec.service": ("enabled", "active")}, after=("inactive", "no"))
+    fake = FakeSystemd({"timestd-vtec.service": ("enabled", "active")}, after=("inactive", "no", "loaded"))
     step = _apply(fake, tmp_path)
     assert step.outcome == "moved" and "waits for its condition" in step.detail
 
 
 def test_new_unit_that_fails_fails_the_move(tmp_path):
-    fake = FakeSystemd({"timestd-vtec.service": ("enabled", "active")}, after=("failed", "yes"))
+    fake = FakeSystemd({"timestd-vtec.service": ("enabled", "active")}, after=("failed", "yes", "loaded"))
     assert _apply(fake, tmp_path).outcome == "failed"
 
 
@@ -215,7 +219,7 @@ def test_timer_move_clears_the_companion_service_link(tmp_path):
 
 def test_enabled_but_idle_old_unit_moves_without_a_start(tmp_path):
     """Nothing ran before, so an inactive new unit is the goal, not a failure."""
-    fake = FakeSystemd({"timestd-vtec.service": ("enabled", "inactive")}, after=("inactive", "yes"))
+    fake = FakeSystemd({"timestd-vtec.service": ("enabled", "inactive")}, after=("inactive", "yes", "loaded"))
     step = _apply(fake, tmp_path)
     assert step.outcome == "moved"
     assert ["systemctl", "start", "hamsci-physics-vtec.service"] not in fake.calls
@@ -231,3 +235,57 @@ def test_a_failed_stop_starts_nothing(tmp_path):
     step = _apply(fake, tmp_path, run=run)
     assert step.outcome == "failed"
     assert not any(c[:2] in (["systemctl", "start"], ["systemctl", "enable"]) for c in fake.calls)
+
+
+# --- fix round 1 -----------------------------------------------------------
+
+def test_a_start_that_fails_is_no_condition_wait(tmp_path):
+    """A missing unit reads inactive / ConditionResult=no too; start's exit tells."""
+    fake = FakeSystemd({"timestd-vtec.service": ("enabled", "active")},
+                       after=("inactive", "no", "loaded"), rcs={"start": 5})
+    step = _apply(fake, tmp_path)
+    assert step.outcome == "failed"
+    assert "timestd-vtec.service" in step.detail and "hamsci-physics-vtec.service" in step.detail
+    assert "systemctl status hamsci-physics-vtec.service" in step.detail
+
+
+def test_an_unloaded_new_unit_fails_the_move(tmp_path):
+    fake = FakeSystemd({"timestd-vtec.service": ("enabled", "active")},
+                       after=("inactive", "no", "not-found"))
+    step = _apply(fake, tmp_path)
+    assert step.outcome == "failed" and "not-found" in step.detail
+
+
+def test_a_failed_enable_fails_the_move(tmp_path):
+    fake = FakeSystemd({"timestd-vtec.service": ("enabled", "inactive")},
+                       after=("inactive", "yes", "loaded"), rcs={"enable": 1})
+    step = _apply(fake, tmp_path)
+    assert step.outcome == "failed" and "enable" in step.detail
+
+
+def test_a_failed_daemon_reload_fails_the_move(tmp_path):
+    fake = FakeSystemd({"timestd-vtec.service": ("enabled", "active")}, rcs={"daemon-reload": 1})
+    step = _apply(fake, tmp_path)
+    assert step.outcome == "failed" and "daemon-reload" in step.detail
+    assert not any(c[:2] == ["systemctl", "start"] for c in fake.calls)
+
+
+@pytest.mark.parametrize("bad", ["/etc/sigmond/topology.toml", "/etc/x.service",
+                                 "../x.service", "-x.service", "foo.conf"])
+@pytest.mark.parametrize("side", ["from", "to"])
+def test_parse_refuses_a_name_that_is_not_a_unit(bad, side):
+    move = {"from": "old.service", "to": "b.service"}
+    move[side] = bad
+    deploy = {"systemd": {"units": ["b.service", bad], "moves": [move]}}
+    with pytest.raises(ValueError, match="comp") as err:
+        um.parse_moves("comp", deploy)
+    assert bad in str(err.value)
+
+
+def test_a_failed_migrate_says_why(tmp_path):
+    fake = FakeSystemd({"timestd-vtec.service": ("enabled", "active")}, migrate_rc=1,
+                       migrate_err="reading config\nrefused: no gnss-vtec section\n\n")
+    step = _apply(fake, tmp_path)
+    assert step.outcome == "failed"
+    assert "refused: no gnss-vtec section" in step.detail
+    assert "reading config" not in step.detail

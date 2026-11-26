@@ -29,6 +29,7 @@ stand-in) as an argv list, never through a shell.  Stdlib only.
 """
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import tomllib
@@ -46,6 +47,14 @@ MIGRATE_TIMEOUT = 600
 CHECKOUT_ROOT = "/opt/git/sigmond/"
 
 _ACTIVE = ("active", "activating", "reloading")
+# The values of the three properties apply_move reads back; the sets do not
+# overlap, so a value names its property whatever order systemctl prints.
+_ACTIVE_STATES = {"active", "reloading", "inactive", "failed", "activating",
+                  "deactivating", "maintenance", "refreshing"}
+_LOAD_STATES = {"stub", "loaded", "not-found", "bad-setting", "error", "merged", "masked"}
+# A unit name becomes a path under unit_dir and an argv word for systemctl,
+# as root: no "/", no leading "-" or ".", and a .service or .timer suffix.
+_UNIT_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_:.@-]*\.(service|timer)")
 
 
 @dataclass(frozen=True)
@@ -60,8 +69,9 @@ def parse_moves(component: str, deploy: dict) -> list:
     """The ``[[systemd.moves]]`` of one component's deploy.toml.
 
     Raises ValueError, naming the component, for a move without ``from`` or
-    ``to``, a ``to`` listed in its own ``from``, or a ``to`` the component
-    does not list in ``[systemd].units``.
+    ``to``, a unit name that could escape the unit directory or reach
+    systemctl as an option, a ``to`` listed in its own ``from``, or a ``to``
+    the component does not list in ``[systemd].units``.
     """
     systemd = deploy.get("systemd") or {}
     units = set(systemd.get("units") or ())
@@ -78,6 +88,10 @@ def parse_moves(component: str, deploy: dict) -> list:
             raise ValueError(f"{where} names no 'from' unit")
         if not isinstance(to, str) or not to:
             raise ValueError(f"{where} names no 'to' unit")
+        for name in (*src, to):
+            if not _UNIT_NAME.fullmatch(name):
+                raise ValueError(f"{where} names {name!r}, not a unit name "
+                                 "(no '/', no leading '-' or '.', .service or .timer)")
         if to in src:
             raise ValueError(f"{where} moves {to} onto itself")
         if to not in units:
@@ -173,18 +187,29 @@ def _clear_unit(unit: str, unit_dir: Path, backup_dir: Path, now: datetime) -> N
 
 
 def _after_state(text: str) -> tuple:
-    """(ActiveState, ConditionResult) from ``systemctl show --value``.
+    """(ActiveState, ConditionResult, LoadState) from ``systemctl show --value``.
 
-    The two value sets do not overlap, so the order systemctl prints them in
+    The value sets do not overlap, so the order systemctl prints them in
     does not matter.
     """
-    active, condition = "", ""
-    for line in (text or "").split():
-        if line in ("yes", "no"):
-            condition = line
-        else:
-            active = line
-    return active, condition
+    active, condition, load = "", "", ""
+    for word in (text or "").split():
+        if word in ("yes", "no"):
+            condition = word
+        elif word in _LOAD_STATES:
+            load = word
+        elif word in _ACTIVE_STATES:
+            active = word
+    return active, condition, load
+
+
+def _last_line(cp) -> str:
+    """The last non-empty line of a process's stderr, else its stdout."""
+    for text in (getattr(cp, "stderr", ""), getattr(cp, "stdout", "")):
+        lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+        if lines:
+            return lines[-1][:200]
+    return ""
 
 
 def apply_move(move: UnitMove, *, apply: bool, owner_enabled: bool, unit_dir: Path,
@@ -210,13 +235,16 @@ def apply_move(move: UnitMove, *, apply: bool, owner_enabled: bool, unit_dir: Pa
 
     if move.migrate:
         argv = list(move.migrate)
+        why = ""
         try:
             cp = run(argv, capture_output=True, text=True, timeout=MIGRATE_TIMEOUT)
             rc = cp.returncode
+            why = _last_line(cp)
         except (OSError, subprocess.SubprocessError) as e:
             rc = f"error ({e})"
         if rc != 0:
-            return Step(label, "failed", f"{' '.join(argv)} exit {rc}; {old} left running")
+            return Step(label, "failed", f"{' '.join(argv)} exit {rc}"
+                        + (f" ({why})" if why else "") + f"; {old} left running")
 
     for unit in move.from_units:   # every old unit: a timer's .service link goes too
         enabled, active = states[unit]
@@ -229,14 +257,28 @@ def apply_move(move: UnitMove, *, apply: bool, owner_enabled: bool, unit_dir: Pa
         if enabled:
             _systemctl(run, "disable", unit)   # a dangling unit fails here; cleared below
         _clear_unit(unit, unit_dir, backup_dir, now)
-    _systemctl(run, "daemon-reload")
+    # From here on the old units are stopped and cleared: a failure names
+    # both units, because nothing runs this job until someone looks.
+    def broken(what: str) -> Step:
+        return Step(label, "failed",
+                    f"{what}; {old} already stopped and cleared, so nothing runs "
+                    f"this job: run 'systemctl status {move.to_unit}'")
 
-    _systemctl(run, "enable", move.to_unit)
+    verbs = [("daemon-reload",), ("enable", move.to_unit)]
     if running:
-        _systemctl(run, "start", move.to_unit)
-    shown = _systemctl(run, "show", "-p", "ActiveState,ConditionResult", "--value",
-                       move.to_unit)
-    active, condition = _after_state(shown.stdout)
+        verbs.append(("start", move.to_unit))
+    for verb in verbs:
+        cp = _systemctl(run, *verb)
+        if cp.returncode != 0:
+            tail = _last_line(cp)
+            return broken(f"systemctl {' '.join(verb)} exit {cp.returncode}"
+                          + (f" ({tail})" if tail else ""))
+    shown = _systemctl(run, "show", "-p", "ActiveState,ConditionResult,LoadState",
+                       "--value", move.to_unit)
+    active, condition, load = _after_state(shown.stdout)
+    if load != "loaded":
+        # A missing unit also reads inactive with ConditionResult=no.
+        return broken(f"{move.to_unit} LoadState={load or 'unknown'}")
     if active == "active":
         return Step(label, "moved", f"{old} stopped; {move.to_unit} active")
     if active == "inactive" and condition == "no":
@@ -245,6 +287,4 @@ def apply_move(move: UnitMove, *, apply: bool, owner_enabled: bool, unit_dir: Pa
         # Nothing ran before the move (an enabled timer between firings, or
         # a stopped service), so nothing should run now: enabled is the goal.
         return Step(label, "moved", f"{old} disabled; {move.to_unit} enabled")
-    return Step(label, "failed",
-                f"{old} stopped but {move.to_unit} is {active or 'unknown'}: "
-                "nothing runs this job now")
+    return broken(f"{move.to_unit} is {active or 'unknown'}")
