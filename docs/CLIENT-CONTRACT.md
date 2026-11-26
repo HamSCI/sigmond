@@ -726,20 +726,33 @@ migrate = ["/opt/git/sigmond/hamsci-physics/venv/bin/hamsci-physics", "vtec", "a
 `smd align --apply` runs each move after the checkouts move and before
 bring-up.  It follows this order:
 
-1. It runs `migrate`.  A non-zero exit stops the move, and the old unit
+1. It links the new unit (and, for a timer, its service) from the
+   owner's `[[install.steps]]` link entries.  If the unit file still does
+   not exist, it holds the move and stops nothing.
+2. It runs `migrate`.  A non-zero exit stops the move, and the old unit
    keeps running.
-2. It stops and disables each old unit, and removes any link the old
+3. It stops and disables each old unit, and removes any link the old
    checkout left behind.
-3. It enables the new unit, and starts it when an old unit ran.
+4. It enables the new unit, and starts it when an old unit ran.
 
 The old unit stops before the new one starts, so two copies never run.
 A move whose old units neither run nor stand enabled changes nothing.
 The dry run lists each move as `would move <old> -> <new> (<owner>)`.
-It reads a component that align would move at its target commit.
+It reads a component that align would move at its target commit.  When
+the checkout lacks that commit, the dry run says so and fetches nothing.
 
-When topology disables the new owner, align holds the move and leaves
-the old unit running.  The drift report faults the old unit and names
-the fix, `smd enable <owner>`.  The next align then finishes the move.
+Align holds a move, and leaves the old unit running, in these cases:
+
+- Topology disables the new owner, or does not name it.  The drift
+  report faults the old unit and names the fix, `smd enable <owner>`.
+  The next align then finishes the move.
+- The site manages the owner by hand (`locally_managed`).
+- The owner's main service is stopped: an operator stopped it.
+- The run carries `--no-restart`.  The next align without it finishes
+  the move.
+
+While a move waits, align leaves the new unit disabled too, so the two
+never both fire after a reboot.
 
 A move entry stays in `deploy.toml` until a release removes it on
 purpose.  A station that skips a release and aligns later still gets

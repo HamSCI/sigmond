@@ -14,7 +14,9 @@ from sigmond import align, align_apply
 import tests.test_align_cli as tac
 from tests.test_align_cli import smd
 
-_NO_MOVE = '[systemd]\nunits = ["hamsci-physics-vtec.service"]\n'
+_NO_MOVE = ('[systemd]\nunits = ["hamsci-physics-fusion.service", "hamsci-physics-vtec.service"]\n'
+            '[[install.steps]]\nkind = "link"\nsrc = "systemd/hamsci-physics-vtec.service"\n'
+            'dst = "/etc/systemd/system/hamsci-physics-vtec.service"\n')
 _MOVE = (_NO_MOVE + '[[systemd.moves]]\nfrom = ["timestd-vtec.service"]\n'
          'to = "hamsci-physics-vtec.service"\n')
 
@@ -33,7 +35,9 @@ def _physics_repo(base: Path):
     _git(repo, "config", "user.email", "t@example.invalid")
     _git(repo, "config", "user.name", "t")
     (repo / "deploy.toml").write_text(_NO_MOVE)
-    _git(repo, "add", "deploy.toml")
+    (repo / "systemd").mkdir()
+    (repo / "systemd" / "hamsci-physics-vtec.service").write_text("[Service]\n")
+    _git(repo, "add", "deploy.toml", "systemd")
     _git(repo, "commit", "-q", "-m", "old")
     old = _git(repo, "rev-parse", "HEAD")
     (repo / "deploy.toml").write_text(_MOVE)
@@ -65,18 +69,27 @@ def _systemd(states):
     return run
 
 
-_LIVE = {"timestd-vtec.service": ("enabled", "active")}
+_LIVE = {"timestd-vtec.service": ("enabled", "active"),
+         "hamsci-physics-fusion.service": ("enabled", "active")}
 
 
-def _moves(apply, base, *, enabled=True, plan=None, states=_LIVE):
+def _moves(apply, base, *, enabled=True, plan=None, states=_LIVE, topology=None,
+           local=(), **kw):
     lines = []
     run = _systemd(states)
-    with mock.patch("sigmond.drift.build_report.topology_enabled",
-                    return_value={"hamsci-physics": enabled}), \
+    topology = {"hamsci-physics": enabled} if topology is None else topology
+    with mock.patch("sigmond.drift.build_report.topology_enabled", return_value=topology), \
+            mock.patch.object(smd, "_locally_managed", lambda: set(local)), \
             mock.patch.object(smd, "_ALIGN_UNIT_DIR", base / "units"):
         (base / "units").mkdir(exist_ok=True)
-        steps = smd._align_unit_moves(apply, base=base, plan=plan, run=run, say=lines.append)
+        steps = smd._align_unit_moves(apply, base=base, plan=plan, run=run,
+                                      say=lines.append, **kw)
     return steps, lines, run.calls
+
+
+def _stops(calls):
+    return [c for c in calls if c[:2] in (["systemctl", "stop"], ["systemctl", "disable"],
+                                          ["systemctl", "start"])]
 
 
 def test_dry_run_lists_a_move_declared_at_the_target_commit(tmp_path):
@@ -214,6 +227,142 @@ def test_a_quiet_station_still_finishes_a_held_move():
                               lambda apply, **k: seen.append(apply) or [moved])])
     assert "aligned — nothing to do" in out
     assert seen == [True]
+    # A move made on the quiet path still reaches the history file.
+    assert any(moved in c.args[1] for c in m["history"].call_args_list)
     assert "timestd-vtec.service stopped" in out
     m["bringup"].assert_not_called()
     assert rc == 0
+
+
+# --- Fix round 1 -------------------------------------------------------------
+
+def _moved_tree(tmp_path):
+    old, new = _physics_repo(tmp_path)
+    _git(tmp_path / "hamsci-physics", "checkout", "-q", new)
+    return old, new
+
+
+def test_no_restart_holds_the_move(tmp_path):
+    _moved_tree(tmp_path)
+    held = {}
+    steps, _, calls = _moves(True, tmp_path, no_restart=True, held_out=held)
+    assert [s.outcome for s in steps] == ["ran"]
+    assert "waits for an align without --no-restart" in steps[0].detail
+    assert _stops(calls) == []
+    assert held == {"hamsci-physics-vtec.service": "timestd-vtec.service"}
+
+
+def test_apply_passes_no_restart_to_the_moves():
+    seen = []
+    t = tac.AlignMakeLiveApplyTests("test_stage_order_moves_images_bringup_record_restart_checks")
+    t._run(no_restart=True, extra_patches=[mock.patch.object(
+        smd, "_align_unit_moves", lambda apply, **k: seen.append(k.get("no_restart")) or [])])
+    assert seen == [True]
+
+
+def test_dry_run_names_a_target_commit_not_fetched(tmp_path):
+    old, _ = _physics_repo(tmp_path)
+    steps, lines, _ = _moves(False, tmp_path,
+                             plan=[align.Item("hamsci-physics", "move", old, "f" * 40)])
+    assert f"  hamsci-physics: moves at {'f' * 12} not read (commit not fetched)" in lines
+    assert [s.outcome for s in steps] == ["unread"]
+
+
+def test_apply_links_the_new_unit_first(tmp_path):
+    _moved_tree(tmp_path)
+    steps, _, _ = _moves(True, tmp_path)
+    link = tmp_path / "units" / "hamsci-physics-vtec.service"
+    assert link.is_symlink()
+    assert link.resolve() == (tmp_path / "hamsci-physics" / "systemd" /
+                              "hamsci-physics-vtec.service").resolve()
+    assert [s.outcome for s in steps] == ["moved"]
+
+
+def test_apply_holds_a_move_whose_new_unit_is_not_installed(tmp_path):
+    _moved_tree(tmp_path)
+    (tmp_path / "hamsci-physics" / "systemd" / "hamsci-physics-vtec.service").unlink()
+    steps, _, calls = _moves(True, tmp_path)
+    assert [s.outcome for s in steps] == ["ran"]
+    assert steps[0].detail == ("held: hamsci-physics-vtec.service not installed yet; "
+                               "timestd-vtec.service keeps running")
+    assert _stops(calls) == []
+
+
+def test_a_locally_managed_owner_holds_the_move(tmp_path):
+    _moved_tree(tmp_path)
+    steps, _, calls = _moves(True, tmp_path, local={"hamsci-physics"})
+    assert "manages hamsci-physics by hand" in steps[0].detail
+    assert _stops(calls) == []
+
+
+def test_an_owner_the_operator_stopped_holds_the_move(tmp_path):
+    _moved_tree(tmp_path)
+    steps, _, calls = _moves(True, tmp_path,
+                             states={"timestd-vtec.service": ("enabled", "active")})
+    assert steps[0].outcome == "ran"
+    assert "hamsci-physics-fusion.service is stopped" in steps[0].detail
+    assert _stops(calls) == []
+
+
+def test_an_owner_topology_does_not_name_says_so(tmp_path):
+    _moved_tree(tmp_path)
+    steps, _, calls = _moves(True, tmp_path, topology={})
+    assert steps[0].detail.startswith("held: topology does not name hamsci-physics")
+    assert _stops(calls) == []
+
+
+def test_dry_run_counts_a_failed_declaration_as_pending(tmp_path):
+    (tmp_path / "hamsci-physics").mkdir()
+    (tmp_path / "hamsci-physics" / "deploy.toml").write_text(
+        _NO_MOVE + '[[systemd.moves]]\nfrom = "a.service"\nto = "elsewhere.service"\n')
+    steps, lines, _ = _moves(False, tmp_path)
+    assert [s.outcome for s in steps] == ["failed"]
+    assert any("elsewhere.service" in ln for ln in lines)
+    assert _dry_rc(steps) == 1
+    assert _dry_rc([align_apply.Step("hamsci-physics", "unread", "x")]) == 1
+
+
+def test_declared_units_leave_a_held_move_target_disabled(tmp_path):
+    (tmp_path / "x").mkdir()
+    (tmp_path / "x" / "deploy.toml").write_text(
+        '[systemd]\nunits = ["x.service", "x-new.timer", "x-other.timer"]\n')
+    unit_dir = tmp_path / "units"; unit_dir.mkdir()
+    timer = "[Timer]\nOnCalendar=hourly\n\n[Install]\nWantedBy=timers.target\n"
+    for u in ("x.service", "x-new.timer", "x-other.timer"):
+        (unit_dir / u).write_text(timer)
+    calls, lines = [], []
+
+    def fake_run(argv, **kw):
+        argv = list(argv)
+        calls.append(argv)
+        if argv[:2] == ["systemctl", "is-enabled"]:
+            return subprocess.CompletedProcess(argv, 1, "disabled\n", "")
+        if argv[:2] == ["systemctl", "cat"]:
+            return subprocess.CompletedProcess(argv, 0, timer, "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    with mock.patch("sigmond.catalog.load_catalog", return_value={"x": object()}), \
+            mock.patch("sigmond.drift.build_report.topology_enabled", return_value={"x": True}), \
+            mock.patch("sigmond.drift.build_report.systemctl_active", lambda u: True), \
+            mock.patch("sigmond.drift.exceptions.DEFAULT_PATH", tmp_path / "none.toml"), \
+            mock.patch.object(smd, "_locally_managed", lambda: set()), \
+            mock.patch.object(smd, "_ALIGN_UNIT_DIR", unit_dir), \
+            mock.patch("subprocess.run", fake_run):
+        smd._align_enable_declared_units(True, base=tmp_path, say=lines.append,
+                                         held_moves={"x-new.timer": "old-new.timer"})
+    enables = [c[-1] for c in calls if c[:2] == ["systemctl", "enable"]]
+    assert "x-new.timer" not in enables and "x-other.timer" in enables
+    assert "  x: left x-new.timer disabled: its move from old-new.timer did not finish" in lines
+
+
+def test_bringup_gets_the_moves_left_undone():
+    def moves(apply, **k):
+        k["held_out"]["timestd-iri-update.timer"] = "hamsci-physics-iri-update.timer"
+        return []
+    got = []
+    t = tac.AlignMakeLiveApplyTests("test_stage_order_moves_images_bringup_record_restart_checks")
+    t._run(extra_patches=[
+        mock.patch.object(smd, "_align_unit_moves", moves),
+        mock.patch.object(smd, "_align_bringup",
+                          lambda **kw: got.append(kw.get("held_moves")) or [])])
+    assert got == [{"timestd-iri-update.timer": "hamsci-physics-iri-update.timer"}]

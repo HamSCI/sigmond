@@ -354,3 +354,30 @@ def test_drift_report_runs_the_moves_collector(tmp_path):
     report = build_report.build("TEST", readers=readers)
     assert any(i.subject == "timestd-vtec.service" and i.fix == "smd enable hamsci-physics"
                for i in report.items)
+
+
+def test_drift_faults_a_move_whose_owner_topology_does_not_name(tmp_path):
+    base, unit_dir = _drift_base(tmp_path)
+    items = um.drift_items(base, {"hf-timestd": True}, unit_dir=unit_dir,
+                           is_enabled=lambda u: u == "timestd-vtec.service",
+                           service_active=lambda u: False)
+    assert [(i.subject, i.detail, i.fix) for i in items] == [
+        ("timestd-vtec.service",
+         "timestd-vtec.service moved to hamsci-physics-vtec.service in hamsci-physics, "
+         "which topology does not name here", "smd enable hamsci-physics")]
+
+
+def test_link_units_leaves_a_regular_file_alone(tmp_path):
+    repo = tmp_path / "c"; (repo / "systemd").mkdir(parents=True)
+    (repo / "systemd" / "n.timer").write_text("x")
+    (repo / "systemd" / "n.service").write_text("x")
+    (repo / "deploy.toml").write_text(
+        '[[install.steps]]\nkind = "link"\nsrc = "systemd/n.timer"\n'
+        'dst = "/etc/systemd/system/n.timer"\n'
+        '[[install.steps]]\nkind = "link"\nsrc = "systemd/n.service"\n'
+        'dst = "/etc/systemd/system/n.service"\n')
+    unit_dir = tmp_path / "u"; unit_dir.mkdir()
+    (unit_dir / "n.service").write_text("operator's")
+    move = um.UnitMove("c", ("o.timer",), "n.timer")
+    assert um.link_units(repo, um.move_units(move), unit_dir=unit_dir) == ["n.timer"]
+    assert (unit_dir / "n.service").read_text() == "operator's"

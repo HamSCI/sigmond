@@ -215,7 +215,7 @@ def _last_line(cp) -> str:
 def apply_move(move: UnitMove, *, apply: bool, owner_enabled: bool, unit_dir: Path,
                backup_dir: Path, run: Callable, now: datetime) -> Step:
     """Carry out one move; see the module docstring for the order."""
-    label = f"{move.component}: {', '.join(move.from_units)} -> {move.to_unit}"
+    label = _label(move)
     states = {u: unit_state(u, unit_dir=unit_dir, run=run) for u in move.from_units}
     live = [u for u, (en, act) in states.items() if en or act]
     if not live:
@@ -290,20 +290,88 @@ def apply_move(move: UnitMove, *, apply: bool, owner_enabled: bool, unit_dir: Pa
     return broken(f"{move.to_unit} is {active or 'unknown'}")
 
 
+def _label(move: UnitMove) -> str:
+    return f"{move.component}: {', '.join(move.from_units)} -> {move.to_unit}"
+
+
+def hold_move(move: UnitMove, reason: str, *, unit_dir: Path, run: Callable) -> Step:
+    """The Step for a move sigmond holds back: "unchanged" when no old unit
+    is enabled or active, else "ran" with a ``held:`` line that names why.
+    It reads systemctl and changes nothing."""
+    live = [u for u in move.from_units if any(unit_state(u, unit_dir=unit_dir, run=run))]
+    if not live:
+        return Step(_label(move), "unchanged", "")
+    return Step(_label(move), "ran", f"held: {reason}; {', '.join(live)} keeps running")
+
+
+SYSTEM_UNIT_DIR = Path("/etc/systemd/system")
+
+
+def move_units(move: UnitMove) -> tuple:
+    """The new unit, and the .service a .timer starts."""
+    if move.to_unit.endswith(".timer"):
+        return (move.to_unit, move.to_unit[:-len(".timer")] + ".service")
+    return (move.to_unit,)
+
+
+def link_units(repo: Path, units: Iterable[str], *, unit_dir: Path) -> list:
+    """Link ``units`` the way the component's deploy.toml links them.
+
+    This is the unit part of ``installer.apply_deploy_toml_links``: a
+    ``kind = "link"`` step whose ``dst`` sits in /etc/systemd/system and
+    names one of ``units`` becomes ``<unit_dir>/<unit>`` -> ``<repo>/<src>``.
+    It replaces a missing entry or a symlink that points elsewhere, and
+    leaves a regular file alone.  Returns the units it linked; an unreadable
+    deploy.toml links nothing."""
+    try:
+        with open(Path(repo) / "deploy.toml", "rb") as fh:
+            deploy = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError):
+        return []
+    wanted = set(units)
+    linked = []
+    for step in (deploy.get("install") or {}).get("steps") or ():
+        if not isinstance(step, dict) or step.get("kind") != "link":
+            continue
+        dst = Path(str(step.get("dst") or ""))
+        if dst.parent != SYSTEM_UNIT_DIR or dst.name not in wanted:
+            continue
+        src = (Path(repo) / str(step.get("src") or "")).resolve()
+        if not step.get("src") or not src.is_file():
+            continue
+        entry = Path(unit_dir) / dst.name
+        if entry.is_symlink() and entry.resolve() == src:
+            continue
+        if entry.exists() and not entry.is_symlink():
+            continue
+        if entry.is_symlink():
+            entry.unlink()
+        entry.symlink_to(src)
+        linked.append(dst.name)
+    return linked
+
+
 def drift_items(base: Path, enabled, *, unit_dir: Path,
                 is_enabled: Callable[[str], bool],
                 service_active: Callable[[str], bool]) -> list:
     """Drift faults for a move left half done.
 
-    For each move a component in ``enabled`` (topology: name -> bool)
-    declares, every old unit still enabled or active faults.  When topology
+    For each move a component declares (a component ``enabled``, the
+    topology map, names, or any checkout under ``base``), every old unit
+    still enabled or active faults.  When topology
     enables the gaining component, align should have moved it; when topology
     disables it, align held the move, and enabling the component lets the
     next align finish it.  A wants-link counts as enabled (``unit_state``).
     """
     from sigmond.drift.model import Item
     out = []
-    for move in declared_moves(base, sorted(enabled)):
+    # Every checkout too: align reads them, and holds the move of an owner
+    # topology does not name.
+    try:
+        checkouts = {p.name for p in Path(base).iterdir() if (p / "deploy.toml").is_file()}
+    except OSError:
+        checkouts = set()
+    for move in declared_moves(base, sorted(set(enabled) | checkouts)):
         for old in move.from_units:
             if not (is_enabled(old) or bool(_wants_links(old, unit_dir))
                     or service_active(old)):
@@ -313,8 +381,9 @@ def drift_items(base: Path, enabled, *, unit_dir: Path,
                                 f"{old} still runs; {move.component} took it over "
                                 f"as {move.to_unit}", "smd align --apply"))
             else:
+                how = "disables" if move.component in enabled else "does not name"
                 out.append(Item("unit", "fault", old,
                                 f"{old} moved to {move.to_unit} in {move.component}, "
-                                "which topology disables here",
+                                f"which topology {how} here",
                                 f"smd enable {move.component}"))
     return out
