@@ -1,4 +1,4 @@
-"""`smd storage status|share|directive|tick` -- the storage capacity ledger.
+"""`smd storage status|share|directive|tick|expire` -- the storage capacity ledger.
 
 docs/superpowers/specs/2026-11-04-storage-capacity-design.md.  `status`
 reads the file the tick writes and needs no root.  `share`, `directive` and
@@ -69,8 +69,24 @@ def cmd_storage(args) -> int:
     if verb == "tick":
         from ..storage.tick import default_runners, run_tick
         return run_tick(datetime.now(timezone.utc), default_runners())
+    if verb == "expire":
+        return _expire(args)
     _complain(f"unknown verb {verb!r}")
     return 2
+
+
+def _expire(args) -> int:
+    """The retention pass (storage.retention).  --dry-run prints the plan and
+    needs no root; without it the pass asks each client to expire its data."""
+    from ..storage import retention
+    if getattr(args, "dry_run", False):
+        from ..sysview import build_system_view
+        cfg = load_storage_config(_config_path(args))
+        lines = retention.plan_lines(build_system_view().client_views, cfg.retention)
+        for line in lines or ["no client declares data that expires"]:
+            _say(line)
+        return 0
+    return retention.run_expire_pass(datetime.now(timezone.utc), retention.default_runners())
 
 
 # ---------------------------------------------------------------- status

@@ -25,6 +25,7 @@ _LEVEL_KEYS = ("watch", "tighten", "demand", "final", "client_watch")
 DEFAULT_HORIZON_H = 24.0
 MAX_HORIZON_H = 24.0 * 365
 _BARE = re.compile(r"^[A-Za-z0-9_-]+$")
+_RETENTION_KEY = re.compile(r"^[A-Za-z0-9_-]+:\S+$")
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,8 @@ class StorageConfig:
     # The tick then holds the stop lever, as if hands-off were set (fails
     # closed), and raises `hands-off-unknown`.
     hands_off_unknown: str = ""
+    # [retention] "<client>:<target>" = whole days; 0 means never expire.
+    retention: Mapping[str, int] = field(default_factory=dict)
 
 
 def _num(v) -> Optional[float]:
@@ -187,9 +190,18 @@ def load_storage_config(path: Path = CONFIG_PATH,
         else:
             problems.append("stop.enabled: not a boolean; the stop lever stays off")
 
+    retention = {}
+    for k, v in table("retention").items():
+        if not _RETENTION_KEY.match(k):
+            problems.append(f"retention.{k}: key is not <client>:<target>; dropped")
+        elif isinstance(v, bool) or not isinstance(v, int) or v < 0:
+            problems.append(f"retention.{k}: {v!r} is not a whole number of days (0 or more); dropped")
+        else:
+            retention[k] = v
+
     return StorageConfig(levels, shares, directives, until, reason,
                          pool_share, expect, tuple(problems), horizon_h, stop_enabled,
-                         unknown)
+                         unknown, retention)
 
 
 def hands_off_active(cfg: StorageConfig, now: datetime) -> bool:
@@ -235,6 +247,8 @@ def render_storage_toml(cfg: StorageConfig) -> str:
             out.append(f"expect_report = {'true' if cfg.expect_host_report else 'false'}")
     if cfg.stop_enabled:
         out += ["", "[stop]", "enabled = true"]
+    if cfg.retention:
+        out += ["", "[retention]"] + [f"{_key(k)} = {int(v)}" for k, v in sorted(cfg.retention.items())]
     return "\n".join(out).lstrip("\n") + "\n"
 
 

@@ -268,6 +268,7 @@ def _instance_from_contract(raw: dict, issues: Optional[list] = None) -> Instanc
             final_policy=(str(ds['final_policy'])
                           if ds.get('final_policy') is not None else None),
             classes=tuple(str(c) for c in (ds.get('classes') or ())),
+            expires=ds.get('expires') is True,
         ))
     if raw.get('data_destination') is not None:
         iv.data_destination = str(raw['data_destination'])

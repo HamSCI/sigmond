@@ -35608,7 +35608,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # storage -- the capacity ledger (docs/superpowers/specs/2026-11-04-storage-capacity-design.md)
     p_storage = sub.add_parser('storage',
-        help='the storage capacity ledger: status | share | directive | tick')
+        help='the storage capacity ledger: status | share | directive | tick | expire')
     storage_sub = p_storage.add_subparsers(dest='storage_command')
     st_guard = storage_sub.add_parser('guard',
         help='data disks: every writer waits for its mount (RequiresMountsFor drop-ins) and '
@@ -35638,6 +35638,11 @@ def _build_parser() -> argparse.ArgumentParser:
     st_dir.add_argument('--reason', help='hands-off only: why, shown in status')
     storage_sub.add_parser('tick',
         help='run one ledger pass now (the 2-minute timer runs it as root)')
+    st_expire = storage_sub.add_parser('expire',
+        help="ask each client to delete what lies past the retention the ledger sets "
+             "(the hourly timer runs it as root)")
+    st_expire.add_argument('--dry-run', action='store_true',
+        help='print the plan, one line per job, and ask no client')
 
     # check -- read-only: does this station work?  (tasks/spec-smd-check-v372.md)
     p_check = sub.add_parser('check',
@@ -35948,7 +35953,8 @@ def main() -> int:
 
     if args.command == 'storage' and not getattr(args, 'via_admin', False):
         verb = getattr(args, 'storage_command', None) or 'status'
-        if verb != 'status' and _need_root(f'storage {verb}'):
+        if verb != 'status' and not (verb == 'expire' and getattr(args, 'dry_run', False)) \
+                and _need_root(f'storage {verb}'):
             return 1
         from sigmond.commands.storage import cmd_storage
         return cmd_storage(args)

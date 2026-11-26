@@ -29,6 +29,7 @@ class DataSink:
     floor_bytes:    int = 0                                           # v0.9 §17.7
     final_policy:   Optional[str] = None                              # v0.9 §17.7
     classes:        tuple = ()                                        # v0.9 §17.7
+    expires:        bool = False                                      # answers `storage expire`
 
 
 @dataclass

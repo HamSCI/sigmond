@@ -1,0 +1,13 @@
+# /etc/systemd/system/sigmond-storage-expire.timer
+[Unit]
+Description=Storage ledger retention pass (hourly)
+Documentation=https://github.com/HamSCI/sigmond
+
+[Timer]
+OnBootSec=900
+OnCalendar=hourly
+RandomizedDelaySec=300
+Persistent=false
+
+[Install]
+WantedBy=timers.target

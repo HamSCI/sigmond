@@ -1304,6 +1304,11 @@ ok "sigmond-storage-trim-all.timer enabled + started (15-min cadence)"
 $SUDO systemctl enable --now sigmond-storage.timer 2>/dev/null \
     && ok "sigmond-storage.timer enabled + started (2-min cadence)" \
     || warn "could not enable sigmond-storage.timer"
+# The retention pass: hourly, asks each client to delete data past the
+# retention the ledger sets.  sigmond deletes nothing itself.
+$SUDO systemctl enable --now sigmond-storage-expire.timer 2>/dev/null \
+    && ok "sigmond-storage-expire.timer enabled + started (hourly)" \
+    || warn "could not enable sigmond-storage-expire.timer"
 
 # ─── smd symlink ──────────────────────────────────────────────────────────────
 info "Installing smd → $INSTALL_SMD"

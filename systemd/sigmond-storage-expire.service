@@ -1,0 +1,21 @@
+# /etc/systemd/system/sigmond-storage-expire.service
+[Unit]
+Description=Storage ledger retention pass -- ask each client to expire its own old data
+Documentation=https://github.com/HamSCI/sigmond
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Nice=10
+# The client processes inherit the idle I/O class, so a long prune gives way
+# to the recorder.
+IOSchedulingClass=idle
+TimeoutStartSec=1800
+# 75 (EX_TEMPFAIL): the previous pass still holds the lock.  Not a failure.
+SuccessExitStatus=75
+ExecStart=/usr/local/bin/smd storage expire
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sigmond-storage-expire

@@ -109,3 +109,30 @@ def test_holdings_carries_bytes_written_per_day_when_given():
     bad = call_holdings("x", run=_run(json.dumps({"bytes_by_class": {"raw": 3},
                                                   "bytes_written_per_day": "lots"})))
     assert bad.ok and bad.bytes_written_per_day is None
+
+
+def test_call_expire_reads_the_answer_and_maps_exit_2():
+    from sigmond.storage.clientcall import ExpireAnswer, call_expire
+    seen = {}
+
+    def run(argv, **kw):
+        seen["argv"], seen["timeout"] = argv, kw.get("timeout")
+        return SimpleNamespace(returncode=0, stdout=json.dumps(
+            {"target": "a.b", "days": 30, "deleted": 9, "unit": "rows", "complete": True,
+             "refused": False, "reason": ""}), stderr="")
+    a = call_expire("/bin/x", "a.b", 30, 600, run=run)
+    assert a == ExpireAnswer(True, 9, True, False, "", False)
+    assert seen["argv"] == ["/bin/x", "storage", "expire", "--target", "a.b", "--days", "30",
+                            "--max-seconds", "600", "--json"]
+    assert seen["timeout"] == 660
+    old = call_expire("/bin/x", "a.b", 30, 600, run=_run(rc=2))
+    assert old.unsupported and not old.ok
+    assert not call_expire("/bin/x", "a.b", 30, 600, run=_run(rc=1)).ok
+    assert not call_expire("/bin/x", "a.b", 30, 600, run=_run("nope")).ok
+    assert not call_expire("/bin/x", "a.b", 30, 600,
+                           run=_run(exc=subprocess.TimeoutExpired("x", 660))).ok
+    refused = call_expire("/bin/x", "a.b", 30, 600, run=_run(json.dumps(
+        {"deleted": 0, "complete": False, "refused": True, "reason": "no such table"})))
+    assert refused.ok and refused.refused and refused.reason == "no such table"
+    bad = call_expire("/bin/x", "a.b", 30, 600, run=_run(json.dumps({"deleted": "x", "complete": True})))
+    assert not bad.ok

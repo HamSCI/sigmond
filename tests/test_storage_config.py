@@ -154,3 +154,32 @@ def test_render_writes_only_levels_that_differ_from_the_defaults(tmp_path):
     assert "tighten =" not in text and "final =" not in text
     p.write_text(text)
     assert load_storage_config(p) == c
+
+
+def _load(text, tmp_path=None):
+    import tempfile, pathlib
+    d = pathlib.Path(tempfile.mkdtemp(dir="/var/tmp"))
+    try:
+        p = d / "s.toml"
+        p.write_text(text)
+        return load_storage_config(p)
+    finally:
+        p.unlink()
+        d.rmdir()
+
+
+def test_config_retention_parses_and_drops_bad_entries():
+    cfg = _load('[retention]\n"hf-timestd:timestd.L2_tick_phase" = 30\n"bad" = 3\n"x:y" = -1\n')
+    assert cfg.retention == {"hf-timestd:timestd.L2_tick_phase": 30}
+    assert len(cfg.problems) == 2
+
+
+def test_config_retention_zero_is_kept_and_floats_and_bools_drop():
+    cfg = _load('[retention]\n"a:b" = 0\n"a:c" = 1.5\n"a:d" = true\n')
+    assert cfg.retention == {"a:b": 0} and len(cfg.problems) == 2
+
+
+def test_retention_survives_a_rewrite():
+    cfg = _load('[retention]\n"a:b" = 14\n')
+    again = _load(render_storage_toml(with_share(cfg, "c", 2.0)))
+    assert again.retention == {"a:b": 14}

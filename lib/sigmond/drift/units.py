@@ -61,6 +61,7 @@ INSTALL_ENABLED_TIMERS = (
     "sigmond-snapshot.timer",
     "sigmond-component-fetch.timer",
     "sigmond-storage.timer",
+    "sigmond-storage-expire.timer",
 )
 # `smd archive add` enables it, `smd archive remove --forget` disables it:
 # align enables it only while /etc/sigmond/archive.toml names a drive.

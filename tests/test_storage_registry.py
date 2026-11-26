@@ -90,3 +90,15 @@ def test_no_retention_means_no_cap():
     view = _view("x", "0.9", sinks=[DataSink("file", "/a", mb_per_day=2.0, classes=("raw",))])
     (r,) = registrations_from_views({"x": view}, [ROOT])
     assert r.mb_per_day == 2.0 and r.max_days is None
+
+
+def test_expires_parses_only_from_json_true():
+    def parsed(v):
+        sink = {"kind": "service", "path": "t.x"}
+        if v is not None:
+            sink["expires"] = v
+        iv = _instance_from_contract({"instance": "d", "data_sinks": [sink]}, [])
+        return iv.data_sinks[0].expires
+    assert parsed(True) is True
+    for v in (None, False, "true", 1, "yes", [True]):
+        assert parsed(v) is False

@@ -83,6 +83,47 @@ def call_final(binary: str, fit_bytes: int, policy: Optional[str],
     return _invoke(argv + ["--json"], TRIM_TIMEOUT_S, run)
 
 
+@dataclass(frozen=True)
+class ExpireAnswer:
+    ok: bool
+    deleted: int = 0
+    complete: bool = False
+    refused: bool = False
+    reason: str = ""
+    unsupported: bool = False
+
+
+def call_expire(binary: str, target: str, days: int, max_seconds: int,
+                run=subprocess.run) -> ExpireAnswer:
+    """Ask a client to delete what lies past `days` in one target.  One call is
+    one client process, one target, one database: the kit's privilege drop
+    holds for the life of that process."""
+    argv = [binary, "storage", "expire", "--target", target, "--days", str(int(days)),
+            "--max-seconds", str(int(max_seconds)), "--json"]
+    timeout = int(max_seconds) + 60
+    try:
+        proc = run(argv, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return ExpireAnswer(False, reason=f"timed out after {timeout}s")
+    except OSError as exc:
+        return ExpireAnswer(False, reason=f"could not run: {exc}")
+    if proc.returncode == 2:
+        return ExpireAnswer(False, reason="verb not supported (older client)", unsupported=True)
+    if proc.returncode != 0:
+        return ExpireAnswer(False, reason=f"exit {proc.returncode}")
+    try:
+        data = json.loads(proc.stdout)
+    except (ValueError, TypeError):
+        return ExpireAnswer(False, reason="output is not JSON")
+    if not isinstance(data, dict):
+        return ExpireAnswer(False, reason="output is not a JSON object")
+    deleted = data.get("deleted", 0)
+    if not isinstance(deleted, int) or isinstance(deleted, bool) or deleted < 0:
+        return ExpireAnswer(False, reason="deleted malformed")
+    return ExpireAnswer(True, deleted, data.get("complete") is True,
+                        data.get("refused") is True, str(data.get("reason", "")))
+
+
 def _default_resolve(component: str):
     return lifecycle.resolve_units([component], [component])
 
