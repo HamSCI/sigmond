@@ -73,13 +73,16 @@ _LIVE = {"timestd-vtec.service": ("enabled", "active"),
 
 
 def _moves(apply, base, *, enabled=True, plan=None, states=_LIVE, topology=None,
-           local=(), **kw):
+           local=(), own=(), **kw):
+    """``own`` stands in for sigmond's own retired list: the real one names
+    host paths (/usr/local/sbin links) a test must not read or touch."""
     lines = []
     run = _systemd(states)
     topology = {"hamsci-physics": enabled} if topology is None else topology
     with mock.patch("sigmond.drift.build_report.topology_enabled", return_value=topology), \
             mock.patch.object(smd, "_locally_managed", lambda: set(local)), \
-            mock.patch.object(smd, "_ALIGN_UNIT_DIR", base / "units"):
+            mock.patch.object(smd, "_ALIGN_UNIT_DIR", base / "units"), \
+            mock.patch("sigmond.unit_moves.RETIRED_OWN", tuple(own)):
         (base / "units").mkdir(exist_ok=True)
         steps = smd._align_unit_moves(apply, base=base, plan=plan, run=run,
                                       say=lines.append, **kw)

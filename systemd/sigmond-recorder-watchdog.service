@@ -1,0 +1,16 @@
+[Unit]
+Description=The one agent besides systemd that restarts timestd-core-recorder
+Documentation=https://github.com/HamSCI/sigmond
+After=timestd-core-recorder.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/sigmond-recorder-watchdog
+Nice=10
+# Reporters (sigmond-sdr-recover, the radiod-consumer hook, hf-timestd's
+# pipeline and HPPS watchdogs) write request files here.  They mkdir -p it
+# too: /run empties at boot and this unit first runs 5 minutes after.
+# Preserved, so a request filed between two ticks is not swept away.
+RuntimeDirectory=sigmond/recorder-restart
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes

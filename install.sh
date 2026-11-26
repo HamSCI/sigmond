@@ -981,15 +981,21 @@ $SUDO ln -sf "$REPO_DIR/bin/sigmond-sdr-recover"  /usr/local/sbin/sigmond-sdr-re
 # One line per RX888-loss episode, for udev and radiod's drop-in to call.
 $SUDO ln -sf "$REPO_DIR/bin/sigmond-sdr-event"    /usr/local/sbin/sigmond-sdr-event
 $SUDO ln -sf "$REPO_DIR/bin/sigmond-radiod-ready" /usr/local/sbin/sigmond-radiod-ready
-$SUDO chmod a+x "$REPO_DIR/bin/sigmond-t6-stuck-watchdog"
-$SUDO ln -sf "$REPO_DIR/bin/sigmond-t6-stuck-watchdog" /usr/local/sbin/sigmond-t6-stuck-watchdog
-for _u in sigmond-t6-stuck-watchdog.service sigmond-t6-stuck-watchdog.timer; do
+# The one restarter of timestd-core-recorder besides systemd.  Reporters file
+# requests in /run/sigmond/recorder-restart; it applies one grace, one
+# cooldown and one daily cap, and records every restart in
+# /var/lib/sigmond/recorder-restarts.jsonl.  It took over the T6-stuck rule;
+# `smd align` retires the old T6-stuck watchdog's units and link
+# (unit_moves.RETIRED_OWN).
+$SUDO chmod a+x "$REPO_DIR/bin/sigmond-recorder-watchdog"
+$SUDO ln -sf "$REPO_DIR/bin/sigmond-recorder-watchdog" /usr/local/sbin/sigmond-recorder-watchdog
+for _u in sigmond-recorder-watchdog.service sigmond-recorder-watchdog.timer; do
     $SUDO install -m 0644 "$REPO_DIR/systemd/$_u" "/etc/systemd/system/$_u"
 done
 $SUDO systemctl daemon-reload
-$SUDO systemctl enable --now sigmond-t6-stuck-watchdog.timer 2>/dev/null \
-    && ok "sigmond-t6-stuck-watchdog.timer enabled" \
-    || warn "could not enable sigmond-t6-stuck-watchdog.timer"
+$SUDO systemctl enable --now sigmond-recorder-watchdog.timer 2>/dev/null \
+    && ok "sigmond-recorder-watchdog.timer enabled" \
+    || warn "could not enable sigmond-recorder-watchdog.timer"
 ok "sigmond-sdr-recover + sigmond-radiod-ready symlinks installed"
 
 # First-run bring-up: the install used to end with a configured, reachable VM

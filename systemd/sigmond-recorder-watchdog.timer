@@ -1,0 +1,13 @@
+[Unit]
+Description=Run sigmond-recorder-watchdog every minute
+
+[Timer]
+# A reporter may also start the service at once (recorder_watchdog.kick).
+# The rules themselves carry the waits: a 1320 s fresh-start grace, a
+# 20-minute T6 unlock, a 30-minute cooldown.
+OnBootSec=300
+OnUnitActiveSec=60
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

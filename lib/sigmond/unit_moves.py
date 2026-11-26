@@ -387,7 +387,14 @@ SIGMOND = "sigmond"
 # made for them.  A unit is recognised by its path in the unit directory and
 # its place in this list, never by its source file: the release that
 # retires a unit deletes that file from systemd/.
-RETIRED_OWN: tuple = ()
+RETIRED_OWN: tuple = (
+    # v3.96: sigmond-recorder-watchdog took over the T6-stuck rule.  install.sh
+    # copied both units into /etc/systemd/system (they go to the backup
+    # directory) and linked the helper into /usr/local/sbin.
+    UnitRetire(SIGMOND, ("sigmond-t6-stuck-watchdog.timer",
+                         "sigmond-t6-stuck-watchdog.service"),
+               ("/usr/local/sbin/sigmond-t6-stuck-watchdog",)),
+)
 # A retire that did not finish.  Not "failed": that word holds the release's
 # restarts and record (bin/smd _ALIGN_BLOCKING), which a retire, starting
 # nothing, has no reason to do.  Align still exits 1 on it.

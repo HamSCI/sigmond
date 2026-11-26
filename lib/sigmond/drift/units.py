@@ -45,7 +45,7 @@ _OWN_GLOBS = ("sigmond-*.service", "sigmond-*.timer", "sigmond-*.path")
 # is set), decode-health-collect (the operator's call), the per-client
 # trims (trim-all covers them), the timing/radiod watchdogs and netguard.
 INSTALL_ENABLED_TIMERS = (
-    "sigmond-t6-stuck-watchdog.timer",
+    "sigmond-recorder-watchdog.timer",
     "sigmond-mdns.timer",
     "sigmond-time-sync.timer",
     "sigmond-link.timer",

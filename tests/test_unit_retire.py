@@ -428,9 +428,8 @@ def test_align_retires_sigmonds_own_units(tmp_path):
     (tmp_path / "units").mkdir()
     (tmp_path / "units" / "sigmond-x.timer").write_text("[Unit]\n")
     own = (um.UnitRetire("sigmond", ("sigmond-x.timer",)),)
-    with mock.patch.object(um, "RETIRED_OWN", own):
-        steps, _, calls = _moves(True, tmp_path, topology={},
-                                 states={"sigmond-x.timer": ("enabled", "active")})
+    steps, _, calls = _moves(True, tmp_path, topology={}, own=own,
+                             states={"sigmond-x.timer": ("enabled", "active")})
     assert [(s.component, s.outcome) for s in steps] == [("sigmond: retire sigmond-x.timer",
                                                           "retired")]
     assert ["systemctl", "stop", "sigmond-x.timer"] in calls
