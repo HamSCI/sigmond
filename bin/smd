@@ -31931,6 +31931,8 @@ def _radiod_is_stopped(unit, *, run) -> bool:
 #: The one radiod consumer that sigmond-recorder-watchdog restarts, once per
 #: radiod start, outside smd's own restart and revival paths.
 RECORDER_COMPONENT = 'hf-timestd'
+#: Its one unit the watchdog owns; hf-timestd's other units are revived here.
+RECORDER_UNIT = 'timestd-core-recorder.service'
 
 
 def _radiod_file_recorder_request(evidence, *, run) -> None:
@@ -31958,8 +31960,8 @@ def _radiod_revive_failed_consumers(consumers, services, *, run, say=_info,
     ActiveState is failed (Result=start-limit-hit included), one log line
     each.  Returns True when systemctl refused a start.
 
-    ``RECORDER_COMPONENT`` is never revived here: a failed one is appended to
-    ``recorder_failed`` (when given) for the watchdog request instead."""
+    ``RECORDER_UNIT`` is never revived here (the other hf-timestd units are): a
+    failed one appends its component to ``recorder_failed`` (when given) for the watchdog request instead."""
     refused = False
     for comp in sorted(consumers):
         for unit in _align_service_units(services.get(comp, [])):
@@ -31971,7 +31973,7 @@ def _radiod_revive_failed_consumers(consumers, services, *, run, say=_info,
                          if '=' in line)
             if props.get('ActiveState', '').strip() != 'failed':
                 continue
-            if comp == RECORDER_COMPONENT:
+            if unit == RECORDER_UNIT:
                 say(f"  {unit}: failed (Result={props.get('Result', '?').strip()}) "
                     '— left to sigmond-recorder-watchdog')
                 if recorder_failed is not None:

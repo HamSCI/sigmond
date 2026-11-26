@@ -489,7 +489,8 @@ class ReviveFailedConsumersTests(unittest.TestCase):
         self.assertFalse([c for c in calls if c[:2] == ["systemctl", "reset-failed"]])
 
 
-HF_SERVICES = {**SERVICES, "hf-timestd": ["timestd-core-recorder.service"]}
+HF_SERVICES = {**SERVICES, "hf-timestd": ["timestd-core-recorder.service",
+                                          "timestd-fusion.service"]}
 
 
 def _run_hf(run, tmp_path, *, dry_run=False):
@@ -555,6 +556,15 @@ class RecorderIsTheWatchdogsTests(unittest.TestCase):
                                         ["systemctl", "restart"])])
         # A failed recorder is the watchdog's to look at: it gets the request.
         self.assertTrue((self.tmp / "req" / "radiod-consumers.json").exists())
+
+    def test_a_failed_fusion_is_still_revived(self):
+        run, calls = _failed_run({"timestd-fusion.service"},
+                                 mono={"timestd-core-recorder.service": 300.0,
+                                       "timestd-fusion.service": 300.0})
+        _run_hf(run, self.tmp)
+        self.assertIn(["systemctl", "reset-failed", "timestd-fusion.service"], calls)
+        starts = [c for c in calls if c[:2] == ["systemctl", "start"]]
+        self.assertTrue(any("timestd-fusion.service" in c for c in starts))
 
     def test_a_dry_run_files_nothing(self):
         run, calls = _fake_run(mono={"timestd-core-recorder.service": 100.0})

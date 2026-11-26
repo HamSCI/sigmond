@@ -235,7 +235,8 @@ class TestOn(unittest.TestCase):
         rc = sdr.manual_on(None, {})
         self.assertEqual(rc, 0)
         self.restart.assert_called_once_with("radiod@AI6VN.service",
-                                             ["wspr-recorder@AI6VN.service"])
+                                             ["wspr-recorder@AI6VN.service"],
+                                             stopped_recorder=False)
         self.assertFalse(self.hold.exists())
 
     def test_switches_the_superspeed_half_on_first(self):

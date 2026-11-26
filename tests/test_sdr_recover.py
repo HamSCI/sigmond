@@ -1775,4 +1775,5 @@ class ManualHoldNamesTheCardsOwnRadiodTests(unittest.TestCase):
                                return_value=True) as restart:
             rc = sdr.manual_on("RX0002", {"unit": "radiod@north.service"})
         self.assertEqual(rc, 0)
-        restart.assert_called_once_with("radiod@south.service", [])
+        restart.assert_called_once_with("radiod@south.service", [],
+                                        stopped_recorder=False)
