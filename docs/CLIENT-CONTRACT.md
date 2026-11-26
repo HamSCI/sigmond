@@ -796,12 +796,24 @@ Rules:
 - Align leaves the unit alone, and says why, while another component
   still lists it, while the site manages the component by hand
   (`locally_managed`), or while the unit's entry links to a file outside
-  every sigmond checkout (an operator's own unit of that name).
-- A retire that fails reads `failed` and holds the restarts back, as a
-  failed move does.  The next align tries again.
+  every sigmond checkout (an operator's own unit of that name).  A timer
+  and its service count as one here: when one of them belongs to someone
+  else, align leaves both.
+- A unit counts as still in service when it stands enabled, or runs
+  (active, activating, reloading).  A failed unit that is also disabled
+  does not: nothing starts it again.  Moves use the same rule.  A retire
+  also clears a unit whose file still sits in `/etc/systemd/system`,
+  even when it neither runs nor stands enabled.
+- A retire that does not finish reads `retire failed`.  Unlike a failed
+  move, it holds nothing back: a retire starts nothing, so the restarts
+  and the release record go ahead.  Align prints an ERROR line and exits
+  1, and the next align tries again.
 - The drift report faults a retired unit that stays enabled, active or
   installed.  Its fix reads `smd align --apply`, or names the file to
-  remove by hand when the entry belongs to someone else.
+  remove by hand when the entry belongs to someone else.  A retire that
+  align holds on purpose (another component ships the unit, or the site
+  manages the component by hand) shows as drift, not a fault, with the
+  change that would lift the hold.
 
 Keep a unit in `retired_units` for as long as a station might still
 carry it.

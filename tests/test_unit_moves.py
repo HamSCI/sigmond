@@ -434,12 +434,30 @@ def test_an_old_unit_that_failed_still_starts_the_new_one(tmp_path, word):
 
 
 def test_a_failed_old_unit_is_reset(tmp_path):
-    fake = FakeSystemd({"timestd-vtec.service": ("", "failed")})   # disabled, crashed
+    fake = FakeSystemd({"timestd-vtec.service": ("enabled", "failed")})   # enabled, crashed
     step = _apply(fake, tmp_path)
     flat = [" ".join(c) for c in fake.calls]
     assert step.outcome == "moved"
     assert "systemctl reset-failed timestd-vtec.service" in flat
     assert "systemctl start hamsci-physics-vtec.service" in flat
+
+
+# Parked v3.96 item, folded into Task 3's fix round: a failed old unit that
+# is also disabled no longer holds the job (nothing starts it again), so it
+# reads as the operator's off.  mutation check: count "failed" as live again.
+def test_a_failed_and_disabled_old_unit_is_unchanged(tmp_path):
+    fake = FakeSystemd({"timestd-vtec.service": ("disabled", "failed")})
+    assert _apply(fake, tmp_path).outcome == "unchanged"
+    assert not [c for c in fake.calls if c[1] not in ("is-enabled", "is-active")]
+    assert um.hold_move(MOVE, "x", unit_dir=tmp_path, run=fake).outcome == "unchanged"
+
+
+@pytest.mark.parametrize("enabled,word,live", [
+    (False, "failed", False), (True, "failed", True), (False, "active", True),
+    (False, "activating", True), (False, "reloading", True), (False, "inactive", False),
+    (True, "inactive", True)])
+def test_one_definition_of_live(enabled, word, live):
+    assert um.in_service(enabled, word) is live
 
 
 def test_dry_run_plans_a_start_for_a_failed_old_unit(tmp_path):

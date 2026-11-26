@@ -135,7 +135,7 @@ def test_a_failed_stop_fails_and_keeps_the_unit(tmp_path):
     root, unit_dir = _setup(tmp_path, link={TIMER: "repo"})
     fake = FakeSystemd({TIMER: ("enabled", "active")}, rcs={"stop": 1})
     step = _retire(fake, root, unit_dir)
-    assert step.outcome == "failed"
+    assert step.outcome == "retire failed"
     assert "systemctl stop timestd-prune.timer exit 1" in step.detail
     assert (unit_dir / TIMER).is_symlink()
     assert not _verbs(fake, "disable")
@@ -151,7 +151,7 @@ def test_a_failed_unit_is_reset(tmp_path):
 def test_a_failed_daemon_reload_fails_the_retire(tmp_path):
     root, unit_dir = _setup(tmp_path, link={TIMER: "repo"})
     fake = FakeSystemd({TIMER: ("enabled", "active")}, rcs={"daemon-reload": 1})
-    assert _retire(fake, root, unit_dir).outcome == "failed"
+    assert _retire(fake, root, unit_dir).outcome == "retire failed"
 
 
 def test_a_clear_that_raises_fails_the_retire(tmp_path, monkeypatch):
@@ -162,7 +162,7 @@ def test_a_clear_that_raises_fails_the_retire(tmp_path, monkeypatch):
         raise PermissionError("read-only")
     monkeypatch.setattr(um, "_clear_unit", boom)
     step = _retire(fake, root, unit_dir)
-    assert step.outcome == "failed" and "PermissionError" in step.detail
+    assert step.outcome == "retire failed" and "PermissionError" in step.detail
 
 
 def test_sigmond_own_retire_removes_its_sbin_link(tmp_path):
@@ -439,7 +439,7 @@ def test_align_retires_sigmonds_own_units(tmp_path):
 def test_align_reports_a_malformed_retire(tmp_path):
     _timestd_tree(tmp_path, retired=("x@.service",))
     steps, _, _ = _moves(True, tmp_path, topology={"hf-timestd": True}, states={})
-    assert [s.outcome for s in steps] == ["failed"]
+    assert [s.outcome for s in steps] == ["retire failed"]
 
 
 def test_a_second_align_is_unchanged(tmp_path):
@@ -453,3 +453,112 @@ def test_a_second_align_is_unchanged(tmp_path):
 def test_dry_run_counts_a_due_retire_as_pending():
     # mutation check: drop "would retire" from moves_due
     assert _dry_rc([align_apply.Step("x: retire a.timer", "would retire", "...")]) == 1
+
+
+# --- fix round 1 ---------------------------------------------------------------
+
+from tests.test_align_unit_moves import _order_run          # noqa: E402
+import tests.test_align_cli as tac                           # noqa: E402
+
+_RETIRE_FAILED = align_apply.Step("hf-timestd: retire timestd-prune.timer", "retire failed",
+                                  "systemctl stop timestd-prune.timer exit 1")
+
+
+def test_a_failed_retire_still_restarts_and_records_but_exits_1():
+    # I1: a retire starts nothing, so it holds nothing back.
+    # mutation check: put "retire failed" in _ALIGN_BLOCKING, and nothing restarts
+    rc, out, m, order, _ = _order_run([_RETIRE_FAILED])
+    m["restart"].assert_called()
+    m["record"].assert_called()
+    assert rc == 1
+    assert "ERROR: hf-timestd: retire timestd-prune.timer did not finish" in out
+
+
+def test_a_failed_retire_on_the_quiet_path_exits_1():
+    t = tac.AlignMakeLiveApplyTests("test_stage_order_moves_images_bringup_record_restart_checks")
+    rc, out, m = t._run(
+        moves=[align_apply.Step("sigmond", "current")],
+        extra_patches=[
+            mock.patch.object(smd, "_align_staleness", lambda *a, **k: tac._staleness()),
+            mock.patch.object(smd, "_align_device_steps", lambda **k: []),
+            mock.patch.object(smd, "_align_declared_units_steps", lambda *a, **k: []),
+            mock.patch.object(smd, "_align_unit_moves", lambda apply, **k: [_RETIRE_FAILED])])
+    assert "aligned — nothing to do" in out
+    assert rc == 1
+
+
+def test_a_failed_reset_fails_the_retire(tmp_path):
+    # mutation check: ignore reset-failed's exit code, and it reads "retired"
+    root, unit_dir = _setup(tmp_path, link={SERVICE: "repo"})
+    fake = FakeSystemd({SERVICE: ("static", "failed")}, rcs={"reset-failed": 1})
+    step = _retire(fake, root, unit_dir, units=(SERVICE,))
+    assert step.outcome == "retire failed"
+    assert "systemctl reset-failed timestd-prune.service exit 1" in step.detail
+
+
+def test_a_timer_that_will_not_stop_keeps_its_service(tmp_path):
+    root, unit_dir = _setup(tmp_path, link={SERVICE: "repo", TIMER: "repo"})
+    fake = FakeSystemd({TIMER: ("enabled", "active"), SERVICE: ("static", "inactive")},
+                       rcs={"stop": 1})
+    step = _retire(fake, root, unit_dir, units=(SERVICE, TIMER))
+    assert step.outcome == "retire failed"
+    assert (unit_dir / SERVICE).is_symlink()
+    assert f"{SERVICE} left as it is: {TIMER} did not stop" in step.detail
+
+
+def test_an_operators_timer_holds_its_service_too(tmp_path):
+    root, unit_dir = _setup(tmp_path, link={TIMER: "elsewhere", SERVICE: "repo"})
+    fake = FakeSystemd({TIMER: ("enabled", "active"), SERVICE: ("static", "inactive")})
+    step = _retire(fake, root, unit_dir, units=(SERVICE, TIMER))
+    assert step.outcome == "ran" and (unit_dir / SERVICE).is_symlink()
+    assert not _verbs(fake, "stop", "disable")
+
+
+def test_a_failed_and_disabled_retired_unit_with_no_file_is_unchanged(tmp_path):
+    # One definition of live (in_service), shared with moves.
+    root, unit_dir = _setup(tmp_path)
+    fake = FakeSystemd({TIMER: ("disabled", "failed")})
+    assert _retire(fake, root, unit_dir).outcome == "unchanged"
+
+
+def test_a_malformed_retire_keeps_the_components_moves(tmp_path):
+    from tests.test_align_unit_moves import _moved_tree
+    _moved_tree(tmp_path)
+    deploy = tmp_path / "hamsci-physics" / "deploy.toml"
+    deploy.write_text(deploy.read_text().replace(
+        "[systemd]\n", '[systemd]\nretired_units = ["x@.service"]\n', 1))
+    steps, _, _ = _moves(True, tmp_path, topology={"hamsci-physics": True})
+    assert sorted(s.outcome for s in steps) == ["moved", "retire failed"]
+
+
+def test_drift_reports_a_locally_managed_retire_as_held(tmp_path):
+    # I2. mutation check: drop the hold in drift, and it reads as a fault
+    base, unit_dir = _drift_base(tmp_path)
+    items = um.drift_items(base, {"hf-timestd": True}, unit_dir=unit_dir,
+                           is_enabled=lambda u: u == TIMER, service_active=lambda u: False,
+                           own=(), local={"hf-timestd"})
+    assert [(i.severity, i.subject) for i in items] == [("drift", TIMER)]
+    assert "locally_managed" in items[0].detail and "smd align" not in items[0].fix
+
+
+def test_drift_reports_a_unit_another_checkout_ships_as_held(tmp_path):
+    base, unit_dir = _drift_base(tmp_path)
+    (base / "hamsci-physics").mkdir()
+    (base / "hamsci-physics" / "deploy.toml").write_text(f'[systemd]\nunits = ["{TIMER}"]\n')
+    items = um.drift_items(base, {"hf-timestd": True}, unit_dir=unit_dir,
+                           is_enabled=lambda u: u == TIMER, service_active=lambda u: False,
+                           own=(), local=())
+    assert [(i.severity, i.subject) for i in items] == [("drift", TIMER)]
+    assert "hamsci-physics still ships" in items[0].detail
+    assert "smd align" not in items[0].fix
+
+
+def test_drift_names_a_malformed_retire_and_keeps_the_rest(tmp_path):
+    base, unit_dir = _drift_base(tmp_path)
+    (base / "bad").mkdir()
+    (base / "bad" / "deploy.toml").write_text('[systemd]\nretired_units = ["x@.service"]\n')
+    items = um.drift_items(base, {"hf-timestd": True}, unit_dir=unit_dir,
+                           is_enabled=lambda u: u == TIMER, service_active=lambda u: False,
+                           own=(), local=())
+    assert sorted((i.severity, i.subject) for i in items) == [
+        ("fault", "bad: retired_units"), ("fault", TIMER)]

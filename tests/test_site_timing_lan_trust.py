@@ -416,7 +416,7 @@ def _log(env):
 
 
 @pytest.mark.parametrize('enabled,active', [('enabled', 'active'), ('enabled', 'inactive'),
-                                            ('disabled', 'active'), ('disabled', 'failed'),
+                                            ('disabled', 'active'), ('enabled', 'failed'),
                                             ('disabled', 'activating')])
 def test_held_move_writes_nothing_while_the_old_unit_runs(env, enabled, active):
     _old_vtec(env, enabled, active)
@@ -425,6 +425,17 @@ def test_held_move_writes_nothing_while_the_old_unit_runs(env, enabled, active):
     assert not env['GCFG'].exists()
     assert 'restart hamsci-physics-vtec' not in _log(env)
     assert 'timestd-vtec.service still runs' in said and 'pending' in said
+
+
+def test_a_failed_and_disabled_old_unit_holds_nothing(env):
+    """The rule align's moves use (unit_moves.in_service): a failed old unit
+    that is also disabled no longer reads the receiver.  mutation check: put
+    `failed` back in old_vtec_live's state list, and nothing is wired."""
+    _old_vtec(env, 'disabled', 'failed')
+    trust(env, '--trust-gnss', '192.168.8.50')
+    said = run_step(env, STEP4, subnet='')
+    assert 'host = "192.168.8.50"' in env['GCFG'].read_text()
+    assert 'pending' not in said
 
 
 def test_held_move_counts_a_dangling_wants_link(env):

@@ -610,12 +610,14 @@ else: print("wired-host", h)' "$1" 2>/dev/null
 # holds it on some stations (--no-restart, a locally_managed owner,
 # hamsci-physics stopped or disabled).  There the old unit still reads the
 # receiver, and a serial port tolerates one reader: while timestd-vtec is
-# enabled, running or failed, this step neither wires the new file from
-# nothing nor starts the new unit.
+# enabled or running, this step neither wires the new file from nothing nor
+# starts the new unit.  A failed timestd-vtec that is also disabled holds
+# nothing: nothing starts it again (sigmond.unit_moves.in_service, the rule
+# align's moves use).
 old_vtec_live() {
     case "$(systemctl is-enabled timestd-vtec.service 2>/dev/null)" in enabled*) return 0 ;; esac
     case "$(systemctl is-active timestd-vtec.service 2>/dev/null)" in
-        active|activating|reloading|failed) return 0 ;;
+        active|activating|reloading) return 0 ;;
     esac
     # a wants-link left behind by a unit file that went with its checkout
     ls /etc/systemd/system/*.wants/timestd-vtec.service >/dev/null 2>&1

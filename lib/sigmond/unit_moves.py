@@ -43,7 +43,8 @@ link that resolves outside a sigmond checkout: an operator's own unit of
 that name.  ``drift_items`` faults a retired unit still enabled, active or
 installed, and ``smd align`` retries a retire at every run.
 
-A move whose old units are neither enabled nor active reports "unchanged",
+A move whose old units are neither enabled nor active reports "unchanged"
+(``in_service``: a failed unit that is disabled counts as off),
 so a second run, and every station that never ran the old unit, changes
 nothing.  Every process runs through an injected ``run`` (a subprocess.run
 stand-in) as an argv list, never through a shell.  Stdlib only.
@@ -73,6 +74,17 @@ _ACTIVE = ("active", "activating", "reloading")
 # (failed, as ND's timestd-vtec did until 039bd554) ran it too, so the new
 # unit starts in its place.
 _RAN = _ACTIVE + ("failed",)
+
+
+def in_service(enabled: bool, word: str) -> bool:
+    """The one definition of "this unit still holds its job", shared by moves
+    and retires: enabled (a wants-link counts), or active, activating or
+    reloading.  A failed unit that is also disabled does not: nothing starts
+    it again, so it reads as the operator's off.  A failed unit that is
+    enabled does, and a move then starts the new unit in its place (_RAN).
+    Retires differ in one way only: they also clear a unit whose file still
+    sits in the unit directory (``retire_live``)."""
+    return bool(enabled) or word in _ACTIVE
 # The values of the three properties apply_move reads back; the sets do not
 # overlap, so a value names its property whatever order systemctl prints.
 _ACTIVE_STATES = {"active", "reloading", "inactive", "failed", "activating",
@@ -254,10 +266,10 @@ def apply_move(move: UnitMove, *, apply: bool, owner_enabled: bool, unit_dir: Pa
                backup_dir: Path, run: Callable, now: datetime) -> Step:
     """Carry out one move; see the module docstring for the order."""
     label = _label(move)
-    # (enabled, ran): a failed old unit counts as having run the job.
-    states = {u: (en, word in _RAN) for u in move.from_units
-              for en, word in [_unit_words(u, unit_dir=unit_dir, run=run)]}
-    live = [u for u, (en, ran) in states.items() if en or ran]
+    words = {u: _unit_words(u, unit_dir=unit_dir, run=run) for u in move.from_units}
+    # (enabled, ran): among live units, a failed one counts as having run the job.
+    states = {u: (en, word in _RAN) for u, (en, word) in words.items()}
+    live = [u for u, (en, word) in words.items() if in_service(en, word)]
     if not live:
         return Step(label, "unchanged", "")
     old = ", ".join(live)
@@ -289,7 +301,7 @@ def apply_move(move: UnitMove, *, apply: bool, owner_enabled: bool, unit_dir: Pa
     unclear = []
     for unit in move.from_units:   # every old unit: a timer's .service link goes too
         enabled, active = states[unit]
-        if active:
+        if active and unit in live:
             cp = _systemctl(run, "stop", unit)
             if cp.returncode != 0:
                 return Step(label, "failed",
@@ -350,7 +362,8 @@ def hold_move(move: UnitMove, reason: str, *, unit_dir: Path, run: Callable) -> 
     """The Step for a move sigmond holds back: "unchanged" when no old unit
     is enabled or active, else "ran" with a ``held:`` line that names why.
     It reads systemctl and changes nothing."""
-    live = [u for u in move.from_units if any(unit_state(u, unit_dir=unit_dir, run=run))]
+    live = [u for u in move.from_units
+            if in_service(*_unit_words(u, unit_dir=unit_dir, run=run))]
     if not live:
         return Step(_label(move), "unchanged", "")
     return Step(_label(move), "ran", f"held: {reason}; {', '.join(live)} keeps running")
@@ -375,6 +388,10 @@ SIGMOND = "sigmond"
 # its place in this list, never by its source file: the release that
 # retires a unit deletes that file from systemd/.
 RETIRED_OWN: tuple = ()
+# A retire that did not finish.  Not "failed": that word holds the release's
+# restarts and record (bin/smd _ALIGN_BLOCKING), which a retire, starting
+# nothing, has no reason to do.  Align still exits 1 on it.
+RETIRE_FAILED = "retire failed"
 
 
 def parse_retired(component: str, deploy: dict):
@@ -484,21 +501,33 @@ def retire_live(retire: UnitRetire, *, unit_dir: Path, run: Callable,
     """``(states, live, foreign, links)`` for one retire.
 
     ``states`` maps unit -> (enabled, is-active word); ``live`` lists the
-    units still enabled, ran (a failed unit counts), or with an entry in
-    ``unit_dir``; ``foreign`` maps a live unit to why it is not sigmond's;
-    ``links`` lists the helper links still there."""
+    units ``in_service`` (the move rule), plus any whose entry still sits in
+    ``unit_dir``; ``foreign`` maps a live unit to why it is not sigmond's.
+    A timer and its service go together: when one is foreign, both hold,
+    since an operator's timer would start the service again.  ``links``
+    lists the helper links still there."""
     states, live, foreign = {}, [], {}
     for unit in _retire_order(retire.units):
         enabled, word = _unit_words(unit, unit_dir=unit_dir, run=run)
         states[unit] = (enabled, word)
-        if enabled or word in _RAN or (Path(unit_dir) / unit).is_symlink() \
-                or (Path(unit_dir) / unit).exists():
+        entry = Path(unit_dir) / unit
+        if in_service(enabled, word) or entry.is_symlink() or entry.exists():
             live.append(unit)
             why = foreign_entry(unit, unit_dir, checkout_root)
             if why is not None:
                 foreign[unit] = why
+    for unit in list(foreign):
+        mate = _mate(unit)
+        if mate in live and mate not in foreign:
+            foreign[mate] = f"its pair {unit} is not sigmond's"
     links = [p for p in retire.links if _own_link(p, checkout_root)]
     return states, live, foreign, links
+
+
+def _mate(unit: str) -> str:
+    """x.timer <-> x.service."""
+    stem, _, kind = unit.rpartition(".")
+    return f"{stem}.service" if kind == "timer" else f"{stem}.timer"
 
 
 def apply_retire(retire: UnitRetire, *, apply: bool, unit_dir: Path, backup_dir: Path,
@@ -507,7 +536,9 @@ def apply_retire(retire: UnitRetire, *, apply: bool, unit_dir: Path, backup_dir:
     docstring.  "unchanged" when none is enabled, ran or installed and no
     helper link remains; "ran" with a ``held:`` line for a unit whose entry
     is not sigmond's (the others still go); "would retire" in the dry run;
-    "retired" or "failed" on apply."""
+    "retired" or RETIRE_FAILED on apply.  RETIRE_FAILED does not hold the
+    release (a retire starts nothing): align exits 1, drift keeps the
+    fault, and the next align tries again."""
     label = _retire_label(retire)
     states, live, foreign, links = retire_live(retire, unit_dir=unit_dir, run=run,
                                                checkout_root=checkout_root)
@@ -529,20 +560,30 @@ def apply_retire(retire: UnitRetire, *, apply: bool, unit_dir: Path, backup_dir:
             plan.append(held)
         return Step(label, "would retire", "; ".join(plan))
 
-    errors, done = [], []
-    for unit in ours:
+    errors, done, kept = [], [], set()
+    for unit in ours:                 # timers first (_retire_order)
         enabled, word = states[unit]
+        if _mate(unit) in kept:
+            # Its timer still runs and would start it again.
+            errors.append(f"{unit} left as it is: {_mate(unit)} did not stop")
+            continue
         if word in _ACTIVE:
             cp = _systemctl(run, "stop", unit)
             if cp.returncode != 0:
                 tail = _last_line(cp)
                 errors.append(f"systemctl stop {unit} exit {cp.returncode}"
                               + (f" ({tail})" if tail else "") + f"; {unit} left as it is")
+                kept.add(unit)
                 continue
         if enabled:
             _systemctl(run, "disable", unit)   # a dangling unit fails here; cleared below
         if word in _RAN:
-            _systemctl(run, "reset-failed", unit)
+            cp = _systemctl(run, "reset-failed", unit)
+            if cp.returncode != 0:
+                # Left "failed", it would read as retired again at every align.
+                tail = _last_line(cp)
+                errors.append(f"systemctl reset-failed {unit} exit {cp.returncode}"
+                              + (f" ({tail})" if tail else ""))
         try:
             _clear_unit(unit, unit_dir, backup_dir, now, checkout_root)
         except Exception as exc:                                  # noqa: BLE001
@@ -559,12 +600,39 @@ def apply_retire(retire: UnitRetire, *, apply: bool, unit_dir: Path, backup_dir:
     if cp.returncode != 0:
         errors.append(f"systemctl daemon-reload exit {cp.returncode}")
     if errors:
-        return Step(label, "failed", "; ".join(errors + ([held] if held else []))
+        return Step(label, RETIRE_FAILED, "; ".join(errors + ([held] if held else []))
                     + "; the next align retries")
     detail = f"stopped, disabled and cleared {', '.join(done)}"
     if held:
         return Step(label, "ran", f"{detail}; {held}")
     return Step(label, "retired", detail)
+
+
+def unit_shippers(base: Path, names: Iterable[str]) -> dict:
+    """unit -> the components among ``names`` whose deploy.toml lists it
+    in [systemd] (units or templated_units), read from the working trees."""
+    from sigmond.drift.units import declared_units
+    out: dict = {}
+    for name in names:
+        for unit in declared_units(base, name):
+            out.setdefault(unit, []).append(name)
+    return out
+
+
+def retire_hold(retire: UnitRetire, *, local, shippers: dict):
+    """Why align leaves this retire alone, or None.  Align and drift share
+    it, so drift never faults a retire align holds on purpose.
+
+    The site manages the component by hand (``local``), or another
+    component still lists one of its units."""
+    if retire.component in set(local or ()):
+        return f"this site manages {retire.component} by hand (locally_managed)"
+    still = []
+    for unit in retire.units:
+        others = sorted(set(shippers.get(unit, ())) - {retire.component})
+        if others:
+            still.append(f"{', '.join(others)} still ships {unit}")
+    return "; ".join(still) or None
 
 
 def hold_retire(retire: UnitRetire, reason: str, *, unit_dir: Path, run: Callable,
@@ -645,14 +713,19 @@ def link_units(repo: Path, units: Iterable[str], *, unit_dir: Path) -> list:
 def drift_items(base: Path, enabled, *, unit_dir: Path,
                 is_enabled: Callable[[str], bool],
                 service_active: Callable[[str], bool],
-                own=None, checkout_root: str = CHECKOUT_ROOT) -> list:
+                own=None, checkout_root: str = CHECKOUT_ROOT, local=None) -> list:
     """Drift faults for a move left half done, and for a retired unit left.
 
     A retired unit (``retired_units``, or ``own``, default RETIRED_OWN)
     still enabled, active or installed faults, fixed by ``smd align
-    --apply``; one whose entry links outside a sigmond checkout names the
-    hand fix instead, since align leaves an operator's unit alone.  A
-    helper link of sigmond's own retired units faults the same way.
+    --apply``; one whose entry links outside a sigmond checkout (or whose
+    timer/service pair does) names the hand fix instead, since align leaves
+    an operator's unit alone.  A helper link of sigmond's own retired units
+    faults the same way.  A retire align holds on purpose (``retire_hold``:
+    ``local``, default site-profile's locally_managed, or another checkout
+    still ships the unit) reads as "drift", never a fault, and names what
+    would lift the hold.  A malformed ``retired_units`` faults by itself and
+    leaves the other items standing.
 
     For each move a component declares (a component ``enabled``, the
     topology map, names, or any checkout under ``base``), every old unit
@@ -684,19 +757,48 @@ def drift_items(base: Path, enabled, *, unit_dir: Path,
                                 f"{old} moved to {move.to_unit} in {move.component}, "
                                 f"which topology {how} here",
                                 f"smd enable {move.component}"))
-    retires = declared_retired(base, sorted(set(enabled) | checkouts))
+    names = sorted(set(enabled) | checkouts)
+    retires = []
+    for name in names:
+        try:
+            retires += declared_retired(base, [name])
+        except ValueError as exc:
+            out.append(Item("unit", "fault", f"{name}: retired_units", str(exc),
+                            f"fix [systemd].retired_units in {name}'s deploy.toml"))
     retires += list(RETIRED_OWN if own is None else own)
+    if local is None:
+        try:
+            from sigmond.site_profile import locally_managed_components
+            local = locally_managed_components()
+        except Exception:                                         # noqa: BLE001
+            local = ()
+    shippers = unit_shippers(base, sorted(checkouts)) if retires else {}
     for retire in retires:
+        hold = retire_hold(retire, local=local, shippers=shippers)
+        states = {}
         for unit in _retire_order(retire.units):
             entry = Path(unit_dir) / unit
-            state = ("enabled" if is_enabled(unit) or _wants_links(unit, unit_dir)
-                     else "active" if service_active(unit)
-                     else "installed" if entry.is_symlink() or entry.exists()
-                     else None)
+            states[unit] = ("enabled" if is_enabled(unit) or _wants_links(unit, unit_dir)
+                            else "active" if service_active(unit)
+                            else "installed" if entry.is_symlink() or entry.exists()
+                            else None)
+        foreign = {u: foreign_entry(u, unit_dir, checkout_root) for u in states}
+        for unit, state in states.items():
             if state is None:
                 continue
-            why = foreign_entry(unit, unit_dir, checkout_root)
-            if why is not None:
+            entry = Path(unit_dir) / unit
+            why = foreign[unit]
+            if why is None and foreign.get(_mate(unit)) and states.get(_mate(unit)):
+                why = f"its pair {_mate(unit)} is not sigmond's"
+            if hold is not None:
+                fix = (f"retire {unit} by hand, or drop {retire.component} from "
+                       "locally_managed" if "locally_managed" in hold else
+                       f"drop {unit} from {retire.component}'s retired_units or from "
+                       "the other component's [systemd] units")
+                out.append(Item("unit", "drift", unit,
+                                f"{unit} retired by {retire.component}, still {state}; "
+                                f"align holds it: {hold}", fix))
+            elif why is not None:
                 out.append(Item("unit", "fault", unit,
                                 f"{unit} retired by {retire.component}, but {why}",
                                 f"remove or rename {entry} by hand"))
@@ -705,7 +807,7 @@ def drift_items(base: Path, enabled, *, unit_dir: Path,
                                 f"{unit} retired by {retire.component}, still {state}",
                                 "smd align --apply"))
         for path in retire.links:
-            if _own_link(path, checkout_root):
+            if hold is None and _own_link(path, checkout_root):
                 out.append(Item("unit", "fault", path,
                                 f"{path} links a unit {retire.component} retired",
                                 "smd align --apply"))

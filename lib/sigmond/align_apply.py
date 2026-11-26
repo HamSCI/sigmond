@@ -852,7 +852,7 @@ def apply_plan(rel: Release, items: list, ctx: Ctx) -> list:
 
 ALIGNED_RECORD = Path("/etc/sigmond-appliance/aligned.json")
 
-_LOGGED_OUTCOMES = ("moved", "installed", "failed")
+_LOGGED_OUTCOMES = ("moved", "installed", "failed", "retired", "retire failed")
 
 
 def _atomic_write_keeping_prev(path: Path, text: str) -> None:
