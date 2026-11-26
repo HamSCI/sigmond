@@ -289,3 +289,68 @@ def test_a_failed_migrate_says_why(tmp_path):
     assert step.outcome == "failed"
     assert "refused: no gnss-vtec section" in step.detail
     assert "reading config" not in step.detail
+
+
+# --- Task 10: drift reports a half-done move -------------------------------
+
+_PHYSICS_DEPLOY = ('[systemd]\nunits = ["hamsci-physics-vtec.service"]\n'
+                   '[[systemd.moves]]\nfrom = ["timestd-vtec.service"]\n'
+                   'to = "hamsci-physics-vtec.service"\n')
+
+
+def _drift_base(tmp_path):
+    (tmp_path / "hamsci-physics").mkdir()
+    (tmp_path / "hamsci-physics" / "deploy.toml").write_text(_PHYSICS_DEPLOY)
+    unit_dir = tmp_path / "units"; unit_dir.mkdir()
+    return tmp_path, unit_dir
+
+
+def test_drift_faults_a_held_move(tmp_path):
+    base, unit_dir = _drift_base(tmp_path)
+    items = um.drift_items(base, {"hamsci-physics": False}, unit_dir=unit_dir,
+                           is_enabled=lambda u: False,
+                           service_active=lambda u: u == "timestd-vtec.service")
+    assert [(i.kind, i.severity, i.subject, i.fix) for i in items] == [
+        ("unit", "fault", "timestd-vtec.service", "smd enable hamsci-physics")]
+    assert items[0].detail == ("timestd-vtec.service moved to hamsci-physics-vtec.service "
+                               "in hamsci-physics, which topology disables here")
+
+
+def test_drift_faults_an_old_unit_that_still_runs(tmp_path):
+    base, unit_dir = _drift_base(tmp_path)
+    items = um.drift_items(base, {"hamsci-physics": True}, unit_dir=unit_dir,
+                           is_enabled=lambda u: u == "timestd-vtec.service",
+                           service_active=lambda u: False)
+    assert [(i.severity, i.subject, i.detail, i.fix) for i in items] == [
+        ("fault", "timestd-vtec.service",
+         "timestd-vtec.service still runs; hamsci-physics took it over as "
+         "hamsci-physics-vtec.service", "smd align --apply")]
+
+
+def test_drift_counts_a_dangling_wants_link(tmp_path):
+    base, unit_dir = _drift_base(tmp_path)
+    wants = unit_dir / "multi-user.target.wants"; wants.mkdir()
+    (wants / "timestd-vtec.service").symlink_to(unit_dir / "timestd-vtec.service")
+    items = um.drift_items(base, {"hamsci-physics": True}, unit_dir=unit_dir,
+                           is_enabled=lambda u: False, service_active=lambda u: False)
+    assert [i.subject for i in items] == ["timestd-vtec.service"]
+
+
+def test_drift_quiet_after_the_move(tmp_path):
+    base, unit_dir = _drift_base(tmp_path)
+    assert um.drift_items(base, {"hamsci-physics": True}, unit_dir=unit_dir,
+                          is_enabled=lambda u: False, service_active=lambda u: False) == []
+
+
+def test_drift_report_runs_the_moves_collector(tmp_path):
+    from sigmond.drift import build_report
+    base, unit_dir = _drift_base(tmp_path)
+    readers = build_report.Readers(
+        base=base, enabled={"hamsci-physics": False}, unit_dir=unit_dir,
+        is_enabled=lambda u: False,
+        service_active=lambda u: u == "timestd-vtec.service",
+        template_instances=lambda u: 0, exceptions_path=tmp_path / "none.toml",
+        run=lambda *a, **k: subprocess.CompletedProcess(a, 1, "", ""))
+    report = build_report.build("TEST", readers=readers)
+    assert any(i.subject == "timestd-vtec.service" and i.fix == "smd enable hamsci-physics"
+               for i in report.items)

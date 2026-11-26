@@ -10,6 +10,23 @@ what has run on real hardware.  A release that no station has yet installed says
 
 ---
 
+## sigmond v3.96 (draft)
+
+### Units that change owners
+
+- **`smd align` moves a unit from one component to another.**  A component now
+  declares a unit it took over, under `[[systemd.moves]]` in its `deploy.toml`
+  (CLIENT-CONTRACT §5.6).  v3.96 carries three moves.  `timestd-vtec.service` becomes
+  `hamsci-physics-vtec.service`.  `hamsci-physics-ionex-download.timer` becomes
+  `timestd-ionex-download.timer`, and `hamsci-physics-iri-update.timer` becomes
+  `timestd-iri-update.timer`.  Align runs the new owner's adoption command, stops
+  and disables the old unit, then enables the new one and starts it if the old one
+  ran.  Two copies never run.  When topology disables the new owner, align leaves
+  the old unit running, and the drift report faults it with the fix
+  `smd enable <owner>`.  A move that fails holds the restarts back.
+
+---
+
 ## sigmond v3.95 — blessed 2026-11-25
 
 A release of fixes.  Sensed bring-up and run-with-purpose wait for the package pilot.

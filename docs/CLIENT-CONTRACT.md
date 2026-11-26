@@ -704,6 +704,47 @@ Every mutating verb (`install`, `apply`, `start`, `stop`, `restart`,
 This prevents concurrent apply-vs-restart races.  `list` and `status`
 are lock-free readers.
 
+#### 5.6 Units that change owners: `[[systemd.moves]]` (v3.96)
+
+Sometimes one component takes over a unit another component ran.  The
+gaining component, the new owner, declares the move in its own
+`deploy.toml`:
+
+```toml
+[[systemd.moves]]
+from    = ["timestd-vtec.service"]          # one unit name, or a list
+to      = "hamsci-physics-vtec.service"     # must appear in [systemd].units
+migrate = ["/opt/git/sigmond/hamsci-physics/venv/bin/hamsci-physics", "vtec", "adopt"]
+```
+
+- `from` names the old units.  A timer move lists the timer and its
+  service, so sigmond clears both.
+- `to` names the new unit.  The same file must list it in `[systemd].units`.
+- `migrate` (optional) holds an argv, never a shell line.  It copies the
+  old unit's configuration and credentials into the new owner's place.
+
+`smd align --apply` runs each move after the checkouts move and before
+bring-up.  It follows this order:
+
+1. It runs `migrate`.  A non-zero exit stops the move, and the old unit
+   keeps running.
+2. It stops and disables each old unit, and removes any link the old
+   checkout left behind.
+3. It enables the new unit, and starts it when an old unit ran.
+
+The old unit stops before the new one starts, so two copies never run.
+A move whose old units neither run nor stand enabled changes nothing.
+The dry run lists each move as `would move <old> -> <new> (<owner>)`.
+It reads a component that align would move at its target commit.
+
+When topology disables the new owner, align holds the move and leaves
+the old unit running.  The drift report faults the old unit and names
+the fix, `smd enable <owner>`.  The next align then finishes the move.
+
+A move entry stays in `deploy.toml` until a release removes it on
+purpose.  A station that skips a release and aligns later still gets
+the move.
+
 ### 6. Talking to radiod: use `ka9q-python` (revised v0.5)
 
 Clients that consume RTP streams from a radiod instance **SHOULD**

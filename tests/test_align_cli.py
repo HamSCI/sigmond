@@ -642,6 +642,8 @@ def _quiet_live_stages():
         smd,
         _align_refresh_image_files=lambda tag, **kw: [],
         _align_bringup=lambda **kw: [],
+        # The unit moves read topology, checkouts and systemctl.
+        _align_unit_moves=lambda *a, **kw: [],
         # The routing step runs a child smd as root (uniform routing).
         _align_routing=lambda: align_apply.Step("admin uploader routing --apply", "ran"),
         _align_services=lambda *a, **k: {},

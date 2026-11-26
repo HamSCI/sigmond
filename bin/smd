@@ -7098,6 +7098,8 @@ _PRELOAD_MODULES = {
               'sigmond.safe_write',
               # the operator-catalog prune (_align_catalog_prune)
               'sigmond.catalog_prune',
+              # [[systemd.moves]], run after the checkouts moved (_align_unit_moves)
+              'sigmond.unit_moves',
               'sigmond.topology', 'sigmond.instance',
               'sigmond.uploader_manifest', 'sigmond.environment',
               'sigmond.environment_kinds', 'sigmond.discovery',
@@ -9821,6 +9823,76 @@ def _align_enable_declared_units(apply: bool, *, base='/opt/git/sigmond',
     return count
 
 
+_ALIGN_UNIT_MOVE_BACKUPS = Path('/var/lib/sigmond/unit-moves')
+
+
+def _align_unit_moves(apply: bool, *, base='/opt/git/sigmond', plan=None,
+                      run=subprocess.run, say=print) -> list:
+    """Carry out the `[[systemd.moves]]` the components declare
+    (`sigmond.unit_moves`): the gaining component's migrate command, then
+    stop and disable the old units, then enable (and start) the new one.
+
+    --apply calls this after the checkouts moved and before bring-up, so
+    the new owner's code and unit files sit on disk, and reads each
+    component's working tree.  The dry run reads a component the plan
+    moves (status ``move``) at its target commit, and every other one
+    from its working tree.
+
+    It reads every component topology names, enabled or not, and every
+    checkout under `base`: a move whose owner topology disables still gets
+    its "held" line while the old unit runs.  A move whose old units are
+    neither enabled nor active reports "unchanged" on --apply, and nothing
+    in the dry run.  A malformed declaration yields a "failed" step, and so
+    does a topology that cannot be read on --apply; on --apply that holds
+    the restarts back, and in the dry run it leaves the run pending.
+    Returns the Steps (the dry run's too, though it prints its own lines)."""
+    from datetime import datetime, timezone
+    from sigmond import align_apply
+    from sigmond import unit_moves
+    from sigmond.drift import build_report as drift_report
+    base = Path(base)
+    try:
+        enabled = drift_report.topology_enabled()
+    except Exception as exc:                                   # noqa: BLE001
+        say(f'  unit moves: not checked ({exc})')
+        return [align_apply.Step('unit moves', 'failed',
+                                 f'topology unreadable ({exc}); no unit moved')] if apply else []
+    try:
+        checkouts = sorted(p.name for p in base.iterdir() if (p / 'deploy.toml').is_file())
+    except OSError:
+        checkouts = []
+    targets = {it.component: it.target for it in (plan or ())
+               if it.status == 'move' and it.target} if not apply else {}
+    steps = []
+    now = datetime.now(timezone.utc)
+    for name in sorted(set(enabled) | set(checkouts)):
+        try:
+            if name in targets:
+                moves = unit_moves.declared_moves_at(base / name, name, targets[name], run=run)
+            else:
+                moves = unit_moves.declared_moves(base, [name])
+        except ValueError as exc:
+            say(f'  unit moves: {exc}')
+            steps.append(align_apply.Step(name, 'failed', f'unit moves not read: {exc}'))
+            continue
+        for move in moves:
+            step = unit_moves.apply_move(move, apply=apply,
+                                         owner_enabled=bool(enabled.get(name)),
+                                         unit_dir=_ALIGN_UNIT_DIR,
+                                         backup_dir=_ALIGN_UNIT_MOVE_BACKUPS,
+                                         run=run, now=now)
+            steps.append(step)
+            if apply:
+                continue
+            if step.outcome == 'would move':
+                say(f'  would move {", ".join(move.from_units)} -> {move.to_unit} '
+                    f'({move.component})')
+                say(f'      {step.detail}')
+            elif step.outcome != 'unchanged':
+                say(f'  {step.component}: {step.outcome} - {step.detail}')
+    return steps
+
+
 def _align_declared_units_steps(base, *, timers_out=None) -> list:
     """`_align_enable_declared_units` as one bring-up Step, or none when it
     had nothing to say.  Never blocking: a unit left disabled stays a
@@ -10710,6 +10782,10 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now,
             # _align_start_timers, which runs on this path too).  Device
             # clients first, as in _align_bringup.
             _start = not getattr(args, 'no_restart', False)
+            # A move held while topology disabled its owner finishes here,
+            # once `smd enable` turned the owner on (the drift fault's fix).
+            unit_move_steps = _align_unit_moves(True, base=base)
+            _align_print_steps(unit_move_steps)
             _align_print_steps(_align_device_steps(start=_start, base=base))
             _align_print_steps(_align_declared_units_steps(
                 base, timers_out=timers_out))
@@ -10717,14 +10793,25 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now,
             # earlier align or update (uniform routing, ruling R7).
             routing_step = _align_routing()
             _align_print_steps([routing_step])
-            return 1 if routing_step.outcome in _ALIGN_BLOCKING else 0
+            return 1 if (routing_step.outcome in _ALIGN_BLOCKING or any(
+                s.outcome in _ALIGN_BLOCKING for s in unit_move_steps)) else 0
 
+    # Units that changed owners move after the checkouts (the new owner's
+    # unit files are on disk) and before bring-up: the old unit stops
+    # before the new one starts, so two copies never run.
+    unit_move_steps = _align_unit_moves(True, base=base)
+    _align_print_steps(unit_move_steps)
     bringup_steps = _align_bringup(site_timing_refreshed=any(
         s.component == _ALIGN_SITE_TIMING and s.outcome == 'refreshed' for s in image_steps),
         base=base, start_timers=not getattr(args, 'no_restart', False),
         timers_out=timers_out)
     _align_print_steps(bringup_steps)
-    steps = move_steps + image_steps + bringup_steps
+    steps = move_steps + image_steps + unit_move_steps + bringup_steps
+    if any(s.outcome in _ALIGN_BLOCKING for s in unit_move_steps):
+        print('  not recorded and nothing restarted: a unit move failed — see above')
+        align_apply.record_history(rel, steps, history=history, now=now)
+        _align_print_summary(steps)
+        return 1
     if any(s.outcome in ('failed', 'refused') for s in bringup_steps):
         print('  not recorded and nothing restarted: a bring-up step failed — see above')
         align_apply.record_history(rel, steps, history=history, now=now)
@@ -11290,6 +11377,10 @@ def cmd_align(args) -> int:
     _align_follow_devices(False, start=not getattr(args, 'no_restart', False),
                           off_out=switched_off)
     _align_gmag_webui_unit(False, base=base)
+    # A move --apply would make, or a declaration it could not read, leaves
+    # the station unaligned; "unchanged" and a held move do not.
+    moves_due = any(s.outcome in ('would move', 'failed')
+                    for s in _align_unit_moves(False, base=base, plan=plan))
     _align_enable_declared_units(False, base=base, switched_off=set(switched_off))
     own_due, own_err = _align_own_timers_due(_ALIGN_UNIT_DIR, subprocess.run)
     if own_err is not None:
@@ -11350,7 +11441,7 @@ def cmd_align(args) -> int:
     else:
         _align_print_drift(report)
     pending = (counts['move'] or rebuilds or native_due or counts['refuse'] or counts['missing'] or stale
-               or unverified or stale_now or pins_due)
+               or unverified or stale_now or pins_due or moves_due)
     return 1 if pending else 0
 
 

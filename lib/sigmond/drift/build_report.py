@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from sigmond import unit_moves
 from sigmond.drift import exceptions as drift_exceptions
 from sigmond.drift.builds import build_items
 from sigmond.drift.devices import NEVER_GATED, device_items
@@ -173,6 +174,9 @@ def build(station: str, *, readers: Readers) -> Report:
                                     service_active=r.service_active,
                                     template_instances=r.template_instances,
                                     dormant=dormant(), left_off=left_off)),
+        ("unit", lambda: unit_moves.drift_items(
+            base, _v(r.enabled) or {}, unit_dir=Path(r.unit_dir),
+            is_enabled=r.is_enabled, service_active=r.service_active)),
         ("unit", lambda: device_items(_v(r.enabled) or {},
                                       gated=_v(r.gated) or {},
                                       ready=ready,

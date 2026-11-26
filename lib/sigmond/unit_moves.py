@@ -288,3 +288,33 @@ def apply_move(move: UnitMove, *, apply: bool, owner_enabled: bool, unit_dir: Pa
         # a stopped service), so nothing should run now: enabled is the goal.
         return Step(label, "moved", f"{old} disabled; {move.to_unit} enabled")
     return broken(f"{move.to_unit} is {active or 'unknown'}")
+
+
+def drift_items(base: Path, enabled, *, unit_dir: Path,
+                is_enabled: Callable[[str], bool],
+                service_active: Callable[[str], bool]) -> list:
+    """Drift faults for a move left half done.
+
+    For each move a component in ``enabled`` (topology: name -> bool)
+    declares, every old unit still enabled or active faults.  When topology
+    enables the gaining component, align should have moved it; when topology
+    disables it, align held the move, and enabling the component lets the
+    next align finish it.  A wants-link counts as enabled (``unit_state``).
+    """
+    from sigmond.drift.model import Item
+    out = []
+    for move in declared_moves(base, sorted(enabled)):
+        for old in move.from_units:
+            if not (is_enabled(old) or bool(_wants_links(old, unit_dir))
+                    or service_active(old)):
+                continue
+            if enabled.get(move.component):
+                out.append(Item("unit", "fault", old,
+                                f"{old} still runs; {move.component} took it over "
+                                f"as {move.to_unit}", "smd align --apply"))
+            else:
+                out.append(Item("unit", "fault", old,
+                                f"{old} moved to {move.to_unit} in {move.component}, "
+                                "which topology disables here",
+                                f"smd enable {move.component}"))
+    return out
