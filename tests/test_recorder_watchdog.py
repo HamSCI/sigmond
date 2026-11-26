@@ -343,10 +343,12 @@ class FakeSystemd:
         self.radiod_mono = radiod_mono
         self.rc = rc
         self.calls = []
+        self.timeouts = {}
 
     def __call__(self, argv, **kw):
         argv = list(argv)
         self.calls.append(argv)
+        self.timeouts[argv[1]] = kw.get("timeout")
         if argv[:2] == ["systemctl", "show"]:
             unit = argv[-1]
             if unit == rw.UNIT:
@@ -354,7 +356,7 @@ class FakeSystemd:
                 out = (f"ActiveState={r['state']}\nResult={r['result']}\n"
                        f"ActiveEnterTimestampMonotonic={int(r['enter'] * 1e6)}\n"
                        f"InactiveEnterTimestampMonotonic={int(r.get('inactive', 0) * 1e6)}\n"
-                       f"NRestarts={r.get('n', 0)}\n")
+                       f"NRestarts={r.get('n', 0)}\nExecMainStatus={r.get('status', 0)}\n")
             else:
                 active = self.radiod_mono is not None
                 out = (f"ActiveState={'active' if active else 'inactive'}\nResult=success\n"
@@ -367,7 +369,8 @@ class FakeSystemd:
         return subprocess.CompletedProcess(argv, 0, "", "")
 
 
-def _tick(tmp_path, sysd, *, t6=None, stopped=False, lock_ok=True, dry=False):
+def _tick(tmp_path, sysd, *, t6=None, stopped=False, lock_ok=True, dry=False,
+          radiod="radiod@x.service", said=None):
     paths = rw.Paths(request_dir=tmp_path / "req", ledger=tmp_path / "led.jsonl",
                      state=tmp_path / "state.json")
     lock_calls = []
@@ -379,9 +382,11 @@ def _tick(tmp_path, sysd, *, t6=None, stopped=False, lock_ok=True, dry=False):
             raise RuntimeError("lifecycle lock held by smd restart")
         yield
 
+    stopped_fn = stopped if callable(stopped) else (lambda: stopped)
     rc = rw.tick(paths=paths, run=sysd, wall=lambda: 1e9, mono=lambda: 100_000.0,
-                 radiod_unit=lambda: "radiod@x.service", t6=lambda st, now: t6,
-                 ledger_stopped=lambda: stopped, lock=lock, dry_run=dry)
+                 radiod_unit=lambda: radiod, t6=lambda st, now: t6,
+                 ledger_stopped=stopped_fn, lock=lock, dry_run=dry,
+                 say=(said.append if said is not None else (lambda m: None)))
     rows = ([json.loads(l) for l in paths.ledger.read_text().splitlines()]
             if paths.ledger.exists() else [])
     state = json.loads(paths.state.read_text()) if paths.state.exists() else {}
@@ -709,3 +714,95 @@ class NullTelemetrySectionTest(unittest.TestCase):
     def test_an_unreadable_status_refuses(self):
         self.assertIsNone(rw.read_status(1.0, {}, status_path=Path('/nonexistent/s.json'),
                                          cn0=lambda: None))
+
+
+# --- fix round 1 --------------------------------------------------------------
+
+def test_radiod_restart_waits_out_radiods_settle():
+    # I1.  Mutation check: drop the READY_SETTLE_S deferral.
+    facts = dict(recorder=rw.UnitState("active", "success", 99_900.0, None, 0),
+                 requests=(_req("radiod-restarted"),))
+    d = rw.decide(_f(**facts, radiod_started_mono=100_000.0 - rw.READY_SETTLE_S + 1))
+    assert d.action == "none" and len(d.deferred) == 1 and not d.refused
+    assert "settles" in d.deferred[0][1]
+    d = rw.decide(_f(**facts, radiod_started_mono=100_000.0 - rw.READY_SETTLE_S))
+    assert (d.action, d.cause) == ("restart", "radiod-restarted")
+
+
+def test_a_start_inside_radiods_settle_waits_too():
+    d = rw.decide(_f(recorder=rw.UnitState("inactive", "success", None, 99_000.0, 0),
+                     radiod_started_mono=99_995.0,
+                     requests=(_req("radiod-restarted", stopped=True),)))
+    assert d.action == "none" and len(d.deferred) == 1
+
+
+def test_tick_keeps_a_request_inside_the_settle_and_marks_nothing(tmp_path):
+    sysd = FakeSystemd({"state": "active", "result": "success", "enter": 99_900.0},
+                       radiod_mono=99_995.0)
+    rw.file_request("sdr-recover", "radiod-restarted", "", request_dir=tmp_path / "req",
+                    now=1e9 - 5)
+    _, _, state, _, paths = _tick(tmp_path, sysd)
+    assert "radiod_start_acted" not in state
+    assert not any(c[1] == "restart" for c in sysd.calls)
+    assert [r.reporter for r in rw.take_requests(paths.request_dir, 1e9)] == ["sdr-recover"]
+
+
+def test_a_recorder_that_refused_its_config_is_not_revived():
+    # Mutation check: drop the NO_REVIVE_EXIT test and rule 4 starts it.
+    rec = rw.UnitState("failed", "exit-code", None, 100_000.0 - 2 * rw.FAILED_REVIVE_S, 0, 78)
+    d = rw.decide(_f(recorder=rec))
+    assert d.action == "none" and "78" in d.reason
+    other = rw.UnitState("failed", "exit-code", None, 100_000.0 - 2 * rw.FAILED_REVIVE_S, 0, 1)
+    assert rw.decide(_f(recorder=other)).action == "start"
+
+
+def test_a_stop_that_timed_out_is_not_revived():
+    # Review Focus 4: an operator's stop that ended in SIGKILL reads failed/timeout.
+    # Mutation check: drop the timeout test and rule 4 starts it.
+    rec = rw.UnitState("failed", "timeout", None, 100_000.0 - 2 * rw.FAILED_REVIVE_S, 0, 9)
+    d = rw.decide(_f(recorder=rec, requests=(_req("no-output"),)))
+    assert d.action == "none" and "timeout" in d.reason
+
+
+def test_tick_reads_exec_main_status(tmp_path):
+    sysd = FakeSystemd({"state": "failed", "result": "exit-code", "enter": 0,
+                        "inactive": 100_000.0 - 2 * rw.FAILED_REVIVE_S, "status": 78})
+    _tick(tmp_path, sysd)
+    assert not any(c[1] in ("start", "restart") for c in sysd.calls)
+
+
+def test_the_redecide_under_the_lock_rereads_the_ledger_stop(tmp_path):
+    # Mutation check: drop ledger_stopped from the re-decide.
+    sysd = FakeSystemd({"state": "active", "result": "success", "enter": 100_000.0 - 5 * G})
+    seq = iter([False, True])
+    _, rows, _, lock_calls, _ = _tick(tmp_path, sysd, t6=_stuck(), stopped=lambda: next(seq))
+    assert lock_calls == [60]
+    assert not any(c[1] == "restart" for c in sysd.calls)
+    assert not any(r["action"] == "restart" for r in rows)
+
+
+def test_restart_waits_past_the_recorders_start_timeout(tmp_path):
+    # Mutation check: put the 120 s default back on the action.
+    sysd = FakeSystemd({"state": "active", "result": "success", "enter": 100_000.0 - 5 * G})
+    _tick(tmp_path, sysd, t6=_stuck())
+    assert sysd.timeouts["restart"] > 300
+    sysd = FakeSystemd({"state": "failed", "result": "exit-code", "enter": 0,
+                        "inactive": 100_000.0 - rw.FAILED_REVIVE_S, "status": 1})
+    _tick(tmp_path / "b", sysd)
+    assert sysd.timeouts["start"] > 300
+
+
+def test_an_unknown_radiod_unit_warns_once_per_request(tmp_path):
+    # Mutation check: warn on every tick, or never.
+    sysd = FakeSystemd({"state": "active", "result": "success", "enter": 99_900.0})
+    rw.file_request("sdr-recover", "radiod-restarted", "", request_dir=tmp_path / "req",
+                    now=1e9 - 5)
+    said = []
+    _, rows, _, _, _ = _tick(tmp_path, sysd, radiod=None, said=said)
+    assert [r["action"] for r in rows] == ["deferred"]
+    assert "sdr-recover" in rows[0]["reason"] or rows[0]["reporter"] == "sdr-recover"
+    assert any("WARNING" in m and "sdr-recover" in m for m in said)
+    said.clear()
+    _, rows, _, _, _ = _tick(tmp_path, sysd, radiod=None, said=said)
+    assert [r["action"] for r in rows] == ["deferred"]          # the first tick's row only
+    assert not any("WARNING" in m for m in said)

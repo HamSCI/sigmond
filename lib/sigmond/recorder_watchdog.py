@@ -136,6 +136,13 @@ READY_SETTLE_S = _env("RWD_READY_SETTLE_S", float(radiod_ready.READY_SETTLE_S))
 #: HPPS staleness is a downstream symptom (2026-08-29): record, do not act.
 ACT_ON_HPPS = _env("RWD_ACT_ON_HPPS", False)
 LOCK_WAIT_S = 60
+#: A blocking `systemctl start|restart` waits for the recorder's own
+#: TimeoutStartSec (300 s in timestd-core-recorder.service), plus a margin,
+#: so a slow start that succeeds is not recorded as a failure.
+ACT_TIMEOUT_S = _env("RWD_ACT_TIMEOUT_S", 300 + 60)
+#: The recorder's RestartPreventExitStatus: it refused its config.  Neither
+#: systemd nor this watchdog starts it again; an operator fixes the config.
+NO_REVIVE_EXIT = (78,)
 
 #: Sustained unlock before acting.  T6 re-acquires on its own within a
 #: few minutes when it can; the 08-31 event ran 383 minutes.
@@ -189,6 +196,8 @@ class UnitState:
     active_enter_mono: Optional[float]
     inactive_enter_mono: Optional[float]
     n_restarts: int
+    #: ExecMainStatus: the exit code of the last main process, when known.
+    exec_main_status: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -209,8 +218,8 @@ class Decision:
     cause: Optional[str]
     reason: str
     refused: tuple                # (Request, reason) pairs
-    #: radiod-restarted requests kept for the next tick: radiod is not
-    #: running yet, so there is nothing to follow.
+    #: (Request, reason) pairs of radiod-restarted requests kept for the
+    #: next tick: radiod is not running yet, or has not run READY_SETTLE_S.
     deferred: tuple = ()
     #: The request acted on, when a request caused the action.
     request: Optional[Request] = None
@@ -451,10 +460,16 @@ def decide(f: Facts) -> Decision:
     if radiod_reqs:
         rmono = f.radiod_started_mono
         if rmono is None:
-            deferred = radiod_reqs
+            deferred = [(r, "radiod is not running") for r in radiod_reqs]
         elif f.state.get("radiod_start_acted") == rmono:
             refused += [(r, "already followed this radiod start (once per radiod start)")
                         for r in radiod_reqs]
+        elif f.now_mono < rmono + READY_SETTLE_S:
+            # A recorder started now would take its anchor inside radiod's
+            # settle window, and the once-per-start guard would then refuse
+            # the correction.  Wait; the mark is set only when we act.
+            deferred = [(r, f"radiod started {f.now_mono - rmono:.0f} s ago; it settles "
+                            f"for {READY_SETTLE_S:.0f} s") for r in radiod_reqs]
         elif (rec.active_state == "active" and rec.active_enter_mono is not None
               and rec.active_enter_mono < rmono + READY_SETTLE_S):
             return Decision("restart", RADIOD,
@@ -483,6 +498,17 @@ def decide(f: Facts) -> Decision:
 
     # 4. systemd gave up: revive after its own restarts had their chance.
     if rec.active_state == "failed":
+        if rec.result == "exit-code" and rec.exec_main_status in NO_REVIVE_EXIT:
+            return none(f"the recorder exited {rec.exec_main_status} (it refused its "
+                        "config; RestartPreventExitStatus): not revived",
+                        f"the recorder exited {rec.exec_main_status}: its config needs fixing")
+        if rec.result == "timeout":
+            # A stop that timed out (SIGKILL after TimeoutStopSec) leaves the
+            # unit failed, not inactive: it may be an operator's stop, which
+            # must hold.  A start that timed out is systemd's to retry.
+            return none("the recorder failed on a timeout (an operator's stop may have "
+                        "ended this way): not revived",
+                        "the recorder failed on a timeout; not revived")
         age = (None if rec.inactive_enter_mono is None
                else f.now_mono - rec.inactive_enter_mono)
         if age is None or age < FAILED_REVIVE_S:
@@ -551,12 +577,19 @@ def decide(f: Facts) -> Decision:
 
 # --- gathering facts ---------------------------------------------------------
 
-def _systemctl(run: Callable, *args: str):
+def _systemctl(run: Callable, *args: str, timeout: float = 120):
     argv = ["systemctl", *args]
     try:
-        return run(argv, capture_output=True, text=True, timeout=120)
+        return run(argv, capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError) as exc:
         return subprocess.CompletedProcess(argv, 1, "", str(exc))
+
+
+def _int(raw) -> Optional[int]:
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def _mono(raw: str) -> Optional[float]:
@@ -571,7 +604,7 @@ def unit_state(unit: str, run: Callable = subprocess.run) -> Optional[UnitState]
     """The recorder's systemd state, or None when systemctl cannot say."""
     cp = _systemctl(run, "show", "-p", "ActiveState", "-p", "Result",
                     "-p", "ActiveEnterTimestampMonotonic",
-                    "-p", "InactiveEnterTimestampMonotonic", "-p", "NRestarts", unit)
+                    "-p", "InactiveEnterTimestampMonotonic", "-p", "NRestarts", "-p", "ExecMainStatus", unit)
     if cp.returncode != 0:
         return None
     p = dict(l.split("=", 1) for l in (cp.stdout or "").splitlines() if "=" in l)
@@ -583,7 +616,8 @@ def unit_state(unit: str, run: Callable = subprocess.run) -> Optional[UnitState]
         n = 0
     return UnitState(p["ActiveState"].strip(), (p.get("Result") or "").strip(),
                      _mono(p.get("ActiveEnterTimestampMonotonic")),
-                     _mono(p.get("InactiveEnterTimestampMonotonic")), n)
+                     _mono(p.get("InactiveEnterTimestampMonotonic")), n,
+                     _int(p.get("ExecMainStatus")))
 
 
 def started_mono(unit: str, run: Callable = subprocess.run) -> Optional[float]:
@@ -719,9 +753,9 @@ def _default_lock():
 def _act(d: Decision, run: Callable) -> tuple:
     if d.action == "start":
         _systemctl(run, "reset-failed", UNIT)
-        cp = _systemctl(run, "start", UNIT)
+        cp = _systemctl(run, "start", UNIT, timeout=ACT_TIMEOUT_S)
     else:
-        cp = _systemctl(run, "restart", UNIT)
+        cp = _systemctl(run, "restart", UNIT, timeout=ACT_TIMEOUT_S)
     tail = ((cp.stderr or cp.stdout or "").strip().splitlines() or [""])[-1]
     return cp.returncode == 0, (f"systemctl {d.action} exit {cp.returncode}"
                                 + (f" ({tail})" if tail else ""))
@@ -792,11 +826,13 @@ def tick(*, paths: Paths = Paths(), run: Callable = subprocess.run,
             save_state(paths.state, st)
             return 0
         try:
-            # The facts may have moved while we waited (an smd restart).
+            # The facts may have moved while we waited (an smd restart, or
+            # the storage ledger's stop lever).
             rec2 = unit_state(UNIT, run) or rec
             facts = dataclasses.replace(
                 facts, now_mono=mono(), recorder=rec2,
-                radiod_started_mono=started_mono(runit, run) if runit else None)
+                radiod_started_mono=started_mono(runit, run) if runit else None,
+                ledger_stopped=bool(ledger_stopped()))
             d = decide(facts)
             if d.action != "none":
                 ok, detail = _act(d, run)
@@ -823,9 +859,23 @@ def tick(*, paths: Paths = Paths(), run: Callable = subprocess.run,
             held.__exit__(None, None, None)
 
     rows += [_request_row(now, "refused", r, why) for r, why in d.refused]
-    for r in d.deferred:
-        say(f"  kept {r.reporter} {r.cause}: radiod is not running yet")
+    # A deferral because no radiod unit is known never ends on its own:
+    # say so once per request, loudly, and in the ledger.
+    warned = set(st.get("warned_deferrals") or ())
+    keep = set()
+    for r, why in d.deferred:
+        say(f"  kept {r.reporter} {r.cause}: {why}")
+        if runit is None:
+            key = f"{r.reporter}@{r.requested_utc}"
+            keep.add(key)
+            if key not in warned:
+                msg = (f"WARNING: {r.reporter} {r.cause} request deferred: no radiod unit "
+                       f"known (set [radiod] unit in topology.toml); it drops after "
+                       f"{REQUEST_MAX_AGE_S} s")
+                say(f"  {msg}")
+                rows.append(_request_row(now, "deferred", r, msg))
         _refile(r, paths.request_dir)
+    st["warned_deferrals"] = sorted(keep)
     append_ledger(rows, paths.ledger)
     save_state(paths.state, st)
     return rc
