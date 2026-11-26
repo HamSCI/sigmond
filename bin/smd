@@ -10150,7 +10150,8 @@ def _align_bringup(*, run=subprocess.run, say=print, site_timing_refreshed: bool
     changed.  It does more than read: it sets the timestd profile to
     `full`, runs `enable --now` on every metrology channel env file
     (starting a channel an operator stopped on purpose), sets
-    `lb1421_enabled` and try-restarts core-recorder, and restarts chrony.
+    `lb1421_enabled` and try-restarts core-recorder and the authority
+    manager, and restarts chrony.
     Otherwise its Step says "not re-run — unchanged; its wiring is
     bring-up's".  It logs only to the journal, so when it does run, the
     lines it logged this run (`journalctl -t sigmond-site-timing --since

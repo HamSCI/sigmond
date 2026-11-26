@@ -869,8 +869,8 @@ print(' '.join(changed))
 PYEOF
 )
     if [ -n "$TCHANGED" ]; then
-        say "precision timing tiers enabled: $TCHANGED - restarting core-recorder"
-        systemctl try-restart timestd-core-recorder 2>/dev/null
+        say "precision timing tiers enabled: $TCHANGED - restarting timestd-core-recorder, timestd-authority-manager"
+        systemctl try-restart timestd-core-recorder timestd-authority-manager 2>/dev/null
     fi
 fi
 
