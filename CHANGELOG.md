@@ -44,16 +44,23 @@ systemctl disable --now sigmond-recorder-watchdog.timer sigmond-storage-expire.t
 
 - v3.96 retired `timestd-prune` and `sigmond-t6-stuck-watchdog`.  The rollback does not
   undo that by itself.  `sigmond-t6-stuck-watchdog.timer` comes back only where v3.95's
-  install.sh runs again and enables it.  `timestd-prune.timer` stays off until an
-  operator enables it (`systemctl enable --now timestd-prune.timer`).  Under v3.95
-  nothing else trims old rows from `timestd.db`, so enable it.
+  install.sh runs again and enables it.  v3.95's `smd align` re-enables the timers its
+  deploy.toml declares, so it re-enables `timestd-prune.timer`.  After the align, run
+  `systemctl is-enabled timestd-prune.timer`, and enable it if it says otherwise
+  (`systemctl enable --now timestd-prune.timer`).  Under v3.95 nothing else trims old
+  rows from `timestd.db`.
 - The rollback loses one partial raw chunk per channel.  v3.95's recorder writes the
   open chunk to `/dev/shm` again.  About 21 minutes after it starts, its mover moves
   that chunk onto the disk, where it replaces the partial chunk v3.96 wrote.
 - v3.96 moved the timing authority out of fusion into `timestd-authority-manager.service`.
-  Rolling back to v3.95 removes that unit file with the hf-timestd checkout, and v3.95's
-  fusion hosts the authority again.  If the unit lingers, switch it off:
-  `systemctl disable --now timestd-authority-manager.service`.
+  Stop that unit BEFORE the align back to v3.95, every time.  The unit file is a symlink
+  into the hf-timestd checkout.  After the rollback the symlink dangles, but systemd
+  keeps the process running, and v3.95's fusion hosts the authority again.  Two writers
+  then share `authority.json`, the snapshot store and the T3 shadow JSONL.  First
+  `systemctl stop timestd-authority-manager.service`, then
+  `systemctl disable timestd-authority-manager.service`, and only then run the align.
+  If the align already ran, run the same two commands, then remove the dangling link
+  in `/etc/systemd/system/`.
 
 ---
 
