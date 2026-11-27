@@ -189,6 +189,14 @@ def _systemctl(run: Callable, *args: str):
         return subprocess.CompletedProcess(argv, 1, "", str(e))
 
 
+def _unloaded(run: Callable, unit: str) -> bool:
+    """systemd has dropped ``unit``: a release that deletes the file it
+    retires leaves the disable's reload nothing to keep, and reset-failed on
+    a unit no longer loaded exits 1 with nothing left to reset."""
+    cp = _systemctl(run, "show", "-p", "LoadState", "--value", unit)
+    return cp.returncode == 0 and (cp.stdout or "").strip() == "not-found"
+
+
 def _wants_links(unit: str, unit_dir: Path) -> list:
     """Every ``<unit_dir>/*.wants/<unit>``, dangling links included (a glob
     on the full pattern skips a link whose target is gone)."""
@@ -586,7 +594,7 @@ def apply_retire(retire: UnitRetire, *, apply: bool, unit_dir: Path, backup_dir:
             _systemctl(run, "disable", unit)   # a dangling unit fails here; cleared below
         if word in _RAN:
             cp = _systemctl(run, "reset-failed", unit)
-            if cp.returncode != 0:
+            if cp.returncode != 0 and not _unloaded(run, unit):
                 # Left "failed", it would read as retired again at every align.
                 tail = _last_line(cp)
                 errors.append(f"systemctl reset-failed {unit} exit {cp.returncode}"

@@ -495,6 +495,18 @@ def test_a_failed_reset_fails_the_retire(tmp_path):
     assert "systemctl reset-failed timestd-prune.service exit 1" in step.detail
 
 
+def test_a_unit_systemd_already_dropped_retires(tmp_path):
+    # AC0G-B4 2026-11-27: sigmond 1153ed6 deletes the unit files it retires, so
+    # the disable's reload unloads the unit and reset-failed exits 1 with
+    # "not loaded".  mutation check: drop the LoadState test, and it fails
+    root, unit_dir = _setup(tmp_path, link={SERVICE: "repo"})
+    fake = FakeSystemd({SERVICE: ("static", "failed")}, rcs={"reset-failed": 1},
+                       after=("not-found",))
+    step = _retire(fake, root, unit_dir, units=(SERVICE,))
+    assert step.outcome == "retired"
+    assert ["systemctl", "show", "-p", "LoadState", "--value", SERVICE] in fake.calls
+
+
 def test_a_timer_that_will_not_stop_keeps_its_service(tmp_path):
     root, unit_dir = _setup(tmp_path, link={SERVICE: "repo", TIMER: "repo"})
     fake = FakeSystemd({TIMER: ("enabled", "active"), SERVICE: ("static", "inactive")},
