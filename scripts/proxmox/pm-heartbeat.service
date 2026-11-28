@@ -16,6 +16,14 @@ Group=root
 # are host-admin operations on Proxmox; there is no unprivileged path to
 # them.
 ExecStart=/usr/local/sbin/pm-heartbeat.py
+# Idle priority: this host job must never take CPU from a guest's vhost
+# thread.  Run at normal priority, pm-heartbeat and pm-storage filled
+# KFS-OMNI-SW-PM's two housekeeping cores for ~8 s every 5 min and the
+# guest's radiod multicast dropped packets (2026-11-28).  Its children
+# (qm, pvesh, lvs) inherit this.
+Nice=19
+CPUSchedulingPolicy=idle
+IOSchedulingClass=idle
 
 StandardOutput=journal
 StandardError=journal
