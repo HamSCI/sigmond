@@ -298,26 +298,17 @@ def _expand_template(
             except PermissionError:
                 pass
 
-    # Discover configured instances from a conf_dir (e.g. /etc/radio for radiod@)
-    # Matches files like "radiod@<instance>.conf" and extracts <instance>.
+    # Discover configured instances from a conf_dir (e.g. /etc/radio for radiod@):
+    # "radiod@<instance>.conf" files and Phil's split "radiod@<instance>.conf.d/"
+    # directories (radiod reads either).  Seeing only the files marked
+    # KFS-OMNI's split-layout radiod orphaned and cost it its CPU pinning.
     if conf_dir:
+        from .radiod_confs import radiod_conf_instances
         base = template.split('@')[0]  # "radiod@.service" -> "radiod"
-        conf_path = Path(conf_dir)
-        try:
-            conf_exists = conf_path.exists()
-        except PermissionError:
-            conf_exists = False
-        if conf_exists:
-            try:
-                for cf in conf_path.glob(f"{base}@*.conf"):
-                    if cf.is_file() and not cf.is_symlink():
-                        # "radiod@kfs-rx888-omni.conf" -> "kfs-rx888-omni"
-                        instance_name = unescape_systemd_instance(
-                            cf.stem[len(base) + 1:])
-                        if instance_name:
-                            configured.add(instance_name)
-            except PermissionError:
-                pass
+        for raw in radiod_conf_instances(Path(conf_dir), base):
+            instance_name = unescape_systemd_instance(raw)
+            if instance_name:
+                configured.add(instance_name)
 
     # Discover configured instances from per-instance TOML files at
     # /etc/<component>/<instance>.toml.  This is the per-instance

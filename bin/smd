@@ -4527,8 +4527,9 @@ def _host_has_local_radiod(radiod_needed: bool = False) -> bool:
     """
     if radiod_needed or Path('/usr/local/sbin/radiod').exists():
         return True
-    return any(not p.name.startswith('radiod@bootstrap-fw')
-               for p in Path('/etc/radio').glob('radiod@*.conf'))
+    from sigmond.radiod_confs import radiod_conf_instances
+    return any(not inst.startswith('bootstrap-fw')
+               for inst in radiod_conf_instances(Path('/etc/radio')))
 
 
 def _remove_loopback_multicast_route() -> None:
@@ -7048,7 +7049,7 @@ def _restore_rerender_uploader(base) -> int:
 # command's entry and fails when a reachable function-level sigmond import
 # is missing from its list.
 _PRELOAD_MODULES = {
-    'manifest_restore': ('sigmond.doctor', 'sigmond.provenance', 'sigmond.build_preflight',
+    'manifest_restore': ('sigmond.radiod_confs', 'sigmond.doctor', 'sigmond.provenance', 'sigmond.build_preflight',
                          'sigmond.manifest_restore', 'sigmond.restore_units',
                          'sigmond.installer_args', 'sigmond.sink_state',
                          'sigmond.uploader_manifest',
@@ -7066,7 +7067,7 @@ _PRELOAD_MODULES = {
                          # site_profile's locally_managed name check reads
                          # the checkouts on disk
                          'sigmond.installer', 'sigmond.lan_order'),
-    'update': ('sigmond.cpu', 'sigmond.doctor', 'sigmond.wisdom', 'sigmond.update',
+    'update': ('sigmond.radiod_confs', 'sigmond.cpu', 'sigmond.doctor', 'sigmond.wisdom', 'sigmond.update',
                'sigmond.build_preflight',
                'sigmond.catalog', 'sigmond.discover', 'sigmond.provenance',
                'sigmond.installer_args', 'sigmond.sink_state',
@@ -7082,7 +7083,7 @@ _PRELOAD_MODULES = {
                'sigmond.component_state',
                # site_profile's locally_managed name check
                'sigmond.installer', 'sigmond.lan_order'),
-    'align': ('sigmond.align', 'sigmond.service_events',
+    'align': ('sigmond.radiod_confs', 'sigmond.align', 'sigmond.service_events',
               # _align_units_started_at's systemd 249 fallback
               'sigmond.systemd_ts', 'sigmond.align_apply', 'sigmond.align_live',
               'sigmond.build_preflight',
@@ -12145,10 +12146,11 @@ def _rx888_queuedepth_findings(read_configs=None) -> list:
         def read_configs():
             out = {}
             try:
-                for p in sorted(Path('/etc/radio').glob('radiod@*.conf')):
+                from sigmond.radiod_confs import radiod_conf_instances, read_radiod_conf
+                for _i, p in sorted(radiod_conf_instances(Path('/etc/radio')).items()):
                     try:
-                        out[str(p)] = p.read_text(errors='replace')
-                    except OSError:
+                        out[str(p)] = read_radiod_conf(p)
+                    except (OSError, UnicodeDecodeError):
                         continue
             except OSError:
                 return {}
@@ -13198,8 +13200,8 @@ def _bringup_wait_streaming(timeout_s: int = 300, settle_s: int = 15,
     RX888/threads are still stabilizing.  Returns True once all are streaming,
     False on timeout (advisory — the caller continues either way)."""
     import time, glob
-    confs = glob.glob('/etc/radio/radiod@*.conf')
-    ids = [os.path.basename(c)[len('radiod@'):-len('.conf')] for c in confs]
+    from sigmond.radiod_confs import radiod_conf_instances
+    ids = sorted(radiod_conf_instances('/etc/radio'))
     if not ids:
         _warn('wait-streaming: no /etc/radio/radiod@*.conf found — skipping '
               'the streaming gate')
@@ -13504,8 +13506,8 @@ def _bringup_probe(check: str, smd_bin: str):
         ok, detail = _instances_bound(check.split(':', 1)[1])
         return (ok, detail, False)
     if check == 'radiod-configured':
-        d = Path('/etc/radio')
-        confs = list(d.glob('radiod@*.conf')) if d.is_dir() else []
+        from sigmond.radiod_confs import radiod_conf_instances
+        confs = radiod_conf_instances(Path('/etc/radio'))
         return (bool(confs), f"/etc/radio: {len(confs)} radiod conf(s)", False)
     if check == 'radiod-published':
         # Every radiod on this host running, its status name resolving from
@@ -18076,6 +18078,39 @@ def _refuse_radiod_shortfall(unit_names: list, shortfall: int,
     raise RadiodCoreShortfall(msg)
 
 
+def _sweep_orphan_radiod_drop_ins(valid_unit_names: set,
+                                  sys_dir: Path = Path('/etc/systemd/system')) -> bool:
+    """Remove the affinity drop-in dirs of radiod instances that no longer exist.
+
+    They are left behind when an instance is removed from /etc/radio/ and
+    would otherwise create ghost entries in CPU affinity reports.  A radiod
+    that is RUNNING is never an orphan, whatever sigmond's view of /etc/radio
+    says: stripping its pinning puts radiod on the decoders' cores at its
+    next restart.  KFS-OMNI (2026-11-13 to 11-28) lost its pinning exactly
+    so, when its conf moved to the radiod@<id>.conf.d/ layout sigmond did not
+    yet read; it is kept with a warning instead.  Returns True if any dir was
+    removed.
+    """
+    removed = False
+    for p in sorted(sys_dir.glob('radiod@*.service.d')):
+        unit_name = p.name[:-2]  # strip '.d'
+        if '@.' in unit_name:
+            continue  # skip bare template radiod@.service.d
+        if unit_name in valid_unit_names:
+            continue
+        if not (p / _SMD_AFFINITY_DROP_IN).exists():
+            continue
+        state = _run(['systemctl', 'is-active', unit_name]).stdout.strip()
+        if state in ('active', 'activating', 'reloading'):
+            _warn(f'{unit_name} is running but sigmond finds no /etc/radio '
+                  f'conf for it; keeping its CPU pinning')
+            continue
+        _ok(f'removing orphaned radiod affinity drop-in for {unit_name}')
+        _run(['rm', '-rf', str(p)], sudo=True)
+        removed = True
+    return removed
+
+
 def _ensure_radiod_affinity_drop_ins(radiod_units: list,
                                      topology_cpu_affinity=None,
                                      *, allow_shared: bool = False) -> bool:
@@ -18126,20 +18161,8 @@ def _ensure_radiod_affinity_drop_ins(radiod_units: list,
     wrote_any = False
     units_to_restart: list[str] = []
 
-    # Remove drop-in dirs for radiod instances that no longer exist.
-    # These are left behind when an instance is removed from /etc/radio/
-    # and would otherwise create ghost entries in CPU affinity reports.
-    sys_dir = Path('/etc/systemd/system')
-    for p in sorted(sys_dir.glob('radiod@*.service.d')):
-        unit_name = p.name[:-2]  # strip '.d'
-        if '@.' in unit_name:
-            continue  # skip bare template radiod@.service.d
-        if unit_name not in valid_unit_names:
-            drop_in = p / _SMD_AFFINITY_DROP_IN
-            if drop_in.exists():
-                _ok(f'removing orphaned radiod affinity drop-in for {unit_name}')
-                _run(['rm', '-rf', str(p)], sudo=True)
-                wrote_any = True
+    if _sweep_orphan_radiod_drop_ins(valid_unit_names):
+        wrote_any = True
 
     all_radiod = set().union(*placement.values()) if placement else set()
     for unit_ref in sorted_units:
@@ -18906,6 +18929,10 @@ def cmd_diag_cpu_affinity(args) -> int:
         if ua.mask_mismatch:
             _warn(f'{ua.unit}  (pid {ua.main_pid})  actual CPUs: {proc_cpus_str}{sd_note}')
             _info(f'       {ua.role} overrides systemd affinity via sched_setaffinity()')
+        elif ua.unpinned_radiod:
+            _warn(f'{ua.unit}  (pid {ua.main_pid})  CPUs: {proc_cpus_str}  '
+                  f'NOT PINNED: no CPUAffinity, so it shares the decoders\' cores; '
+                  f'fix with `smd admin diag cpu-affinity --apply`')
         else:
             _ok(f'{ua.unit}  (pid {ua.main_pid})  CPUs: {proc_cpus_str}{sd_note}')
 
@@ -23276,8 +23303,9 @@ def _wisdom_machine_facts() -> dict:
     except OSError:
         facts['radiod_l3_bytes'] = 'unknown-from-guest (resctrl is host-only)'
     try:
-        for conf in sorted(Path('/etc/radio').glob('radiod@*.conf')):
-            txt = conf.read_text()
+        from sigmond.radiod_confs import radiod_conf_instances, read_radiod_conf
+        for _i, conf in sorted(radiod_conf_instances(Path('/etc/radio')).items()):
+            txt = read_radiod_conf(conf)
             if '[rx888]' in txt:
                 tail = txt.split('[rx888]', 1)[1]
                 for ln in tail.splitlines():
@@ -30469,17 +30497,14 @@ def _radiod_rx888_nominals(confdir=None) -> list:
     """
     base = Path(confdir) if confdir is not None else Path('/etc/radio')
     out = []
-    try:
-        confs = sorted(base.glob('radiod@*.conf'))
-    except OSError:
-        return []
-    for c in confs:
+    from sigmond.radiod_confs import radiod_conf_instances, read_radiod_conf
+    for inst, c in sorted(radiod_conf_instances(base).items()):
         try:
-            text = c.read_text(errors='replace')
-        except OSError:
+            text = read_radiod_conf(c)
+        except (OSError, UnicodeDecodeError):
             continue
         got = _radiod_conf_rx888(text)
-        out.append({'instance': c.stem.split('@', 1)[1],
+        out.append({'instance': inst,
                     'serial': got['serial'],
                     'samprate': got['samprate']})
     return out

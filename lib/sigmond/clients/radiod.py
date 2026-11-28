@@ -24,16 +24,17 @@ class RadiodAdapter(ClientAdapter):
             return view
 
         view.installed = True
-        for conf in sorted(RADIO_CONF_DIR.glob("radiod@*.conf")):
-            instance = conf.stem.split("@", 1)[1]
+        from ..radiod_confs import radiod_conf_instances
+        for instance, conf in sorted(radiod_conf_instances(RADIO_CONF_DIR).items()):
             view.instances.append(self._read_instance(instance, conf))
         return view
 
     def _read_instance(self, instance: str, path: Path) -> InstanceView:
         samprate = 0
         status_dns = ""
+        from ..radiod_confs import read_radiod_conf
         try:
-            text = path.read_text()
+            text = read_radiod_conf(path)
         except OSError:
             return InstanceView(instance=instance)
 

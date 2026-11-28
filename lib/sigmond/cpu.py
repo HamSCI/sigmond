@@ -607,7 +607,7 @@ def _run_capture(cmd: list[str]) -> subprocess.CompletedProcess:
 def get_radiod_instances() -> list[str]:
     """Return sorted list of radiod@*.service unit names.
 
-    The authoritative source is /etc/radio/radiod@*.conf (matching the
+    The authoritative source is /etc/radio/radiod@*.conf or .conf.d (matching the
     ka9q-radio shim deploy.toml conf_dir).  Instances with a conf file
     exist regardless of whether they have ever been started.  Drop-in dirs
     are NOT used as a source because they are artifacts of past smd runs and
@@ -624,14 +624,11 @@ def get_radiod_instances() -> list[str]:
     """
     found: set[str] = set()
 
-    # Source 1: conf files in /etc/radio/ — authoritative configured instances
-    conf_dir = Path('/etc/radio')
-    if conf_dir.exists():
-        for cf in conf_dir.glob('radiod@*.conf'):
-            if cf.is_file() and not cf.is_symlink():
-                instance = cf.stem[len('radiod@'):]
-                if instance:
-                    found.add(f'radiod@{instance}.service')
+    # Source 1: /etc/radio/radiod@<id>.conf or radiod@<id>.conf.d/ — the
+    # authoritative configured instances (radiod reads either layout).
+    from .radiod_confs import radiod_conf_instances
+    for instance in radiod_conf_instances(Path('/etc/radio')):
+        found.add(f'radiod@{instance}.service')
 
     # Source 2: units currently ACTIVE in systemd whose conf file may have
     # been removed mid-session.  We filter on active state so that loaded-
@@ -1228,6 +1225,13 @@ class UnitAffinity:
     foreign_drop_ins: list = field(default_factory=list)
 
     @property
+    def unpinned_radiod(self) -> bool:
+        """A running radiod that systemd does not confine to any CPUs: it then
+        runs wherever the scheduler puts it, on the decoders' cores when the
+        kernel isolates radiod's (KFS-OMNI 2026-11-28)."""
+        return self.role == 'radiod' and bool(self.main_pid) and not self.systemd_mask
+
+    @property
     def mask_mismatch(self) -> bool:
         """True if systemd said one thing and the process is actually on another."""
         return (bool(self.systemd_mask)
@@ -1579,6 +1583,13 @@ def _batch_systemctl_show(unit_names: list[str]) -> dict[str, dict[str, str]]:
     return result
 
 
+def unpinned_radiod_warnings(units: list) -> list:
+    """One warning per running radiod with no systemd CPU pinning."""
+    return [f"{u.unit} is running with no CPU pinning (no CPUAffinity): it "
+            f"shares the decoders' cores. Fix: `smd admin diag cpu-affinity --apply`"
+            for u in units if u.unpinned_radiod]
+
+
 def build_affinity_report(
     topology_cpu_affinity: Optional[dict] = None,
     topology_cpu_freq: Optional[dict] = None,
@@ -1647,7 +1658,7 @@ def build_affinity_report(
     else:
         contention = []
 
-    warnings: list = []
+    warnings: list = unpinned_radiod_warnings(units)
 
     # Expected governor is configurable via topology.toml
     # [cpu_affinity] radiod_governor.  Defaults to 'performance' for

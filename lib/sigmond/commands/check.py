@@ -236,9 +236,10 @@ def _present_serials() -> set:
 def _radiod_status() -> dict:
     from ..radiod_rename import status_of
     out = {}
-    for conf in sorted(Path('/etc/radio').glob('radiod@*.conf')):
+    from ..radiod_confs import radiod_conf_instances, read_radiod_conf
+    for inst, conf in sorted(radiod_conf_instances(Path('/etc/radio')).items()):
         try:
-            out[conf.name[len('radiod@'):-len('.conf')]] = status_of(conf.read_text())
+            out[inst] = status_of(read_radiod_conf(conf))
         except (OSError, UnicodeDecodeError):
             pass
     return out
